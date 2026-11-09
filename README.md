@@ -1,34 +1,50 @@
 # Spacepeek
 
-Space-bar file previewer for Windows Explorer (like macOS Quick Look).
-
-## What it does
-
-Select a file in File Explorer, press Space, and a single preview window shows its contents. Press Space or Esc to close it.
+Space-bar file preview for Windows Explorer. Select a file, press Space, and a single topmost window shows a bounded text preview. Press Space or Esc again to close it.
 
 ## Status
 
-First vertical slice. The preview core (bounded reads, binary detection, allow-list, cancellation, state machine, key interception decisions) is implemented and unit-tested in `src/lib.rs`. The Windows runtime (low-level keyboard hook, preview window, Explorer interop) is not yet implemented; `cargo build` and `cargo test` pass on Linux for the platform-independent core.
+First runnable vertical slice.
 
-## Building
+The preview core (bounded reads, binary sniffing, extension allow-list, cancellation, state machine, and Space interception rules) is implemented and unit-tested. The Windows runtime is wired: single-instance mutex, low-level keyboard hook, Explorer selection lookup, and one `SpacepeekPreview` window. Every UI transition goes through `state::step`.
+
+Compile-checked for the Windows targets below on a Linux host. **Never executed on Windows.** No timings are claimed.
+
+## Supported platform
+
+Windows 11 only, x86_64 and aarch64. There is no compatibility code for older Windows versions.
+
+## Build
+
+On Windows 11:
 
 ```bash
 cargo build --release
 ```
 
-Supported target: **Windows 11 only** (x86_64). No compatibility code for older Windows versions.
+From Linux, cross-check the Windows targets (this does not produce a machine that has been run):
 
-## Running
+```bash
+cargo check --target x86_64-pc-windows-gnu
+cargo check --target aarch64-pc-windows-msvc
+```
 
-Run `spacepeek.exe` on Windows. On Linux/macOS the binary prints "Spacepeek runs on Windows only" and exits with code 1.
+## Run
 
-## Manual testing steps (Windows 11)
+Start `spacepeek.exe` and leave it running. A second start exits immediately if the named mutex is already held. On Linux and macOS the binary prints `Spacepeek runs on Windows only` and exits with code 1.
 
-1. Build and run `spacepeek.exe`.
-2. Open File Explorer (`CabinetWClass`).
-3. Select a text file (`.txt`, `.md`, `.log`, `.json`, `.toml`, `.yaml`, `.yml`, `.ini`, `.rs`, `.py`, `.js`, `.ts`, `.c`, `.h`, `.cpp`, `.cs`, `.xml`, `.html`, `.css`, `.sh`, `.ps1`, `.bat`).
-4. Press Space. The preview window should appear showing the file content.
-5. Press Space or Esc to close the window.
+## Manual Explorer test (Windows 11)
+
+1. Build and start `spacepeek.exe`.
+2. Open File Explorer and select a text file (`.txt`, `.md`, `.log`, `.csv`, `.json`, `.toml`, `.yaml`, `.yml`, `.ini`, `.rs`, `.py`, `.js`, `.ts`, `.c`, `.h`, `.cpp`, `.cs`, `.xml`, `.html`, `.css`, `.sh`, `.ps1`, `.bat`).
+3. Press Space. A preview window should open over that Explorer window with the file text.
+4. Press Space or Esc. The window closes and focus returns to Explorer.
+5. Press F2 to rename, then type a space. The space is inserted into the rename edit.
+6. Click the address bar and press Space. The space is typed there.
+7. Select a binary file or an extension outside the allow-list and press Space. The window shows an error message.
+8. With the preview open, activate another app. The preview closes.
+
+If nothing is selected, or the selection has no filesystem path, the window shows `io error: No file is selected.`
 
 ## Automated tests
 
@@ -36,14 +52,15 @@ Run `spacepeek.exe` on Windows. On Linux/macOS the binary prints "Spacepeek runs
 cargo test
 ```
 
+The tests run on Linux. They cover the platform-independent core only.
+
 ## Limitations
 
-- First slice only; Windows runtime (hook + window) not yet wired up.
-- No process isolation/sandbox yet (parsing runs in-process, mitigated only by bounded reads, allow-list, no execution).
-- Low-level keyboard hook means Space interception is global-hook based.
-- Only first selected item.
-- Text only; binary files show error.
-- No timings claimed.
+- No process isolation or sandbox. Parsing runs in-process. The mitigations are a bounded read, an extension allow-list, binary sniffing, and never executing the file.
+- Space is intercepted with a global low-level keyboard hook.
+- Only the first selected item is previewed.
+- Text formats only. Binary and unsupported files show a message.
+- The Windows runtime has not been executed. Compile checks are not a substitute for that.
 
 ## License
 
