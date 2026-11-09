@@ -1,0 +1,233 @@
+use crate::preview::{CancelToken, Generation, Preview, PreviewError};
+use std::path::PathBuf;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PreviewState {
+    Hidden,
+    Loading {
+        gen: Generation,
+        path: PathBuf,
+    },
+    Showing {
+        gen: Generation,
+        path: PathBuf,
+        preview: Preview,
+    },
+    Failed {
+        gen: Generation,
+        path: PathBuf,
+        error: PreviewError,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Event {
+    SpacePressed(PathBuf),
+    EscPressed,
+    LoadFinished(Generation, Result<Preview, PreviewError>),
+    FocusLost,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Effect {
+    StartLoad { gen: Generation, path: PathBuf },
+    ShowWindow,
+    HideWindow,
+    CancelLoad,
+}
+
+pub fn step(
+    state: PreviewState,
+    event: Event,
+    cancel: &CancelToken,
+) -> (PreviewState, Vec<Effect>) {
+    match (&state, event) {
+        (PreviewState::Hidden, Event::SpacePressed(path)) => {
+            let gen = cancel.generate();
+            (
+                PreviewState::Loading {
+                    gen,
+                    path: path.clone(),
+                },
+                vec![Effect::StartLoad { gen, path }],
+            )
+        }
+        (
+            PreviewState::Loading { .. }
+            | PreviewState::Showing { .. }
+            | PreviewState::Failed { .. },
+            Event::SpacePressed(_),
+        ) => (PreviewState::Hidden, vec![Effect::HideWindow, Effect::CancelLoad]),
+        (PreviewState::Showing { .. }, Event::EscPressed)
+        | (PreviewState::Failed { .. }, Event::EscPressed) => {
+            (PreviewState::Hidden, vec![Effect::HideWindow])
+        }
+        (PreviewState::Hidden, Event::EscPressed) => (PreviewState::Hidden, vec![]),
+        (PreviewState::Loading { .. }, Event::EscPressed) => (state, vec![]),
+        (_, Event::FocusLost) => {
+            let cancel_effect = match &state {
+                PreviewState::Hidden => None,
+                PreviewState::Loading { .. } => Some(Effect::CancelLoad),
+                PreviewState::Showing { .. } | PreviewState::Failed { .. } => {
+                    Some(Effect::HideWindow)
+                }
+            };
+            match cancel_effect {
+                None => (PreviewState::Hidden, vec![]),
+                Some(e) => (PreviewState::Hidden, vec![e]),
+            }
+        }
+        (_, Event::LoadFinished(gen, result)) => {
+            if cancel.is_cancelled(&gen) {
+                return (PreviewState::Hidden, vec![]);
+            }
+            if let PreviewState::Loading { gen: cur, path } = &state {
+                if *cur == gen {
+                    return match result {
+                        Ok(preview) => (
+                            PreviewState::Showing {
+                                gen,
+                                path: path.clone(),
+                                preview,
+                            },
+                            vec![Effect::ShowWindow],
+                        ),
+                        Err(error) => (
+                            PreviewState::Failed {
+                                gen,
+                                path: path.clone(),
+                                error,
+                            },
+                            vec![Effect::ShowWindow],
+                        ),
+                    };
+                }
+            }
+            (state, vec![])
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path() -> PathBuf {
+        PathBuf::from("C:\\test\\file.txt")
+    }
+
+    fn sample_preview() -> Preview {
+        Preview {
+            content: "hi".to_string(),
+            truncated: false,
+            line_count: 1,
+        }
+    }
+
+    fn showing() -> PreviewState {
+        PreviewState::Showing {
+            gen: Generation::new(1),
+            path: path(),
+            preview: sample_preview(),
+        }
+    }
+
+    #[test]
+    fn space_from_hidden_starts_load() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(PreviewState::Hidden, Event::SpacePressed(path()), &cancel);
+        let expected_gen = Generation::new(0);
+        assert_eq!(
+            state,
+            PreviewState::Loading {
+                gen: expected_gen,
+                path: path(),
+            }
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::StartLoad {
+                gen: expected_gen,
+                path: path(),
+            }]
+        );
+    }
+
+    #[test]
+    fn space_from_showing_toggles_to_hidden() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(showing(), Event::SpacePressed(path()), &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(effects, vec![Effect::HideWindow, Effect::CancelLoad]);
+    }
+
+    #[test]
+    fn esc_from_showing_hides() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(showing(), Event::EscPressed, &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(effects, vec![Effect::HideWindow]);
+    }
+
+    #[test]
+    fn focus_lost_hides_showing() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(showing(), Event::FocusLost, &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(effects, vec![Effect::HideWindow]);
+    }
+
+    #[test]
+    fn stale_load_finished_is_ignored() {
+        let cancel = CancelToken::new();
+        let state = PreviewState::Loading {
+            gen: Generation::new(5),
+            path: path(),
+        };
+        let (state, effects) =
+            step(state, Event::LoadFinished(Generation::new(9), Ok(sample_preview())), &cancel);
+        assert_eq!(
+            state,
+            PreviewState::Loading {
+                gen: Generation::new(5),
+                path: path(),
+            }
+        );
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn fresh_load_finished_shows() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(
+            PreviewState::Loading {
+                gen: Generation::new(5),
+                path: path(),
+            },
+            Event::LoadFinished(Generation::new(5), Ok(sample_preview())),
+            &cancel,
+        );
+        assert_eq!(
+            state,
+            PreviewState::Showing {
+                gen: Generation::new(5),
+                path: path(),
+                preview: sample_preview(),
+            }
+        );
+        assert_eq!(effects, vec![Effect::ShowWindow]);
+    }
+
+    #[test]
+    fn failed_state_space_toggles_to_hidden() {
+        let cancel = CancelToken::new();
+        let state = PreviewState::Failed {
+            gen: Generation::new(1),
+            path: path(),
+            error: PreviewError::Unsupported,
+        };
+        let (state, effects) = step(state, Event::SpacePressed(path()), &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(effects, vec![Effect::HideWindow, Effect::CancelLoad]);
+    }
+}
