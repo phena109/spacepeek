@@ -1488,6 +1488,12 @@ mod win {
                 header: header.clone(),
                 message: message.clone(),
             },
+            // Step 2 paints the bitmap. Keep it on the presented value so the
+            // header and the pixels stay together; the body has no edit control.
+            Presented::Image { header, image } => Presented::Image {
+                header: header.clone(),
+                image: std::sync::Arc::clone(image),
+            },
         }
     }
 
@@ -1542,7 +1548,7 @@ mod win {
                 suppress_caret(edit);
                 true
             }
-            Presented::Message { .. } => {
+            Presented::Message { .. } | Presented::Image { .. } => {
                 destroy_edit();
                 true
             }

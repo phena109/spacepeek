@@ -1,6 +1,7 @@
 pub mod chrome;
 pub mod cli;
 pub mod geometry;
+pub mod image_preview;
 pub mod keys;
 pub mod preview;
 pub mod selection;
@@ -15,6 +16,10 @@ pub use cli::{parse_command, Command};
 pub use geometry::{
     effective_dpi, place_preview, preview_placement, scaled_font_height, scaled_preview_size,
     Placement, PxRect, PxSize, LOGICAL_FONT_HEIGHT, LOGICAL_PREVIEW_HEIGHT, LOGICAL_PREVIEW_WIDTH,
+};
+pub use image_preview::{
+    decode_image, fit_size, format_image_details, sniff_image, DecodedImage, ImageError,
+    ImageFormat, ImageLimits,
 };
 pub use keys::{
     classify_typeahead_vk, decide_hook_key, esc_action, hook_key_from_vk, nav_reload_due,

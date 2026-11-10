@@ -348,6 +348,7 @@ mod tests {
             line_count: 1,
             truncation: None,
             total_bytes: 2,
+            image: None,
         }
     }
 

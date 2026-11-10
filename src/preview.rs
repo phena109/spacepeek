@@ -1,8 +1,12 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+use crate::image_preview::{
+    decode_image, sniff_image, DecodedImage, ImageError, ImageFormat, ImageLimits,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeniedKind {
@@ -45,6 +49,8 @@ pub enum PreviewError {
     Shortcut {
         target: Option<String>,
     },
+    /// PNG or JPEG that could not be shown. The inner error is the sentence.
+    Image(ImageError),
 }
 
 impl PartialEq for PreviewError {
@@ -56,6 +62,7 @@ impl PartialEq for PreviewError {
             (PreviewError::Denied(a), PreviewError::Denied(b)) => a == b,
             (PreviewError::Directory { count: a }, PreviewError::Directory { count: b }) => a == b,
             (PreviewError::Shortcut { target: a }, PreviewError::Shortcut { target: b }) => a == b,
+            (PreviewError::Image(a), PreviewError::Image(b)) => a == b,
             (PreviewError::Binary, PreviewError::Binary)
             | (PreviewError::Empty, PreviewError::Empty)
             | (PreviewError::Cancelled, PreviewError::Cancelled) => true,
@@ -77,6 +84,7 @@ impl std::fmt::Display for PreviewError {
             PreviewError::Cancelled => write!(f, "cancelled"),
             PreviewError::Io(e) => write!(f, "io error: {e}"),
             PreviewError::Shortcut { .. } => write!(f, "shortcut"),
+            PreviewError::Image(err) => write!(f, "{err}"),
         }
     }
 }
@@ -105,6 +113,7 @@ impl PreviewError {
                 "Shortcut — previewing shortcuts isn't supported yet".to_string()
             }
             PreviewError::Io(err) => io_user_message(name, err),
+            PreviewError::Image(err) => err.user_message(),
         }
     }
 
@@ -121,6 +130,7 @@ impl PreviewError {
             PreviewError::Cancelled => "Cancelled".to_string(),
             PreviewError::Shortcut { .. } => "Shortcut".to_string(),
             PreviewError::Io(err) => io_header_status(err).to_string(),
+            PreviewError::Image(err) => err.header_status(),
         }
     }
 }
@@ -244,6 +254,8 @@ pub struct Preview {
     pub truncation: Option<Truncation>,
     /// File size in bytes, including a leading BOM. The header uses this.
     pub total_bytes: u64,
+    /// PNG or JPEG pixels. `None` for a text preview.
+    pub image: Option<Arc<DecodedImage>>,
 }
 
 /// Default file-byte budget for the EDIT control.
@@ -259,6 +271,7 @@ pub const BINARY_SNIFF_BYTES: usize = 8192;
 pub struct PreviewLimits {
     pub max_bytes: usize,
     pub max_lines: usize,
+    pub image: ImageLimits,
 }
 
 impl Default for PreviewLimits {
@@ -266,6 +279,7 @@ impl Default for PreviewLimits {
         Self {
             max_bytes: DEFAULT_MAX_BYTES,
             max_lines: DEFAULT_MAX_LINES,
+            image: ImageLimits::default(),
         }
     }
 }
@@ -275,16 +289,14 @@ impl PreviewLimits {
         Self {
             max_bytes,
             max_lines,
+            image: ImageLimits::default(),
         }
     }
 }
 
-/// Known non-text extensions. Add a row to refuse that extension before the sniff.
-/// Image rows stay separate so a later preview can take them over.
+/// Known non-text extensions refused before the byte sniff.
+/// PNG and JPEG are identified by magic bytes instead of this list.
 const DENIED_EXTENSIONS: &[(&str, DeniedKind)] = &[
-    ("png", DeniedKind::Image),
-    ("jpg", DeniedKind::Image),
-    ("jpeg", DeniedKind::Image),
     ("gif", DeniedKind::Image),
     ("bmp", DeniedKind::Image),
     ("webp", DeniedKind::Image),
@@ -419,6 +431,17 @@ pub fn load_text_preview<P: AsRef<Path>>(
     if total_bytes == 0 {
         return Err(PreviewError::Empty);
     }
+    // Magic bytes, not the extension. The prefix is rewound so the text path
+    // below still sees the whole file.
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+    let mut prefix = [0u8; IMAGE_HEADER_BYTES];
+    let prefix_len = read_prefix(&mut file, &mut prefix)?;
+    file.seek(SeekFrom::Start(0))?;
+    if let Some(format) = sniff_image(&prefix[..prefix_len]) {
+        return load_image_preview(file, total_bytes, format, &limits.image, cancel, gen);
+    }
     let mut reader = BufReader::new(&mut file);
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -483,7 +506,90 @@ pub fn load_text_preview<P: AsRef<Path>>(
         line_count: prepared.lines_shown,
         truncation,
         total_bytes,
+        image: None,
     })
+}
+
+/// How many leading bytes [`sniff_image`] needs. PNG's signature is 8 bytes.
+const IMAGE_HEADER_BYTES: usize = 8;
+
+fn read_prefix(file: &mut File, buf: &mut [u8]) -> Result<usize, PreviewError> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(PreviewError::Io(err)),
+        }
+    }
+    Ok(filled)
+}
+
+fn load_image_preview(
+    mut file: File,
+    mut total_bytes: u64,
+    format: ImageFormat,
+    limits: &ImageLimits,
+    cancel: &CancelToken,
+    gen: Generation,
+) -> Result<Preview, PreviewError> {
+    if total_bytes > limits.max_file_bytes {
+        return Err(PreviewError::Image(ImageError::FileTooLarge {
+            bytes: total_bytes,
+        }));
+    }
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+    let bytes = read_whole_image(&mut file, limits.max_file_bytes, cancel, gen)?;
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+    let read_len = bytes.len() as u64;
+    if read_len > total_bytes {
+        total_bytes = read_len;
+    }
+    let decoded = decode_image(&bytes, format, limits).map_err(PreviewError::Image)?;
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+    Ok(Preview {
+        content: String::new(),
+        truncated: false,
+        line_count: 0,
+        truncation: None,
+        total_bytes,
+        image: Some(Arc::new(decoded)),
+    })
+}
+
+/// Read until EOF, stopping if the file grows past `max_file_bytes`.
+fn read_whole_image(
+    file: &mut File,
+    max_file_bytes: u64,
+    cancel: &CancelToken,
+    gen: Generation,
+) -> Result<Vec<u8>, PreviewError> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if cancel.is_cancelled(&gen) {
+            return Err(PreviewError::Cancelled);
+        }
+        let n = match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(PreviewError::Io(err)),
+        };
+        let next = (bytes.len() as u64).saturating_add(n as u64);
+        if next > max_file_bytes {
+            return Err(PreviewError::Image(ImageError::FileTooLarge { bytes: next }));
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    Ok(bytes)
 }
 
 fn is_shortcut(path: &Path) -> bool {
@@ -821,6 +927,10 @@ fn decode_utf16_prefix(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image_preview::ImageError;
+    use image::codecs::jpeg::JpegEncoder;
+    use image::codecs::png::PngEncoder;
+    use image::{ExtendedColorType, ImageEncoder};
     use std::fs;
     use std::path::PathBuf;
 
@@ -1036,14 +1146,19 @@ mod tests {
     #[test]
     fn denied_extensions_use_their_own_kind() {
         let dir = tempfile::tempdir().unwrap();
-        let png = write_file(&dir, "pic.PNG", b"not really a png\x00");
+        let gif = write_file(&dir, "anim.GIF", b"not really a gif\x00");
         assert_eq!(
-            load(&png, PreviewLimits::default()),
+            load(&gif, PreviewLimits::default()),
             Err(PreviewError::Denied(DeniedKind::Image))
         );
-        let jpg = write_file(&dir, "photo.JpEg", b"hello");
+        let bmp = write_file(&dir, "pic.BmP", b"hello");
         assert_eq!(
-            load(&jpg, PreviewLimits::default()),
+            load(&bmp, PreviewLimits::default()),
+            Err(PreviewError::Denied(DeniedKind::Image))
+        );
+        let webp = write_file(&dir, "pic.webp", b"hello");
+        assert_eq!(
+            load(&webp, PreviewLimits::default()),
             Err(PreviewError::Denied(DeniedKind::Image))
         );
         for name in [
@@ -1072,7 +1187,12 @@ mod tests {
 
     #[test]
     fn denied_kind_matches_case_insensitively() {
-        assert_eq!(denied_kind(Path::new("A.PnG")), Some(DeniedKind::Image));
+        assert_eq!(denied_kind(Path::new("A.GIF")), Some(DeniedKind::Image));
+        assert_eq!(denied_kind(Path::new("A.PnG")), None);
+        assert_eq!(denied_kind(Path::new("photo.jpg")), None);
+        assert_eq!(denied_kind(Path::new("photo.JPEG")), None);
+        assert_eq!(denied_kind(Path::new("photo.jpe")), None);
+        assert_eq!(denied_kind(Path::new("photo.jfif")), None);
         assert_eq!(
             denied_kind(Path::new(r"C:\temp\app.EXE")),
             Some(DeniedKind::Binary)
@@ -1546,9 +1666,13 @@ mod tests {
         assert_eq!(err.to_string(), "empty file");
         assert_ne!(err.to_string(), err.user_message("empty.txt"));
 
+        // PNG is no longer refused by extension, so an empty file is empty.
         let png = write_file(&dir, "photo.png", b"");
+        assert_eq!(load(&png, PreviewLimits::default()), Err(PreviewError::Empty));
+        // A still-denied image extension is refused before the empty check.
+        let gif = write_file(&dir, "anim.gif", b"");
         assert_eq!(
-            load(&png, PreviewLimits::default()),
+            load(&gif, PreviewLimits::default()),
             Err(PreviewError::Denied(DeniedKind::Image))
         );
     }
@@ -1703,5 +1827,166 @@ mod tests {
         assert_eq!(format_compact_size(1024 * 1024), "1 MB");
         assert_eq!(format_compact_size(1_258_291), "1.2 MB");
         assert_eq!(format_compact_size(1024 * 1024 * 1024), "1 GB");
+
+        let too_big = PreviewError::Image(ImageError::TooLarge {
+            width: 12_000,
+            height: 9_000,
+        });
+        assert_eq!(
+            too_big.user_message("photo.png"),
+            "This image is too large to preview (12,000 × 9,000 pixels)."
+        );
+        assert_eq!(too_big.header_status(), "Too large");
+        assert_eq!(too_big, too_big);
+        assert_ne!(
+            too_big,
+            PreviewError::Image(ImageError::FileTooLarge { bytes: 10 })
+        );
+        let damaged = PreviewError::Image(ImageError::Corrupt);
+        assert_eq!(
+            damaged.user_message("notes.png"),
+            ImageError::Corrupt.user_message()
+        );
+        assert_eq!(damaged.header_status(), ImageError::Corrupt.header_status());
+        assert_eq!(damaged.to_string(), "corrupt image");
+        assert_ne!(damaged, PreviewError::Image(ImageError::Unsupported));
+    }
+
+    fn rgba_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        PngEncoder::new(&mut buf)
+            .write_image(rgba, width, height, ExtendedColorType::Rgba8)
+            .unwrap();
+        buf
+    }
+
+    fn rgb_jpeg(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        JpegEncoder::new_with_quality(&mut buf, 100)
+            .write_image(rgb, width, height, ExtendedColorType::Rgb8)
+            .unwrap();
+        buf
+    }
+
+    #[test]
+    fn magic_bytes_win_over_the_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = rgba_png(2, 1, &[10, 20, 30, 255, 10, 20, 30, 255]);
+        let as_text = write_file(&dir, "foo.txt", &png);
+        let preview = load(&as_text, PreviewLimits::default()).unwrap();
+        let image = preview.image.as_ref().expect("png bytes are an image");
+        assert_eq!(image.format, crate::image_preview::ImageFormat::Png);
+        assert_eq!((image.source_width, image.source_height), (2, 1));
+        assert_eq!((image.width, image.height), (2, 1));
+        assert_eq!(image.bgra, vec![30, 20, 10, 255, 30, 20, 10, 255]);
+        assert!(preview.content.is_empty());
+        assert_eq!(preview.total_bytes, png.len() as u64);
+
+        let named = write_file(&dir, "photo.PNG", &png);
+        let preview = load(&named, PreviewLimits::default()).unwrap();
+        assert_eq!(
+            preview.image.as_ref().map(|img| img.format),
+            Some(crate::image_preview::ImageFormat::Png)
+        );
+
+        let jpeg = rgb_jpeg(8, 8, &vec![30u8, 40, 50].repeat(64));
+        let as_text = write_file(&dir, "scan.txt", &jpeg);
+        let preview = load(&as_text, PreviewLimits::default()).unwrap();
+        let image = preview.image.expect("jpeg bytes are an image");
+        assert_eq!(image.format, crate::image_preview::ImageFormat::Jpeg);
+        assert_eq!((image.width, image.height), (8, 8));
+
+        let jfif = write_file(&dir, "photo.jfif", &jpeg);
+        assert!(load(&jfif, PreviewLimits::default())
+            .unwrap()
+            .image
+            .is_some());
+        let jpe = write_file(&dir, "photo.jpe", &jpeg);
+        assert!(load(&jpe, PreviewLimits::default())
+            .unwrap()
+            .image
+            .is_some());
+
+        let text_png = write_file(&dir, "foo.png", b"hello\nworld");
+        let preview = load(&text_png, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert_eq!(preview.content, "hello\r\nworld");
+
+        let text_jpg = write_file(&dir, "photo.JpEg", b"hello");
+        let preview = load(&text_jpg, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert_eq!(preview.content, "hello");
+
+        // A NUL in a `.png` is not text, and it is not an image either.
+        let binary = write_file(&dir, "pic.PNG", b"not really a png\x00");
+        assert_eq!(
+            load(&binary, PreviewLimits::default()),
+            Err(PreviewError::Binary)
+        );
+
+        // Other image types stay on the deny-list, even when the bytes are a PNG.
+        let disguised = write_file(&dir, "anim.gif", &png);
+        assert_eq!(
+            load(&disguised, PreviewLimits::default()),
+            Err(PreviewError::Denied(DeniedKind::Image))
+        );
+    }
+
+    #[test]
+    fn image_file_over_the_byte_budget_is_not_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = rgba_png(2, 2, &[1, 2, 3, 255].repeat(4));
+        let path = write_file(&dir, "big.png", &png);
+        let mut limits = PreviewLimits::default();
+        limits.image.max_file_bytes = png.len() as u64 - 1;
+        let err = load(&path, limits).unwrap_err();
+        assert_eq!(
+            err,
+            PreviewError::Image(ImageError::FileTooLarge {
+                bytes: png.len() as u64
+            })
+        );
+        assert_eq!(
+            err.user_message("big.png"),
+            format!(
+                "This image is too large to preview ({}).",
+                format_compact_size(png.len() as u64)
+            )
+        );
+        assert_eq!(err.header_status(), "Too large");
+
+        let mut limits = PreviewLimits::default();
+        limits.image.max_file_bytes = png.len() as u64;
+        let preview = load(&path, limits).unwrap();
+        assert!(preview.image.is_some());
+
+        // The image cap does not apply to text, which keeps its own byte budget.
+        let mut limits = PreviewLimits::new(64, 10);
+        limits.image.max_file_bytes = 4;
+        let notes = write_file(&dir, "notes.txt", b"hello world, more than four bytes");
+        let preview = load(&notes, limits).unwrap();
+        assert!(preview.image.is_none());
+        assert!(preview.content.starts_with("hello"));
+    }
+
+    #[test]
+    fn cancelled_image_load_matches_the_text_path() {
+        let token = CancelToken::new();
+        let stale = token.generate();
+        let _live = token.generate();
+        assert!(token.is_cancelled(&stale));
+
+        let dir = tempfile::tempdir().unwrap();
+        let png = rgba_png(1, 1, &[9, 8, 7, 255]);
+        let image = write_file(&dir, "pic.png", &png);
+        let text = write_file(&dir, "note.txt", b"hello");
+        assert_eq!(
+            load_text_preview(&image, PreviewLimits::default(), &token, stale),
+            Err(PreviewError::Cancelled)
+        );
+        assert_eq!(
+            load_text_preview(&text, PreviewLimits::default(), &token, stale),
+            Err(PreviewError::Cancelled)
+        );
     }
 }
