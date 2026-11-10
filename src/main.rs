@@ -29,15 +29,15 @@ mod win {
 
     use spacepeek::{
         choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk, decide_hook_key,
-        effective_dpi, gate_show, hit_test, hook_key_from_vk, load_text_preview, min_physical_size,
-        nav_reload_remaining, nonempty_path, parse_command, place_preview, scaled_close_width,
-        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
-        scaled_header_pad, session_phase, step, typeahead_window_ms, wheel_scroll_dy, CancelToken,
-        ChromeLayout, Command, Effect, Event, Generation, HitZone, HookContext, HookDecision,
-        HookKey, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits,
-        PreviewState, PxRect, RepeatFilter, ScrollHold, ScrollOp, SessionPhase, ShowGate,
-        ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind,
-        NAV_RELOAD_DELAY_MS,
+        effective_dpi, gate_show, hit_test, hook_key_from_vk, image_dest_rect, load_text_preview,
+        min_physical_size, nav_reload_remaining, nonempty_path, parse_command, place_preview,
+        scaled_close_width, scaled_detail_font, scaled_font_height, scaled_header_font,
+        scaled_header_height, scaled_header_pad, session_phase, step, typeahead_window_ms,
+        wheel_scroll_dy, CancelToken, ChromeLayout, Command, DecodedImage, Effect, Event,
+        Generation, HitZone, HookContext, HookDecision, HookKey, KeyPhase, Modifiers, NavKey,
+        Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, RepeatFilter,
+        ScrollHold, ScrollOp, SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey,
+        Typeahead, TypeaheadKey, WindowKind, NAV_RELOAD_DELAY_MS,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -46,12 +46,14 @@ mod win {
     };
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
-        EndPaint, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush, GetTextFaceW, InvalidateRect,
-        MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, CLEARTYPE_QUALITY,
-        COLOR_WINDOW, DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
-        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH,
-        FW_NORMAL, FW_SEMIBOLD, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        PAINTSTRUCT, TRANSPARENT, VARIABLE_PITCH,
+        EndPaint, ExcludeClipRect, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush,
+        GetTextFaceW, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC, SaveDC,
+        SelectObject, SetBkMode, SetBrushOrgEx, SetStretchBltMode, SetTextColor, StretchDIBits,
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET,
+        DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
+        DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL,
+        FW_SEMIBOLD, HALFTONE, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        PAINTSTRUCT, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
     };
     use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
     use windows::Win32::System::Com::{
@@ -2020,6 +2022,7 @@ mod win {
         name: String,
         details: String,
         message: Option<String>,
+        image: Option<std::sync::Arc<DecodedImage>>,
         header_font: HFONT,
         detail_font: HFONT,
     }
@@ -2030,6 +2033,10 @@ mod win {
                 name: presented.header().name.clone(),
                 details: presented.header().details.clone(),
                 message: presented.message().map(str::to_owned),
+                image: match presented {
+                    Presented::Image { image, .. } => Some(std::sync::Arc::clone(image)),
+                    _ => None,
+                },
                 header_font: app.header_font,
                 detail_font: app.detail_font,
             })
@@ -2060,6 +2067,12 @@ mod win {
         let header_h = scaled_header_height(dpi).clamp(0, height);
         let close_w = scaled_close_width(dpi).clamp(0, width);
         let pad = scaled_header_pad(dpi).max(0);
+        let body = RECT {
+            left: 0,
+            top: header_h,
+            right: width,
+            bottom: height,
+        };
         fill_rect(
             dc,
             &RECT {
@@ -2070,16 +2083,11 @@ mod win {
             },
             rgb(243, 243, 243),
         );
-        fill_rect(
-            dc,
-            &RECT {
-                left: 0,
-                top: header_h,
-                right: width,
-                bottom: height,
-            },
-            rgb(255, 255, 255),
-        );
+        // The image fills its own rect after the header. Skipping the body
+        // here lets that path exclude the bitmap and avoid a white flash.
+        if snap.image.is_none() {
+            fill_rect(dc, &body, rgb(255, 255, 255));
+        }
         let text_right = (width - close_w).max(pad);
         let mid = header_h / 2;
         let single = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX;
@@ -2133,7 +2141,9 @@ mod win {
             },
             rgb(210, 210, 210),
         );
-        if let Some(message) = snap.message.as_deref() {
+        if let Some(image) = snap.image.as_deref() {
+            paint_image(dc, image, &body, dpi);
+        } else if let Some(message) = snap.message.as_deref() {
             let left = pad.min(width / 4);
             let right = (width - pad).max(left);
             paint_message(
@@ -2146,6 +2156,76 @@ mod win {
                     bottom: height,
                 },
                 snap.header_font,
+            );
+        }
+    }
+
+    /// Draw `image` centred in `body`. The background is filled around the
+    /// destination so a resize does not wipe the bitmap before the stretch.
+    fn paint_image(dc: HDC, image: &DecodedImage, body: &RECT, dpi: u32) {
+        let area = PxRect {
+            left: body.left,
+            top: body.top,
+            right: body.right,
+            bottom: body.bottom,
+        };
+        let dest = image_dest_rect(
+            area,
+            image.width,
+            image.height,
+            image.source_width,
+            image.source_height,
+            dpi,
+        );
+        let dest_w = dest.width();
+        let dest_h = dest.height();
+        let src_w = i32::try_from(image.width).unwrap_or(0);
+        let src_h = i32::try_from(image.height).unwrap_or(0);
+        let pixels = u64::from(image.width)
+            .saturating_mul(u64::from(image.height))
+            .saturating_mul(4);
+        let drawable = dest_w > 0
+            && dest_h > 0
+            && src_w > 0
+            && src_h > 0
+            && pixels > 0
+            && pixels <= image.bgra.len() as u64;
+        if !drawable {
+            fill_rect(dc, body, rgb(255, 255, 255));
+            return;
+        }
+        let saved = unsafe { SaveDC(dc) };
+        if saved != 0 {
+            let _ = unsafe { ExcludeClipRect(dc, dest.left, dest.top, dest.right, dest.bottom) };
+        }
+        fill_rect(dc, body, rgb(255, 255, 255));
+        if saved != 0 {
+            let _ = unsafe { RestoreDC(dc, saved) };
+        }
+        let mut info = BITMAPINFO::default();
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = src_w;
+        info.bmiHeader.biHeight = src_h.saturating_neg();
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB.0;
+        unsafe {
+            let _ = SetStretchBltMode(dc, HALFTONE);
+            let _ = SetBrushOrgEx(dc, 0, 0, None);
+            let _ = StretchDIBits(
+                dc,
+                dest.left,
+                dest.top,
+                dest_w,
+                dest_h,
+                0,
+                0,
+                src_w,
+                src_h,
+                Some(image.bgra.as_ptr().cast()),
+                &info,
+                DIB_RGB_COLORS,
+                SRCCOPY,
             );
         }
     }

@@ -189,12 +189,7 @@ pub fn image_dest_rect(
     };
     let body_w = body.width();
     let body_h = body.height();
-    if body_w <= 0
-        || body_h <= 0
-        || image_w == 0
-        || image_h == 0
-        || source_w == 0
-        || source_h == 0
+    if body_w <= 0 || body_h <= 0 || image_w == 0 || image_h == 0 || source_w == 0 || source_h == 0
     {
         return origin;
     }
@@ -206,7 +201,12 @@ pub fn image_dest_rect(
         return origin;
     }
     let (src_w, src_h) = shrink_to_u32(desired_w, desired_h);
-    let (fit_w, fit_h) = fit_size(src_w, src_h, body_w as u32, body_h as u32);
+    let (fit_w, fit_h) = fit_size(
+        src_w,
+        src_h,
+        u32::try_from(body_w).unwrap_or(u32::MAX),
+        u32::try_from(body_h).unwrap_or(u32::MAX),
+    );
     if fit_w == 0 || fit_h == 0 {
         return origin;
     }
@@ -853,7 +853,10 @@ mod tests {
 
         // Odd leftover pixel stays on the right and bottom (integer centre).
         let odd = body(0, 0, 101, 51);
-        assert_eq!(image_dest_rect(odd, 10, 10, 10, 10, 96), body(45, 20, 55, 30));
+        assert_eq!(
+            image_dest_rect(odd, 10, 10, 10, 10, 96),
+            body(45, 20, 55, 30)
+        );
 
         // Negative origin, still centred inside the body.
         let shifted = body(-20, -10, 180, 90);
@@ -885,8 +888,14 @@ mod tests {
             image_dest_rect(area, 10, 8, 10, 8, 0),
             image_dest_rect(area, 10, 8, 10, 8, 96)
         );
-        assert_eq!(image_dest_rect(area, 1, 1, 1, 1, 144), body(249, 249, 250, 250));
-        assert_eq!(image_dest_rect(area, 1, 1, 1, 1, 192), body(249, 249, 251, 251));
+        assert_eq!(
+            image_dest_rect(area, 1, 1, 1, 1, 144),
+            body(249, 249, 250, 250)
+        );
+        assert_eq!(
+            image_dest_rect(area, 1, 1, 1, 1, 192),
+            body(249, 249, 251, 251)
+        );
 
         // The DPI-scaled source is larger than the body, so it letterboxes.
         let tight = body(0, 0, 100, 80);
@@ -919,10 +928,7 @@ mod tests {
     #[test]
     fn empty_or_negative_body_and_zero_image_are_a_point() {
         let empty = body(5, 7, 5, 100);
-        assert_eq!(
-            image_dest_rect(empty, 10, 10, 10, 10, 96),
-            body(5, 7, 5, 7)
-        );
+        assert_eq!(image_dest_rect(empty, 10, 10, 10, 10, 96), body(5, 7, 5, 7));
         let negative = body(40, 50, 10, 20);
         assert_eq!(
             image_dest_rect(negative, 10, 10, 10, 10, 192),
