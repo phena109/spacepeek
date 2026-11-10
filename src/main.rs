@@ -23,21 +23,23 @@ mod win {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, Ordering};
 
     use spacepeek::{
-        choose_selected, esc_action, load_text_preview, should_intercept_space, step, CancelToken,
+        choose_selected, effective_dpi, esc_action, load_text_preview, parse_command,
+        preview_placement, scaled_font_height, should_intercept_space, step, CancelToken, Command,
         Effect, EscAction, Event, FocusContext, Generation, KeyPhase, Preview, PreviewError,
-        PreviewLimits, PreviewState, RepeatFilter, TrackedKey,
+        PreviewLimits, PreviewState, PxRect, RepeatFilter, TrackedKey,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL,
-        HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+        HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
-        CreateFontW, GetSysColorBrush, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET, FW_NORMAL,
-        HFONT,
+        CreateFontW, DeleteObject, GetMonitorInfoW, GetSysColorBrush, MonitorFromWindow,
+        CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET, FW_NORMAL, HFONT, MONITORINFO,
+        MONITOR_DEFAULTTONEAREST,
     };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IServiceProvider,
@@ -48,7 +50,8 @@ mod win {
     use windows::Win32::System::Ole::IOleWindow;
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::UI::HiDpi::{
-        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        GetDpiForMonitor, GetDpiForWindow, SetProcessDpiAwarenessContext,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, GetFocus, SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU,
@@ -58,22 +61,27 @@ mod win {
     use windows::Win32::UI::Shell::{
         FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
         IShellFolder, IShellFolderViewDual, IShellItem, IShellView, IShellWindows, IWebBrowser2,
-        SHCreateItemWithParent, SID_STopLevelBrowser, ShellWindows, SIGDN_FILESYSPATH,
-        SVGIO_SELECTION, SVSI_SELECT,
+        SHCreateItemWithParent, SID_STopLevelBrowser, ShellWindows, Shell_NotifyIconW, NIF_ICON,
+        NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT,
+        NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SIGDN_FILESYSPATH, SVGIO_SELECTION, SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-        DispatchMessageW, FindWindowExW, GetClassNameW, GetClientRect, GetForegroundWindow,
-        GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId,
-        IsWindow, IsWindowVisible, LoadCursorW, MessageBoxW, MoveWindow, PeekMessageW,
-        PostMessageW, PostThreadMessageW, RegisterClassW, SendMessageW, SetForegroundWindow,
-        SetWindowTextW, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-        ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GUITHREADINFO, HHOOK, HICON, HMENU,
-        HWND_MESSAGE, IDC_ARROW, KBDLLHOOKSTRUCT, LLKHF_UP, MB_ICONERROR, MB_OK, MSG, PM_NOREMOVE,
-        SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, WA_INACTIVE, WH_KEYBOARD_LL, WINDOW_EX_STYLE,
-        WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_QUIT, WM_SETFONT,
-        WM_SIZE, WNDCLASSW, WNDCLASS_STYLES, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-        WS_POPUP, WS_VISIBLE, WS_VSCROLL,
+        AppendMenuW, BringWindowToTop, CallNextHookEx, CreatePopupMenu, CreateWindowExW,
+        DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW,
+        GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
+        GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, IsWindow,
+        IsWindowVisible, LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, PeekMessageW,
+        PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, RegisterWindowMessageW,
+        SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, SetWindowsHookExW,
+        ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, ES_AUTOVSCROLL,
+        ES_MULTILINE, ES_READONLY, GUITHREADINFO, HHOOK, HICON, HMENU, IDC_ARROW, IDI_APPLICATION,
+        KBDLLHOOKSTRUCT, LLKHF_UP, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE,
+        MF_STRING, MSG, PM_NOREMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+        SW_HIDE, SW_SHOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE,
+        WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE,
+        WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONUP, WM_NULL, WM_QUIT,
+        WM_RBUTTONUP, WM_SETFONT, WM_SIZE, WM_USER, WNDCLASSW, WNDCLASS_STYLES, WS_BORDER,
+        WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -81,9 +89,15 @@ mod win {
     const WM_SPACEPEEK_SPACE: u32 = WM_APP + 1;
     const WM_SPACEPEEK_ESC: u32 = WM_APP + 2;
     const WM_SPACEPEEK_LOADED: u32 = WM_APP + 3;
+    const WM_SPACEPEEK_TRAY: u32 = WM_APP + 4;
+    /// `NIN_KEYSELECT` is `WM_USER + 1`. The windows crate exports `NIN_SELECT` only.
+    const NIN_KEYSELECT: u32 = WM_USER + 1;
     const EM_SETLIMITTEXT: u32 = 0x00C5;
-    const PREVIEW_WIDTH: i32 = 760;
-    const PREVIEW_HEIGHT: i32 = 520;
+    const TRAY_ID: u32 = 1;
+    const CMD_EXIT: usize = 1;
+    const ALREADY_RUNNING: &str = "Spacepeek is already running. Right-click its icon in the notification area and choose Exit, or run spacepeek.exe --quit.";
+    const NOT_RUNNING: &str = "Spacepeek is not running.";
+    const USAGE: &str = "Usage: spacepeek.exe [--quit]\r\n\r\nStart spacepeek.exe and leave it running. spacepeek.exe --quit asks the running instance to exit.";
 
     struct LoadMsg {
         gen: Generation,
@@ -99,6 +113,7 @@ mod win {
         explorer_hwnd: HWND,
         instance: HINSTANCE,
         font: HFONT,
+        font_dpi: u32,
         suppress_focus: bool,
         /// Set for the duration of `on_space`. Explorer COM calls pump this STA
         /// thread, so a posted Space can otherwise re-enter `on_space`.
@@ -107,6 +122,9 @@ mod win {
 
     static APP: AtomicPtr<RefCell<App>> = AtomicPtr::new(std::ptr::null_mut());
     static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+    static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+    static TRAY_V4: AtomicBool = AtomicBool::new(false);
+    static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
     /// Preview HWND for the hook thread. Zero when there is no preview window.
     static PREVIEW_HWND: AtomicIsize = AtomicIsize::new(0);
     static PREVIEW_VISIBLE: AtomicBool = AtomicBool::new(false);
@@ -125,15 +143,30 @@ mod win {
     }
 
     pub fn run() -> windows::core::Result<std::process::ExitCode> {
+        match parse_command(std::env::args()) {
+            Command::Quit => return quit_running(),
+            Command::Help => {
+                info_box(USAGE);
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
+            Command::Unknown => {
+                info_box(USAGE);
+                return Ok(std::process::ExitCode::from(1));
+            }
+            Command::Run => {}
+        }
+
         let held = match acquire_singleton() {
             Ok(Some(handle)) => handle,
-            Ok(None) => return Ok(std::process::ExitCode::SUCCESS),
+            Ok(None) => {
+                info_box(ALREADY_RUNNING);
+                return Ok(std::process::ExitCode::from(1));
+            }
             Err(err) => return Err(err),
         };
 
         let module = unsafe { GetModuleHandleW(PCWSTR::null())? };
         let instance = HINSTANCE::from(module);
-        let font = create_ui_font();
         let app = Box::leak(Box::new(RefCell::new(App {
             state: PreviewState::Hidden,
             cancel: CancelToken::new(),
@@ -142,7 +175,8 @@ mod win {
             edit_hwnd: HWND::default(),
             explorer_hwnd: HWND::default(),
             instance,
-            font,
+            font: HFONT::default(),
+            font_dpi: 0,
             suppress_focus: false,
             space_busy: false,
         })));
@@ -156,12 +190,16 @@ mod win {
             let msg_hwnd = create_message_window(instance)?;
             app.borrow_mut().msg_hwnd = msg_hwnd;
             MAIN_HWND.store(msg_hwnd.0 as isize, Ordering::Release);
+            register_taskbar_created();
+            add_tray_icon(msg_hwnd);
 
             // The hook cannot share this thread: a slow Explorer COM call on the
             // STA would stall every keystroke, and Windows may silently unhook it.
             let hook = match start_hook_thread(instance) {
                 Ok(hook) => hook,
                 Err(err) => {
+                    remove_tray_icon(msg_hwnd);
+                    let _ = DestroyWindow(msg_hwnd);
                     CoUninitialize();
                     return Err(err);
                 }
@@ -184,6 +222,14 @@ mod win {
     }
 
     pub fn report(text: &str) {
+        message_box(text, MB_OK | MB_ICONERROR);
+    }
+
+    fn info_box(text: &str) {
+        message_box(text, MB_OK | MB_ICONINFORMATION);
+    }
+
+    fn message_box(text: &str, style: MESSAGEBOX_STYLE) {
         let body = utf16(text);
         let title = utf16("Spacepeek");
         unsafe {
@@ -191,9 +237,20 @@ mod win {
                 HWND::default(),
                 PCWSTR(body.as_ptr()),
                 PCWSTR(title.as_ptr()),
-                MB_OK | MB_ICONERROR,
+                style,
             );
         }
+    }
+
+    fn quit_running() -> windows::core::Result<std::process::ExitCode> {
+        let class_name = utf16(MESSAGE_CLASS);
+        let found = unsafe { FindWindowW(PCWSTR(class_name.as_ptr()), PCWSTR::null()) };
+        let Ok(hwnd) = found else {
+            info_box(NOT_RUNNING);
+            return Ok(std::process::ExitCode::from(1));
+        };
+        unsafe { PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0))? };
+        Ok(std::process::ExitCode::SUCCESS)
     }
 
     fn acquire_singleton() -> windows::core::Result<Option<HANDLE>> {
@@ -494,6 +551,11 @@ mod win {
     }
 
     fn message_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        let taskbar = TASKBAR_CREATED.load(Ordering::Acquire);
+        if taskbar != 0 && msg == taskbar {
+            add_tray_icon(hwnd);
+            return LRESULT(0);
+        }
         match msg {
             WM_SPACEPEEK_SPACE => {
                 on_space();
@@ -505,6 +567,20 @@ mod win {
             }
             WM_SPACEPEEK_LOADED => {
                 on_loaded(lparam);
+                LRESULT(0)
+            }
+            WM_SPACEPEEK_TRAY => {
+                on_tray_message(hwnd, wparam, lparam);
+                LRESULT(0)
+            }
+            WM_CLOSE => {
+                begin_shutdown(hwnd);
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                remove_tray_icon(hwnd);
+                MAIN_HWND.store(0, Ordering::Release);
+                unsafe { PostQuitMessage(0) };
                 LRESULT(0)
             }
             _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -523,6 +599,10 @@ mod win {
             }
             WM_CLOSE => {
                 dispatch(Event::EscPressed);
+                LRESULT(0)
+            }
+            WM_DPICHANGED => {
+                on_preview_dpi_changed(hwnd, wparam, lparam);
                 LRESULT(0)
             }
             WM_ACTIVATE => {
@@ -698,19 +778,26 @@ mod win {
     }
 
     fn show_preview() {
-        let (title, body, anchor, instance, font, existing) = with_app(|app| {
+        let (title, body, anchor, instance, existing) = with_app(|app| {
             let (title, body) = window_content(&app.state);
             (
                 title,
                 body,
                 app.explorer_hwnd,
                 app.instance,
-                app.font,
                 app.preview_hwnd,
             )
         });
+        let dpi_anchor = if existing.0.is_null() {
+            anchor
+        } else {
+            existing
+        };
+        let dpi = dpi_for_anchor(dpi_anchor);
+        let (font, stale) = swap_font(dpi);
+        let _stale = StaleFont(stale);
         if existing.0.is_null() {
-            let (x, y, width, height) = preview_bounds(anchor);
+            let (x, y, width, height) = preview_bounds(anchor, dpi);
             let class_name = utf16(PREVIEW_CLASS);
             let title_w = utf16(&title);
             let hwnd = unsafe {
@@ -763,10 +850,8 @@ mod win {
             };
             unsafe {
                 let _ = SendMessageW(edit, EM_SETLIMITTEXT, WPARAM(1_048_576), LPARAM(0));
-                if !font.0.is_null() {
-                    let _ = SendMessageW(edit, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
-                }
             }
+            apply_font(edit, font);
             set_text(edit, &body);
             resize_edit_pair(hwnd, edit);
             with_app_mut(|app| {
@@ -784,6 +869,7 @@ mod win {
             }
             with_app_mut(|app| app.suppress_focus = false);
         } else {
+            apply_font(with_app(|app| app.edit_hwnd), font);
             set_text(existing, &title);
             let edit = with_app(|app| app.edit_hwnd);
             set_text(edit, &body);
@@ -837,24 +923,105 @@ mod win {
         }
     }
 
-    fn preview_bounds(anchor: HWND) -> (i32, i32, i32, i32) {
-        let mut rect = RECT::default();
-        let anchored = !anchor.0.is_null() && unsafe { GetWindowRect(anchor, &mut rect).is_ok() };
-        if anchored && rect.right > rect.left && rect.bottom > rect.top {
-            let cx = rect.left + (rect.right - rect.left) / 2;
-            let cy = rect.top + (rect.bottom - rect.top) / 2;
-            let x = (cx - PREVIEW_WIDTH / 2).max(rect.left);
-            let y = (cy - PREVIEW_HEIGHT / 2).max(rect.top);
-            return (x, y, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+    fn preview_bounds(anchor: HWND, dpi: u32) -> (i32, i32, i32, i32) {
+        let placed = preview_placement(anchor_rect(anchor), monitor_work_area(anchor), dpi);
+        (placed.x, placed.y, placed.width, placed.height)
+    }
+
+    fn anchor_rect(anchor: HWND) -> Option<PxRect> {
+        if anchor.0.is_null() {
+            return None;
         }
-        let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-        let sh = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-        (
-            (sw - PREVIEW_WIDTH) / 2,
-            (sh - PREVIEW_HEIGHT) / 2,
-            PREVIEW_WIDTH,
-            PREVIEW_HEIGHT,
-        )
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(anchor, &mut rect).is_err() } {
+            return None;
+        }
+        let parsed = PxRect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        };
+        if parsed.right > parsed.left && parsed.bottom > parsed.top {
+            Some(parsed)
+        } else {
+            None
+        }
+    }
+
+    fn monitor_work_area(anchor: HWND) -> PxRect {
+        unsafe {
+            let monitor = MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
+            if !monitor.is_invalid() {
+                let mut info = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..MONITORINFO::default()
+                };
+                if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                    return PxRect {
+                        left: info.rcWork.left,
+                        top: info.rcWork.top,
+                        right: info.rcWork.right,
+                        bottom: info.rcWork.bottom,
+                    };
+                }
+            }
+            // Only when the monitor query itself fails. Centring uses rcWork.
+            PxRect {
+                left: 0,
+                top: 0,
+                right: GetSystemMetrics(SM_CXSCREEN).max(0),
+                bottom: GetSystemMetrics(SM_CYSCREEN).max(0),
+            }
+        }
+    }
+
+    fn dpi_for_anchor(anchor: HWND) -> u32 {
+        effective_dpi(unsafe { query_dpi(anchor) })
+    }
+
+    unsafe fn query_dpi(anchor: HWND) -> u32 {
+        if !anchor.0.is_null() {
+            let dpi = GetDpiForWindow(anchor);
+            if dpi != 0 {
+                return dpi;
+            }
+        }
+        let monitor = MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_invalid() {
+            return 0;
+        }
+        let mut x = 0u32;
+        let mut y = 0u32;
+        if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y).is_ok() && x != 0 {
+            x
+        } else {
+            0
+        }
+    }
+
+    fn on_preview_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+        if lparam.0 != 0 {
+            let suggested = unsafe { *(lparam.0 as *const RECT) };
+            let width = suggested.right - suggested.left;
+            let height = suggested.bottom - suggested.top;
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    suggested.left,
+                    suggested.top,
+                    width,
+                    height,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+        let dpi = (wparam.0 as u32) & 0xffff;
+        let (font, stale) = swap_font(dpi);
+        let _stale = StaleFont(stale);
+        apply_font(with_app(|app| app.edit_hwnd), font);
+        resize_edit(hwnd);
     }
 
     fn window_content(state: &PreviewState) -> (String, String) {
@@ -1217,19 +1384,22 @@ mod win {
     }
 
     fn create_message_window(instance: HINSTANCE) -> windows::core::Result<HWND> {
+        // A message-only window (`HWND_MESSAGE`) does not receive the broadcast
+        // `TaskbarCreated` message, and `FindWindowW` (used by `--quit`) does not
+        // see it. This top-level window is never shown.
         let class_name = utf16(MESSAGE_CLASS);
         let title = utf16("Spacepeek");
         unsafe {
             CreateWindowExW(
-                WINDOW_EX_STYLE(0),
+                WS_EX_TOOLWINDOW,
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(title.as_ptr()),
-                WINDOW_STYLE(0),
+                WS_POPUP,
                 0,
                 0,
                 0,
                 0,
-                HWND_MESSAGE,
+                HWND::default(),
                 HMENU::default(),
                 instance,
                 None,
@@ -1237,11 +1407,12 @@ mod win {
         }
     }
 
-    fn create_ui_font() -> HFONT {
+    fn create_ui_font(dpi: u32) -> HFONT {
         let face = utf16("Segoe UI");
+        let height = -scaled_font_height(dpi);
         unsafe {
             CreateFontW(
-                -18,
+                height,
                 0,
                 0,
                 0,
@@ -1256,6 +1427,207 @@ mod win {
                 0,
                 PCWSTR(face.as_ptr()),
             )
+        }
+    }
+
+    fn swap_font(dpi: u32) -> (HFONT, HFONT) {
+        let dpi = effective_dpi(dpi);
+        with_app_mut(|app| {
+            if app.font_dpi == dpi && !app.font.0.is_null() {
+                return (app.font, HFONT::default());
+            }
+            let next = create_ui_font(dpi);
+            if next.0.is_null() {
+                return (app.font, HFONT::default());
+            }
+            let previous = std::mem::replace(&mut app.font, next);
+            app.font_dpi = dpi;
+            (next, previous)
+        })
+    }
+
+    fn apply_font(edit: HWND, font: HFONT) {
+        if edit.0.is_null() || font.0.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = SendMessageW(edit, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
+        }
+    }
+
+    fn discard_font(font: HFONT) {
+        if font.0.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = DeleteObject(font);
+        }
+    }
+
+    fn discard_current_font() {
+        let font = with_app_mut(|app| {
+            app.font_dpi = 0;
+            std::mem::take(&mut app.font)
+        });
+        discard_font(font);
+    }
+
+    /// Deletes a font that an edit control no longer uses. Drop runs after the
+    /// new font has been selected into the control.
+    struct StaleFont(HFONT);
+
+    impl Drop for StaleFont {
+        fn drop(&mut self) {
+            discard_font(self.0);
+        }
+    }
+
+    fn begin_shutdown(hwnd: HWND) {
+        if SHUTTING_DOWN.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        with_app_mut(|app| {
+            let _ = app.cancel.generate();
+            app.state = PreviewState::Hidden;
+            PREVIEW_VISIBLE.store(false, Ordering::Release);
+            publish_loading(&app.state, app.explorer_hwnd);
+        });
+        hide_preview(false);
+        discard_current_font();
+        remove_tray_icon(hwnd);
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    fn register_taskbar_created() {
+        let msg = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+        TASKBAR_CREATED.store(msg, Ordering::Release);
+    }
+
+    fn add_tray_icon(hwnd: HWND) {
+        unsafe {
+            let mut data = tray_icon_data(hwnd);
+            if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
+                let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+                if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
+                    debug_log("Spacepeek: notification icon was not added\n");
+                    return;
+                }
+            }
+            data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+            let version4 = Shell_NotifyIconW(NIM_SETVERSION, &data).as_bool();
+            TRAY_V4.store(version4, Ordering::Release);
+            if !version4 {
+                debug_log("Spacepeek: notification icon version was not set\n");
+            }
+        }
+    }
+
+    fn remove_tray_icon(hwnd: HWND) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        unsafe {
+            let data = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: hwnd,
+                uID: TRAY_ID,
+                ..NOTIFYICONDATAW::default()
+            };
+            let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+        }
+    }
+
+    fn tray_icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
+        let mut data = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: TRAY_ID,
+            uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
+            uCallbackMessage: WM_SPACEPEEK_TRAY,
+            ..NOTIFYICONDATAW::default()
+        };
+        data.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or_default() };
+        write_wide_z(&mut data.szTip, "Spacepeek");
+        data
+    }
+
+    fn write_wide_z(dst: &mut [u16], text: &str) {
+        let max = dst.len().saturating_sub(1);
+        for (slot, unit) in dst.iter_mut().zip(text.encode_utf16().take(max)) {
+            *slot = unit;
+        }
+    }
+
+    fn on_tray_message(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+        let event = (lparam.0 as u32) & 0xffff;
+        let version4 = TRAY_V4.load(Ordering::Acquire);
+        if !tray_event_opens_menu(event, version4) {
+            return;
+        }
+        let (x, y) = if version4 {
+            // `GET_X_LPARAM` / `GET_Y_LPARAM` of wParam under NOTIFYICON_VERSION_4.
+            lparam_xy(wparam.0)
+        } else {
+            cursor_pos()
+        };
+        show_exit_menu(hwnd, x, y);
+    }
+
+    fn tray_event_opens_menu(event: u32, version4: bool) -> bool {
+        if version4 {
+            // Version 4 also delivers the raw button-up messages. Handling both
+            // opens the menu twice. `NIN_SELECT` is a left click; `WM_CONTEXTMENU`
+            // is a right click and the keyboard menu key.
+            event == WM_CONTEXTMENU || event == NIN_SELECT || event == NIN_KEYSELECT
+        } else {
+            event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_CONTEXTMENU
+        }
+    }
+
+    fn lparam_xy(value: usize) -> (i32, i32) {
+        let packed = value as u32;
+        let x = packed as i16 as i32;
+        let y = (packed >> 16) as i16 as i32;
+        (x, y)
+    }
+
+    fn cursor_pos() -> (i32, i32) {
+        let mut pt = POINT::default();
+        if unsafe { GetCursorPos(&mut pt).is_ok() } {
+            (pt.x, pt.y)
+        } else {
+            (0, 0)
+        }
+    }
+
+    fn show_exit_menu(hwnd: HWND, x: i32, y: i32) {
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else {
+                return;
+            };
+            if AppendMenuW(menu, MF_STRING, CMD_EXIT, w!("Exit Spacepeek")).is_err() {
+                let _ = DestroyMenu(menu);
+                return;
+            }
+            // The menu will not dismiss on an outside click unless this window
+            // is foreground. `WM_NULL` is the documented task switch afterwards.
+            let _ = SetForegroundWindow(hwnd);
+            let selected = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                x,
+                y,
+                0,
+                hwnd,
+                None,
+            );
+            let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+            let _ = DestroyMenu(menu);
+            if selected.0 == CMD_EXIT as i32 {
+                let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            }
         }
     }
 
