@@ -30,9 +30,17 @@ pub enum Event {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Effect {
-    StartLoad { gen: Generation, path: PathBuf },
+    StartLoad {
+        gen: Generation,
+        path: PathBuf,
+    },
     ShowWindow,
-    HideWindow,
+    /// Hide the preview. `restore_focus` returns focus to the Explorer window
+    /// that opened it (Space and Esc). Focus loss passes false so the window
+    /// the user switched to stays in front.
+    HideWindow {
+        restore_focus: bool,
+    },
     CancelLoad,
 }
 
@@ -59,12 +67,20 @@ pub fn step(
             Event::SpacePressed(_),
         ) => (
             PreviewState::Hidden,
-            vec![Effect::HideWindow, Effect::CancelLoad],
+            vec![
+                Effect::HideWindow {
+                    restore_focus: true,
+                },
+                Effect::CancelLoad,
+            ],
         ),
         (PreviewState::Showing { .. }, Event::EscPressed)
-        | (PreviewState::Failed { .. }, Event::EscPressed) => {
-            (PreviewState::Hidden, vec![Effect::HideWindow])
-        }
+        | (PreviewState::Failed { .. }, Event::EscPressed) => (
+            PreviewState::Hidden,
+            vec![Effect::HideWindow {
+                restore_focus: true,
+            }],
+        ),
         (PreviewState::Hidden, Event::EscPressed) => (PreviewState::Hidden, vec![]),
         (PreviewState::Loading { .. }, Event::EscPressed) => {
             (PreviewState::Hidden, vec![Effect::CancelLoad])
@@ -74,7 +90,9 @@ pub fn step(
                 PreviewState::Hidden => None,
                 PreviewState::Loading { .. } => Some(Effect::CancelLoad),
                 PreviewState::Showing { .. } | PreviewState::Failed { .. } => {
-                    Some(Effect::HideWindow)
+                    Some(Effect::HideWindow {
+                        restore_focus: false,
+                    })
                 }
             };
             match cancel_effect {
@@ -163,15 +181,66 @@ mod tests {
         let cancel = CancelToken::new();
         let (state, effects) = step(showing(), Event::SpacePressed(path()), &cancel);
         assert_eq!(state, PreviewState::Hidden);
-        assert_eq!(effects, vec![Effect::HideWindow, Effect::CancelLoad]);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::HideWindow {
+                    restore_focus: true
+                },
+                Effect::CancelLoad,
+            ]
+        );
     }
 
     #[test]
-    fn esc_from_showing_hides() {
+    fn space_from_loading_hides_and_restores_focus() {
+        let cancel = CancelToken::new();
+        let state = PreviewState::Loading {
+            gen: Generation::new(1),
+            path: path(),
+        };
+        let (state, effects) = step(state, Event::SpacePressed(path()), &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::HideWindow {
+                    restore_focus: true
+                },
+                Effect::CancelLoad,
+            ]
+        );
+    }
+
+    #[test]
+    fn esc_from_showing_hides_and_restores_focus() {
         let cancel = CancelToken::new();
         let (state, effects) = step(showing(), Event::EscPressed, &cancel);
         assert_eq!(state, PreviewState::Hidden);
-        assert_eq!(effects, vec![Effect::HideWindow]);
+        assert_eq!(
+            effects,
+            vec![Effect::HideWindow {
+                restore_focus: true
+            }]
+        );
+    }
+
+    #[test]
+    fn esc_from_failed_restores_focus() {
+        let cancel = CancelToken::new();
+        let state = PreviewState::Failed {
+            gen: Generation::new(1),
+            path: path(),
+            error: PreviewError::Unsupported,
+        };
+        let (state, effects) = step(state, Event::EscPressed, &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(
+            effects,
+            vec![Effect::HideWindow {
+                restore_focus: true
+            }]
+        );
     }
 
     #[test]
@@ -187,11 +256,46 @@ mod tests {
     }
 
     #[test]
-    fn focus_lost_hides_showing() {
+    fn focus_lost_hides_showing_without_restoring_focus() {
         let cancel = CancelToken::new();
         let (state, effects) = step(showing(), Event::FocusLost, &cancel);
         assert_eq!(state, PreviewState::Hidden);
-        assert_eq!(effects, vec![Effect::HideWindow]);
+        assert_eq!(
+            effects,
+            vec![Effect::HideWindow {
+                restore_focus: false
+            }]
+        );
+    }
+
+    #[test]
+    fn focus_lost_from_failed_does_not_restore_focus() {
+        let cancel = CancelToken::new();
+        let state = PreviewState::Failed {
+            gen: Generation::new(1),
+            path: path(),
+            error: PreviewError::Unsupported,
+        };
+        let (state, effects) = step(state, Event::FocusLost, &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(
+            effects,
+            vec![Effect::HideWindow {
+                restore_focus: false
+            }]
+        );
+    }
+
+    #[test]
+    fn focus_lost_from_loading_cancels_without_hiding() {
+        let cancel = CancelToken::new();
+        let state = PreviewState::Loading {
+            gen: Generation::new(1),
+            path: path(),
+        };
+        let (state, effects) = step(state, Event::FocusLost, &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(effects, vec![Effect::CancelLoad]);
     }
 
     #[test]
@@ -248,6 +352,14 @@ mod tests {
         };
         let (state, effects) = step(state, Event::SpacePressed(path()), &cancel);
         assert_eq!(state, PreviewState::Hidden);
-        assert_eq!(effects, vec![Effect::HideWindow, Effect::CancelLoad]);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::HideWindow {
+                    restore_focus: true
+                },
+                Effect::CancelLoad,
+            ]
+        );
     }
 }

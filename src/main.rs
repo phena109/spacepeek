@@ -20,17 +20,20 @@ fn main() -> std::process::ExitCode {
 #[cfg(windows)]
 mod win {
     use std::cell::RefCell;
-    use std::path::PathBuf;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, Ordering};
 
     use spacepeek::{
-        load_text_preview, should_intercept_space, step, CancelToken, Effect, Event, FocusContext,
-        Generation, Preview, PreviewError, PreviewLimits, PreviewState,
+        choose_selected, esc_action, load_text_preview, should_intercept_space, step, CancelToken,
+        Effect, EscAction, Event, FocusContext, Generation, KeyPhase, Preview, PreviewError,
+        PreviewLimits, PreviewState, RepeatFilter, TrackedKey,
     };
-    use windows::core::{Interface, PCWSTR, VARIANT};
+    use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HANDLE,
-        HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL,
+        HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
         CreateFontW, GetSysColorBrush, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET, FW_NORMAL,
@@ -40,7 +43,9 @@ mod win {
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IServiceProvider,
         CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
+    use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Ole::IOleWindow;
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::UI::HiDpi::{
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -51,23 +56,24 @@ mod win {
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
-        FolderItem, IEnumIDList, IFolderView, ILFree, IShellBrowser, IShellFolder,
-        IShellFolderViewDual, IShellItem, IShellView, IShellWindows, IWebBrowser2,
+        FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
+        IShellFolder, IShellFolderViewDual, IShellItem, IShellView, IShellWindows, IWebBrowser2,
         SHCreateItemWithParent, SID_STopLevelBrowser, ShellWindows, SIGDN_FILESYSPATH,
-        SVGIO_SELECTION,
+        SVGIO_SELECTION, SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        GetClassNameW, GetClientRect, GetForegroundWindow, GetGUIThreadInfo, GetMessageW,
-        GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, IsWindow, LoadCursorW,
-        MessageBoxW, MoveWindow, PostMessageW, RegisterClassW, SendMessageW, SetForegroundWindow,
+        BringWindowToTop, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
+        DispatchMessageW, FindWindowExW, GetClassNameW, GetClientRect, GetForegroundWindow,
+        GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId,
+        IsWindow, IsWindowVisible, LoadCursorW, MessageBoxW, MoveWindow, PeekMessageW,
+        PostMessageW, PostThreadMessageW, RegisterClassW, SendMessageW, SetForegroundWindow,
         SetWindowTextW, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
         ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GUITHREADINFO, HHOOK, HICON, HMENU,
-        HWND_MESSAGE, IDC_ARROW, KBDLLHOOKSTRUCT, LLKHF_UP, MB_ICONERROR, MB_OK, MSG, SM_CXSCREEN,
-        SM_CYSCREEN, SW_HIDE, SW_SHOW, WA_INACTIVE, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
-        WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_SETFONT, WM_SIZE, WNDCLASSW,
-        WNDCLASS_STYLES, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-        WS_VISIBLE, WS_VSCROLL,
+        HWND_MESSAGE, IDC_ARROW, KBDLLHOOKSTRUCT, LLKHF_UP, MB_ICONERROR, MB_OK, MSG, PM_NOREMOVE,
+        SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, WA_INACTIVE, WH_KEYBOARD_LL, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_QUIT, WM_SETFONT,
+        WM_SIZE, WNDCLASSW, WNDCLASS_STYLES, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_POPUP, WS_VISIBLE, WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -94,11 +100,29 @@ mod win {
         instance: HINSTANCE,
         font: HFONT,
         suppress_focus: bool,
+        /// Set for the duration of `on_space`. Explorer COM calls pump this STA
+        /// thread, so a posted Space can otherwise re-enter `on_space`.
+        space_busy: bool,
     }
 
     static APP: AtomicPtr<RefCell<App>> = AtomicPtr::new(std::ptr::null_mut());
     static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+    /// Preview HWND for the hook thread. Zero when there is no preview window.
+    static PREVIEW_HWND: AtomicIsize = AtomicIsize::new(0);
     static PREVIEW_VISIBLE: AtomicBool = AtomicBool::new(false);
+    /// UI thread publishes this while `PreviewState` is `Loading`.
+    static LOADING: AtomicBool = AtomicBool::new(false);
+    /// Explorer HWND that started the in-flight load. Read only while `LOADING` is set.
+    static LOADING_EXPLORER: AtomicIsize = AtomicIsize::new(0);
+    // Hook-thread only. The low-level hook runs on `spacepeek-hook`.
+    thread_local! {
+        static REPEATS: RefCell<RepeatFilter> = const { RefCell::new(RepeatFilter::new()) };
+    }
+
+    struct HookThread {
+        id: u32,
+        join: std::thread::JoinHandle<()>,
+    }
 
     pub fn run() -> windows::core::Result<std::process::ExitCode> {
         let held = match acquire_singleton() {
@@ -120,6 +144,7 @@ mod win {
             instance,
             font,
             suppress_focus: false,
+            space_busy: false,
         })));
         APP.store(app, Ordering::Release);
 
@@ -132,7 +157,15 @@ mod win {
             app.borrow_mut().msg_hwnd = msg_hwnd;
             MAIN_HWND.store(msg_hwnd.0 as isize, Ordering::Release);
 
-            let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), instance, 0)?;
+            // The hook cannot share this thread: a slow Explorer COM call on the
+            // STA would stall every keystroke, and Windows may silently unhook it.
+            let hook = match start_hook_thread(instance) {
+                Ok(hook) => hook,
+                Err(err) => {
+                    CoUninitialize();
+                    return Err(err);
+                }
+            };
             let mut msg = MSG::default();
             loop {
                 let rc = GetMessageW(&mut msg, HWND::default(), 0, 0);
@@ -142,7 +175,7 @@ mod win {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            let _ = UnhookWindowsHookEx(hook);
+            stop_hook_thread(hook);
             CoUninitialize();
         }
 
@@ -212,28 +245,172 @@ mod win {
         HWND(MAIN_HWND.load(Ordering::Acquire) as *mut _)
     }
 
+    fn start_hook_thread(instance: HINSTANCE) -> windows::core::Result<HookThread> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Handles are raw pointers and not Send. Pass the bits across the thread.
+        let instance_bits = instance.0 as isize;
+        let join = std::thread::Builder::new()
+            .name("spacepeek-hook".to_string())
+            .spawn(move || hook_thread_main(instance_bits, tx))
+            .map_err(windows::core::Error::from)?;
+        match rx.recv() {
+            Ok(Ok(id)) => Ok(HookThread { id, join }),
+            Ok(Err(err)) => {
+                let _ = join.join();
+                Err(err)
+            }
+            Err(_) => {
+                let _ = join.join();
+                Err(windows::core::Error::new(
+                    E_FAIL,
+                    "hook thread exited before installing the keyboard hook",
+                ))
+            }
+        }
+    }
+
+    fn stop_hook_thread(hook: HookThread) {
+        unsafe {
+            let _ = PostThreadMessageW(hook.id, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+        let _ = hook.join.join();
+    }
+
+    fn hook_thread_main(
+        instance_bits: isize,
+        tx: std::sync::mpsc::Sender<windows::core::Result<u32>>,
+    ) {
+        unsafe {
+            let instance = HINSTANCE(instance_bits as *mut _);
+            let mut msg = MSG::default();
+            // The queue must exist before the UI thread can post WM_QUIT.
+            let _ = PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE);
+            let id = GetCurrentThreadId();
+            let hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), instance, 0) {
+                Ok(hook) => hook,
+                Err(err) => {
+                    let _ = tx.send(Err(err));
+                    return;
+                }
+            };
+            if tx.send(Ok(id)).is_err() {
+                let _ = UnhookWindowsHookEx(hook);
+                return;
+            }
+            loop {
+                let rc = GetMessageW(&mut msg, HWND::default(), 0, 0);
+                if rc.0 == 0 || rc.0 == -1 {
+                    break;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            let _ = UnhookWindowsHookEx(hook);
+        }
+    }
+
     unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code < 0 {
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-        if kb.flags.contains(LLKHF_UP) {
-            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
-        }
         let vk = VIRTUAL_KEY(kb.vkCode as u16);
-        if vk == VK_ESCAPE {
-            if PREVIEW_VISIBLE.load(Ordering::Acquire)
-                && !modifiers_down()
-                && post_app(WM_SPACEPEEK_ESC)
-            {
-                return LRESULT(1);
+        let key = if vk == VK_ESCAPE {
+            TrackedKey::Esc
+        } else if vk == VK_SPACE {
+            TrackedKey::Space
+        } else {
+            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+        };
+        let up = kb.flags.contains(LLKHF_UP);
+        // `pass_through` is CancelLoad: the filter's `intercept` flag both acts and
+        // swallows, so the latch is cleared after the post. Repeats and key-up then
+        // follow that latch and Explorer still sees the whole press.
+        let (intercept, pass_through) = if up {
+            (false, false)
+        } else {
+            match key {
+                TrackedKey::Esc => esc_hook_flags(),
+                TrackedKey::Space => (space_should_intercept(), false),
             }
-            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+        };
+        let phase = if up { KeyPhase::Up } else { KeyPhase::Down };
+        let mut decision = REPEATS.with(|slot| slot.borrow_mut().observe(key, phase, intercept));
+        if decision.act {
+            let msg = match key {
+                TrackedKey::Esc => WM_SPACEPEEK_ESC,
+                TrackedKey::Space => WM_SPACEPEEK_SPACE,
+            };
+            if !post_app(msg) {
+                // The down was not taken. Let this event and the rest of the press through.
+                REPEATS.with(|slot| slot.borrow_mut().set_swallowed(key, false));
+                return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+            }
+            if pass_through {
+                REPEATS.with(|slot| slot.borrow_mut().set_swallowed(key, false));
+                decision.swallow = false;
+            }
         }
-        if vk != VK_SPACE || modifiers_down() {
-            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+        if decision.swallow {
+            return LRESULT(1);
         }
-        let foreground = GetForegroundWindow();
+        CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+    }
+
+    /// `(intercept, pass_through)` for an Esc key-down.
+    fn esc_hook_flags() -> (bool, bool) {
+        match esc_action(
+            preview_is_foreground(),
+            loading_in_origin_explorer(),
+            modifiers_down(),
+        ) {
+            EscAction::Dismiss => (true, false),
+            EscAction::CancelLoad => (true, true),
+            EscAction::Ignore => (false, false),
+        }
+    }
+
+    fn loading_in_origin_explorer() -> bool {
+        if !LOADING.load(Ordering::Acquire) {
+            return false;
+        }
+        let bits = LOADING_EXPLORER.load(Ordering::Acquire);
+        if bits == 0 {
+            return false;
+        }
+        let explorer = HWND(bits as *mut _);
+        unsafe { GetForegroundWindow() == explorer }
+    }
+
+    fn publish_loading(state: &PreviewState, explorer: HWND) {
+        if matches!(state, PreviewState::Loading { .. }) {
+            // HWND first, then the flag, so a hook that sees LOADING also sees this window.
+            LOADING_EXPLORER.store(explorer.0 as isize, Ordering::Release);
+            LOADING.store(true, Ordering::Release);
+        } else {
+            LOADING.store(false, Ordering::Release);
+            LOADING_EXPLORER.store(0, Ordering::Release);
+        }
+    }
+
+    fn preview_is_foreground() -> bool {
+        let bits = PREVIEW_HWND.load(Ordering::Acquire);
+        if bits == 0 {
+            return false;
+        }
+        let preview = HWND(bits as *mut _);
+        unsafe {
+            IsWindow(preview).as_bool()
+                && IsWindowVisible(preview).as_bool()
+                && GetForegroundWindow() == preview
+        }
+    }
+
+    fn space_should_intercept() -> bool {
+        if modifiers_down() {
+            return false;
+        }
+        let foreground = unsafe { GetForegroundWindow() };
         let focus = focus_hwnd(foreground);
         let ctx = FocusContext {
             foreground_class: class_name(foreground),
@@ -241,10 +418,11 @@ mod win {
             preview_visible: PREVIEW_VISIBLE.load(Ordering::Acquire),
             modifiers_down: false,
         };
-        if should_intercept_space(&ctx) && post_app(WM_SPACEPEEK_SPACE) {
-            return LRESULT(1);
-        }
-        CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+        should_intercept_space(&ctx)
+    }
+
+    fn publish_preview_hwnd(hwnd: HWND) {
+        PREVIEW_HWND.store(hwnd.0 as isize, Ordering::Release);
     }
 
     fn post_app(msg: u32) -> bool {
@@ -360,6 +538,7 @@ mod win {
                     if app.preview_hwnd == hwnd {
                         app.preview_hwnd = HWND::default();
                         app.edit_hwnd = HWND::default();
+                        publish_preview_hwnd(HWND::default());
                     }
                 });
                 LRESULT(0)
@@ -369,6 +548,18 @@ mod win {
     }
 
     fn on_space() {
+        let busy = with_app_mut(|app| {
+            if app.space_busy {
+                true
+            } else {
+                app.space_busy = true;
+                false
+            }
+        });
+        if busy {
+            return;
+        }
+        let _clear = SpaceBusyGuard;
         let visible = with_app(|app| !matches!(app.state, PreviewState::Hidden));
         if visible {
             dispatch(Event::SpacePressed(PathBuf::new()));
@@ -383,13 +574,51 @@ mod win {
         }
     }
 
+    struct SpaceBusyGuard;
+
+    impl Drop for SpaceBusyGuard {
+        fn drop(&mut self) {
+            with_app_mut(|app| app.space_busy = false);
+        }
+    }
+
     fn on_loaded(lparam: LPARAM) {
         let msg = unsafe { Box::from_raw(lparam.0 as *mut LoadMsg) };
         let cancelled = with_app(|app| app.cancel.is_cancelled(&msg.gen));
         if cancelled {
             return;
         }
+        if load_left_explorer(&msg.gen) {
+            return;
+        }
         dispatch(Event::LoadFinished(msg.gen, msg.result));
+    }
+
+    /// The user left the Explorer window that started this load. Drop the
+    /// result instead of showing the preview over whatever is now in front.
+    fn load_left_explorer(gen: &Generation) -> bool {
+        let explorer = with_app(|app| {
+            if matches!(app.state, PreviewState::Loading { gen: cur, .. } if cur == *gen) {
+                Some(app.explorer_hwnd)
+            } else {
+                None
+            }
+        });
+        let Some(explorer) = explorer else {
+            return false;
+        };
+        if unsafe { GetForegroundWindow() } == explorer {
+            return false;
+        }
+        with_app_mut(|app| {
+            if matches!(app.state, PreviewState::Loading { gen: cur, .. } if cur == *gen) {
+                app.state = PreviewState::Hidden;
+                PREVIEW_VISIBLE.store(false, Ordering::Release);
+                publish_loading(&app.state, app.explorer_hwnd);
+                let _ = app.cancel.generate();
+            }
+        });
+        true
     }
 
     fn dispatch(event: Event) {
@@ -401,6 +630,7 @@ mod win {
                 !matches!(app.state, PreviewState::Hidden),
                 Ordering::Release,
             );
+            publish_loading(&app.state, app.explorer_hwnd);
             effects
         });
         for effect in effects {
@@ -412,7 +642,7 @@ mod win {
         match effect {
             Effect::StartLoad { gen, path } => start_load(gen, path),
             Effect::ShowWindow => show_preview(),
-            Effect::HideWindow => hide_preview(),
+            Effect::HideWindow { restore_focus } => hide_preview(restore_focus),
             Effect::CancelLoad => {
                 with_app(|app| {
                     let _ = app.cancel.generate();
@@ -543,6 +773,7 @@ mod win {
                 app.preview_hwnd = hwnd;
                 app.edit_hwnd = edit;
                 app.suppress_focus = true;
+                publish_preview_hwnd(hwnd);
             });
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOW);
@@ -556,6 +787,7 @@ mod win {
             set_text(existing, &title);
             let edit = with_app(|app| app.edit_hwnd);
             set_text(edit, &body);
+            publish_preview_hwnd(existing);
             with_app_mut(|app| app.suppress_focus = true);
             unsafe {
                 let _ = ShowWindow(existing, SW_SHOW);
@@ -568,7 +800,7 @@ mod win {
         }
     }
 
-    fn hide_preview() {
+    fn hide_preview(restore_focus: bool) {
         let (preview, explorer) = with_app(|app| (app.preview_hwnd, app.explorer_hwnd));
         if preview.0.is_null() {
             return;
@@ -582,8 +814,9 @@ mod win {
             app.preview_hwnd = HWND::default();
             app.edit_hwnd = HWND::default();
             app.suppress_focus = false;
+            publish_preview_hwnd(HWND::default());
         });
-        if unsafe { IsWindow(explorer).as_bool() } {
+        if restore_focus && unsafe { IsWindow(explorer).as_bool() } {
             force_foreground(explorer);
         }
     }
@@ -670,16 +903,67 @@ mod win {
         if hwnd.0.is_null() {
             return;
         }
+        // Attach to the current foreground thread, not the target. When the
+        // target is our preview it lives on this thread, so attaching to it
+        // never runs and the foreground lock refuses SetForegroundWindow.
+        let _attach = ForegroundAttach::to_current_foreground();
         unsafe {
-            let target = GetWindowThreadProcessId(hwnd, None);
-            let current = GetCurrentThreadId();
-            let attached = target != 0
-                && target != current
-                && AttachThreadInput(current, target, true).as_bool();
-            let _ = SetForegroundWindow(hwnd);
-            if attached {
-                let _ = AttachThreadInput(current, target, false);
+            let _ = BringWindowToTop(hwnd);
+            SetLastError(ERROR_SUCCESS);
+            if !SetForegroundWindow(hwnd).as_bool() {
+                let err = GetLastError().0;
+                debug_log(&format!(
+                    "Spacepeek: SetForegroundWindow failed (win32 {err})\n"
+                ));
             }
+            let _ = SetFocus(hwnd);
+        }
+    }
+
+    /// Attaches this thread to the thread that owns the current foreground
+    /// window, and detaches on drop so a later failure cannot leave them joined.
+    struct ForegroundAttach {
+        current: u32,
+        foreground: u32,
+        attached: bool,
+    }
+
+    impl ForegroundAttach {
+        fn to_current_foreground() -> Self {
+            unsafe {
+                let foreground_hwnd = GetForegroundWindow();
+                let foreground = if foreground_hwnd.0.is_null() {
+                    0
+                } else {
+                    GetWindowThreadProcessId(foreground_hwnd, None)
+                };
+                let current = GetCurrentThreadId();
+                let attached = foreground != 0
+                    && foreground != current
+                    && AttachThreadInput(current, foreground, true).as_bool();
+                Self {
+                    current,
+                    foreground,
+                    attached,
+                }
+            }
+        }
+    }
+
+    impl Drop for ForegroundAttach {
+        fn drop(&mut self) {
+            if self.attached {
+                unsafe {
+                    let _ = AttachThreadInput(self.current, self.foreground, false);
+                }
+            }
+        }
+    }
+
+    fn debug_log(text: &str) {
+        let wide = utf16(text);
+        unsafe {
+            OutputDebugStringW(PCWSTR(wide.as_ptr()));
         }
     }
 
@@ -689,25 +973,82 @@ mod win {
         }
         let shell: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL).ok()?;
         let count = shell.Count().ok()?;
+        // Windows 11 tabs share the top-level HWND, so the first `IShellWindows`
+        // match can be a background tab. The active tab is the first
+        // `ShellTabWindowClass` child. No such child means older Explorer.
+        let active_tab = active_tab_hwnd(foreground);
+        let tabs = !active_tab.0.is_null();
+        let mut first_match = None;
         for index in 0..count {
-            let index = VARIANT::from(index);
-            let Ok(dispatch) = shell.Item(&index) else {
-                continue;
-            };
-            let Ok(web) = dispatch.cast::<IWebBrowser2>() else {
+            let Some(web) = web_browser_at(&shell, index) else {
                 continue;
             };
             let Ok(hwnd) = web.HWND() else {
                 continue;
             };
-            if same_hwnd(hwnd.0, foreground) {
-                if let Some(path) = path_from_shell_view(&web) {
+            if !same_hwnd(hwnd.0, foreground) {
+                continue;
+            }
+            if first_match.is_none() {
+                first_match = Some(web.clone());
+            }
+            if !tabs {
+                return path_from_web(&web);
+            }
+            let Some(browser) = top_level_browser(&web) else {
+                continue;
+            };
+            let Ok(tab) = browser_tab_hwnd(&browser) else {
+                continue;
+            };
+            if tab == active_tab {
+                if let Some(path) = path_from_browser(&browser) {
                     return Some(path);
                 }
                 return path_from_automation(&web);
             }
         }
+        if let Some(web) = first_match {
+            // Fallback in case IOleWindow::GetWindow does not return the ShellTabWindowClass HWND on some Explorer build.
+            return path_from_web(&web);
+        }
         None
+    }
+
+    fn active_tab_hwnd(foreground: HWND) -> HWND {
+        unsafe {
+            FindWindowExW(foreground, None, w!("ShellTabWindowClass"), None).unwrap_or_default()
+        }
+    }
+
+    unsafe fn web_browser_at(shell: &IShellWindows, index: i32) -> Option<IWebBrowser2> {
+        let index = VARIANT::from(index);
+        let dispatch = shell.Item(&index).ok()?;
+        dispatch.cast().ok()
+    }
+
+    unsafe fn path_from_web(web: &IWebBrowser2) -> Option<PathBuf> {
+        if let Some(browser) = top_level_browser(web) {
+            if let Some(path) = path_from_browser(&browser) {
+                return Some(path);
+            }
+        }
+        path_from_automation(web)
+    }
+
+    unsafe fn top_level_browser(web: &IWebBrowser2) -> Option<IShellBrowser> {
+        let provider: IServiceProvider = web.cast().ok()?;
+        provider.QueryService(&SID_STopLevelBrowser).ok()
+    }
+
+    unsafe fn browser_tab_hwnd(browser: &IShellBrowser) -> windows::core::Result<HWND> {
+        let ole = browser.cast::<IOleWindow>()?;
+        ole.GetWindow()
+    }
+
+    unsafe fn path_from_browser(browser: &IShellBrowser) -> Option<PathBuf> {
+        let view = browser.QueryActiveShellView().ok()?;
+        path_from_view(&view)
     }
 
     fn same_hwnd(shell_hwnd: isize, foreground: HWND) -> bool {
@@ -717,32 +1058,63 @@ mod win {
         shell_hwnd == foreground.0 as isize || shell_hwnd as i32 == foreground.0 as isize as i32
     }
 
-    unsafe fn path_from_shell_view(web: &IWebBrowser2) -> Option<PathBuf> {
-        let provider: IServiceProvider = web.cast().ok()?;
-        let browser: IShellBrowser = provider.QueryService(&SID_STopLevelBrowser).ok()?;
-        let view = browser.QueryActiveShellView().ok()?;
-        path_from_view(&view)
-    }
-
     unsafe fn path_from_view(view: &IShellView) -> Option<PathBuf> {
         let folder_view: IFolderView = view.cast().ok()?;
-        if let Ok(index) = folder_view.GetFocusedItem() {
-            if index >= 0 {
-                if let Ok(pidl) = folder_view.Item(index) {
-                    let path = path_from_pidl(&folder_view, pidl);
-                    ILFree(Some(pidl));
-                    if path.is_some() {
-                        return path;
-                    }
-                }
-            }
+        // Ctrl+click leaves the focus rectangle on an item after deselecting it.
+        // An empty selection is not a file to preview.
+        let count = folder_view.ItemCount(SVGIO_SELECTION).ok()?;
+        if count <= 0 {
+            return None;
         }
+        let (focused, focused_is_selected) = focused_candidate(&folder_view);
+        let first_selected = if focused.is_some() && focused_is_selected {
+            None
+        } else {
+            first_selection_path(&folder_view)
+        };
+        choose_selected(focused, focused_is_selected, first_selected)
+    }
+
+    unsafe fn focused_candidate(folder_view: &IFolderView) -> (Option<PathBuf>, bool) {
+        let Ok(index) = folder_view.GetFocusedItem() else {
+            return (None, false);
+        };
+        if index < 0 {
+            return (None, false);
+        }
+        let Ok(pidl) = folder_view.Item(index) else {
+            return (None, false);
+        };
+        if pidl.is_null() {
+            return (None, false);
+        }
+        let selected = pidl_is_selected(folder_view, pidl);
+        let path = if selected {
+            path_from_pidl(folder_view, pidl)
+        } else {
+            None
+        };
+        ILFree(Some(pidl));
+        (path, selected)
+    }
+
+    unsafe fn pidl_is_selected(folder_view: &IFolderView, pidl: *const ITEMIDLIST) -> bool {
+        let Ok(view) = folder_view.cast::<IFolderView2>() else {
+            return false;
+        };
+        match view.GetSelectionState(pidl) {
+            Ok(state) => (state & (SVSI_SELECT.0 as u32)) != 0,
+            Err(_) => false,
+        }
+    }
+
+    unsafe fn first_selection_path(folder_view: &IFolderView) -> Option<PathBuf> {
         let items: IEnumIDList = folder_view.Items(SVGIO_SELECTION).ok()?;
         let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
         let mut fetched = 0u32;
         let hr = items.Next(std::slice::from_mut(&mut pidl), Some(&mut fetched));
         if hr.is_ok() && fetched > 0 && !pidl.is_null() {
-            let path = path_from_pidl(&folder_view, pidl);
+            let path = path_from_pidl(folder_view, pidl);
             ILFree(Some(pidl));
             path
         } else {
@@ -760,41 +1132,64 @@ mod win {
         let folder: IShellFolder = folder_view.GetFolder().ok()?;
         let item: IShellItem = SHCreateItemWithParent(None, &folder, pidl).ok()?;
         let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-        let text = name.to_string();
+        if name.is_null() {
+            return None;
+        }
+        let path = path_from_wide(name.as_wide());
         CoTaskMemFree(Some(name.0 as *const _));
-        let text = text.ok().unwrap_or_default();
-        if text.is_empty() {
+        path
+    }
+
+    fn path_from_wide(wide: &[u16]) -> Option<PathBuf> {
+        if wide.is_empty() {
             None
         } else {
-            Some(PathBuf::from(text))
+            Some(PathBuf::from(OsString::from_wide(wide)))
         }
     }
 
     unsafe fn path_from_automation(web: &IWebBrowser2) -> Option<PathBuf> {
         let document = web.Document().ok()?;
         let dual: IShellFolderViewDual = document.cast().ok()?;
-        if let Ok(item) = dual.FocusedItem() {
-            if let Some(path) = folder_item_path(&item) {
-                return Some(path);
-            }
-        }
         let items = dual.SelectedItems().ok()?;
-        if items.Count().ok()? <= 0 {
+        let count = items.Count().ok()?;
+        if count <= 0 {
             return None;
         }
-        let index = VARIANT::from(0i32);
+        let first_selected = folder_item_at(&items, 0);
+        let focused = dual
+            .FocusedItem()
+            .ok()
+            .and_then(|item| folder_item_path(&item));
+        let focused_is_selected = match &focused {
+            Some(path) => selection_contains_path(&items, count, path),
+            None => false,
+        };
+        choose_selected(focused, focused_is_selected, first_selected)
+    }
+
+    unsafe fn folder_item_at(items: &FolderItems, index: i32) -> Option<PathBuf> {
+        let index = VARIANT::from(index);
         let item = items.Item(&index).ok()?;
         folder_item_path(&item)
     }
 
+    unsafe fn selection_contains_path(items: &FolderItems, count: i32, path: &Path) -> bool {
+        for index in 0..count {
+            let variant = VARIANT::from(index);
+            let Ok(item) = items.Item(&variant) else {
+                continue;
+            };
+            if folder_item_path(&item).as_deref() == Some(path) {
+                return true;
+            }
+        }
+        false
+    }
+
     unsafe fn folder_item_path(item: &FolderItem) -> Option<PathBuf> {
         let bstr = item.Path().ok()?;
-        let text = String::try_from(&bstr).ok()?;
-        if text.is_empty() {
-            None
-        } else {
-            Some(PathBuf::from(text))
-        }
+        path_from_wide(bstr.as_wide())
     }
 
     fn register_class(instance: HINSTANCE, name: &str) -> windows::core::Result<()> {
