@@ -4,11 +4,13 @@
 //! tested on any host. The Windows window procedure only maps the results.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::geometry::{
     effective_dpi, muldiv, scale_for_dpi, PxSize, BASE_DPI, LOGICAL_PREVIEW_HEIGHT,
     LOGICAL_PREVIEW_WIDTH,
 };
+use crate::image_preview::{format_image_details, DecodedImage};
 use crate::preview::{format_compact_size, format_grouped, preview_text, Preview, PreviewError};
 
 /// Logical height of the header strip at 96 DPI.
@@ -43,6 +45,8 @@ pub enum WindowKind {
     Content,
     /// Centred error, folder, shortcut, or empty-file message.
     Message,
+    /// PNG or JPEG bitmap. Opens at the same size as [`Self::Content`].
+    Image,
 }
 
 /// File name and the secondary header line.
@@ -53,11 +57,21 @@ pub struct HeaderText {
 }
 
 /// What the window should draw. The text body is the edit control; a message
-/// is painted centred under the header.
+/// is painted centred under the header. An image is the decoded bitmap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Presented {
-    Text { header: HeaderText, body: String },
-    Message { header: HeaderText, message: String },
+    Text {
+        header: HeaderText,
+        body: String,
+    },
+    Message {
+        header: HeaderText,
+        message: String,
+    },
+    Image {
+        header: HeaderText,
+        image: Arc<DecodedImage>,
+    },
 }
 
 impl Presented {
@@ -65,19 +79,22 @@ impl Presented {
         match self {
             Presented::Text { .. } => WindowKind::Content,
             Presented::Message { .. } => WindowKind::Message,
+            Presented::Image { .. } => WindowKind::Image,
         }
     }
 
     pub fn header(&self) -> &HeaderText {
         match self {
-            Presented::Text { header, .. } | Presented::Message { header, .. } => header,
+            Presented::Text { header, .. }
+            | Presented::Message { header, .. }
+            | Presented::Image { header, .. } => header,
         }
     }
 
     pub fn message(&self) -> Option<&str> {
         match self {
             Presented::Message { message, .. } => Some(message),
-            Presented::Text { .. } => None,
+            Presented::Text { .. } | Presented::Image { .. } => None,
         }
     }
 }
@@ -116,6 +133,15 @@ pub fn path_label(path: &Path) -> String {
 }
 
 pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
+    if let Some(image) = preview.image.as_ref() {
+        return Presented::Image {
+            header: HeaderText {
+                name: path_label(path),
+                details: format_image_details(preview.total_bytes, image),
+            },
+            image: Arc::clone(image),
+        };
+    }
     Presented::Text {
         header: HeaderText {
             name: path_label(path),
@@ -142,7 +168,7 @@ pub fn chrome_for_error(path: &Path, error: &PreviewError) -> Presented {
 
 pub fn default_logical_size(kind: WindowKind) -> LogicalSize {
     match kind {
-        WindowKind::Content => LogicalSize {
+        WindowKind::Content | WindowKind::Image => LogicalSize {
             width: LOGICAL_PREVIEW_WIDTH,
             height: LOGICAL_PREVIEW_HEIGHT,
         },
@@ -369,6 +395,7 @@ mod tests {
             line_count,
             truncation: None,
             total_bytes,
+            image: None,
         }
     }
 
@@ -436,6 +463,50 @@ mod tests {
         );
         assert_eq!(plain.kind(), WindowKind::Content);
         assert_eq!(plain.message(), None);
+    }
+
+    #[test]
+    fn image_preview_uses_source_dimensions_and_the_content_window() {
+        use crate::image_preview::{DecodedImage, ImageFormat};
+        use std::sync::Arc;
+
+        let image = Arc::new(DecodedImage {
+            width: 800,
+            height: 600,
+            source_width: 4_000,
+            source_height: 3_000,
+            format: ImageFormat::Jpeg,
+            bgra: vec![0, 0, 0, 255],
+        });
+        let preview = Preview {
+            content: String::new(),
+            truncated: false,
+            line_count: 0,
+            truncation: None,
+            total_bytes: 1_258_291,
+            image: Some(Arc::clone(&image)),
+        };
+        let presented = chrome_for_text(Path::new("photo.jpg"), &preview);
+        assert_eq!(presented.kind(), WindowKind::Image);
+        assert_eq!(presented.message(), None);
+        assert_eq!(presented.header().name, "photo.jpg");
+        assert_eq!(presented.header().details, "1.2 MB · 4,000 × 3,000 · JPEG");
+        let Presented::Image { image: shown, .. } = presented else {
+            panic!("expected image chrome");
+        };
+        assert!(Arc::ptr_eq(&shown, &image));
+        assert_eq!(
+            default_logical_size(WindowKind::Image),
+            LogicalSize {
+                width: 760,
+                height: 520
+            }
+        );
+        let mem = SizeMemory::new();
+        assert_eq!(
+            mem.opening_logical(WindowKind::Image),
+            mem.opening_logical(WindowKind::Content)
+        );
     }
 
     #[test]
