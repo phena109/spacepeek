@@ -1,3 +1,4 @@
+pub mod chrome;
 pub mod cli;
 pub mod geometry;
 pub mod keys;
@@ -5,6 +6,11 @@ pub mod preview;
 pub mod selection;
 pub mod state;
 
+pub use chrome::{
+    chrome_for_error, chrome_for_text, hit_test, min_physical_size, scaled_close_width,
+    scaled_detail_font, scaled_header_font, scaled_header_height, scaled_header_pad, ChromeLayout,
+    HeaderText, HitZone, LogicalSize, Presented, SizeMemory, WindowKind,
+};
 pub use cli::{parse_command, Command};
 pub use geometry::{
     effective_dpi, place_preview, preview_placement, scaled_font_height, scaled_preview_size,
@@ -18,11 +24,11 @@ pub use keys::{
     Typeahead, TypeaheadKey, NAV_RELOAD_DELAY_MS,
 };
 pub use preview::{
-    format_byte_size, format_truncation_notice, load_text_preview, preview_text, CancelToken,
-    DeniedKind, Generation, Preview, PreviewError, PreviewLimits, Truncation, DEFAULT_MAX_BYTES,
-    MAX_LINE_CHARS,
+    format_byte_size, format_compact_size, format_truncation_notice, load_text_preview,
+    preview_text, CancelToken, DeniedKind, Generation, Preview, PreviewError, PreviewLimits,
+    Truncation, DEFAULT_MAX_BYTES, MAX_LINE_CHARS,
 };
-pub use selection::choose_selected;
+pub use selection::{choose_selected, nonempty_path};
 pub use state::{
     gate_show, session_phase, step, Effect, Event, PreviewState, ShowGate, ShowOutcome,
 };

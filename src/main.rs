@@ -21,35 +21,42 @@ fn main() -> std::process::ExitCode {
 mod win {
     use std::cell::RefCell;
     use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{
         AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering,
     };
 
     use spacepeek::{
-        choose_selected, classify_typeahead_vk, decide_hook_key, effective_dpi, gate_show,
-        hook_key_from_vk, load_text_preview, nav_reload_remaining, parse_command,
-        preview_placement, preview_text, scaled_font_height, session_phase, step,
-        typeahead_window_ms, wheel_scroll_dy, CancelToken, Command, Effect, Event, Generation,
-        HookContext, HookDecision, HookKey, KeyPhase, Modifiers, NavKey, Preview, PreviewError,
-        PreviewLimits, PreviewState, PxRect, RepeatFilter, ScrollHold, ScrollOp, SessionPhase,
-        ShowGate, ShowOutcome, TrackedKey, Typeahead, TypeaheadKey, NAV_RELOAD_DELAY_MS,
+        choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk, decide_hook_key,
+        effective_dpi, gate_show, hit_test, hook_key_from_vk, load_text_preview, min_physical_size,
+        nav_reload_remaining, nonempty_path, parse_command, place_preview, scaled_close_width,
+        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
+        scaled_header_pad, session_phase, step, typeahead_window_ms, wheel_scroll_dy, CancelToken,
+        ChromeLayout, Command, Effect, Event, Generation, HitZone, HookContext, HookDecision,
+        HookKey, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits,
+        PreviewState, PxRect, RepeatFilter, ScrollHold, ScrollOp, SessionPhase, ShowGate,
+        ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind,
+        NAV_RELOAD_DELAY_MS,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL,
-        HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+        CloseHandle, GetLastError, SetLastError, COLORREF, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
+        E_FAIL, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
-        CreateFontW, DeleteObject, GetDC, GetMonitorInfoW, GetSysColorBrush, GetTextFaceW,
-        MonitorFromWindow, ReleaseDC, SelectObject, CLEARTYPE_QUALITY, COLOR_WINDOW,
-        DEFAULT_CHARSET, FF_MODERN, FIXED_PITCH, FW_NORMAL, HFONT, MONITORINFO,
-        MONITOR_DEFAULTTONEAREST,
+        BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
+        EndPaint, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush, GetTextFaceW, InvalidateRect,
+        MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, CLEARTYPE_QUALITY,
+        COLOR_WINDOW, DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
+        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH,
+        FW_NORMAL, FW_SEMIBOLD, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        PAINTSTRUCT, TRANSPARENT, VARIABLE_PITCH,
     };
+    use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IServiceProvider,
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
+        IServiceProvider, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
     };
     use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -58,20 +65,21 @@ mod win {
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
     use windows::Win32::UI::HiDpi::{
-        GetDpiForMonitor, GetDpiForWindow, SetProcessDpiAwarenessContext,
+        GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, GetDoubleClickTime, GetFocus, SetFocus, VIRTUAL_KEY, VK_CONTROL,
-        VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+        GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, SetFocus, VIRTUAL_KEY,
+        VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
         FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
-        IShellFolder, IShellFolderViewDual, IShellItem, IShellView, IShellWindows, IWebBrowser2,
-        SHCreateItemWithParent, SID_STopLevelBrowser, ShellWindows, Shell_NotifyIconW, NIF_ICON,
-        NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT,
-        NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SIGDN_FILESYSPATH, SVGIO_SELECTION, SVSI_SELECT,
+        IShellFolder, IShellFolderViewDual, IShellItem, IShellLinkW, IShellView, IShellWindows,
+        IWebBrowser2, SHCreateItemWithParent, SID_STopLevelBrowser, ShellLink, ShellWindows,
+        Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
+        NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SIGDN_FILESYSPATH,
+        SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, BringWindowToTop, CallNextHookEx, CallWindowProcW, CreatePopupMenu,
@@ -83,20 +91,22 @@ mod win {
         PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SendMessageW,
         SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
         SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
-        ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, EVENT_SYSTEM_FOREGROUND,
-        GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU, IDC_ARROW, IDI_APPLICATION,
-        KBDLLHOOKSTRUCT, LLKHF_UP, MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-        MESSAGEBOX_STYLE, MF_STRING, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN,
-        SB_PAGEUP, SB_TOP, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
-        SW_SHOWNOACTIVATE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
+        CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY,
+        EVENT_SYSTEM_FOREGROUND, GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU,
+        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+        HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_UP,
+        MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MF_STRING,
+        MINMAXINFO, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP,
+        SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+        SW_HIDE, SW_SHOWNOACTIVATE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
         WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CHAR,
-        WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KEYUP,
-        WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
-        WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL, WM_NULL, WM_QUIT, WM_RBUTTONDBLCLK,
-        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
-        WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSW, WNDCLASS_STYLES, WS_BORDER, WS_CHILD,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_VISIBLE,
-        WS_VSCROLL,
+        WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE,
+        WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL,
+        WM_NCHITTEST, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
+        WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER,
+        WM_VSCROLL, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -139,7 +149,13 @@ mod win {
         explorer_hwnd: HWND,
         instance: HINSTANCE,
         font: HFONT,
+        header_font: HFONT,
+        detail_font: HFONT,
         font_dpi: u32,
+        /// Last user-chosen outer size, in logical pixels. Empty until a resize.
+        sizes: SizeMemory,
+        /// Header and, for errors, the centred message. The edit holds file text.
+        presented: Option<Presented>,
         /// Set for the duration of `on_space`. Explorer COM calls pump this STA
         /// thread, so a posted Space can otherwise re-enter `on_space`.
         space_busy: bool,
@@ -214,7 +230,11 @@ mod win {
             explorer_hwnd: HWND::default(),
             instance,
             font: HFONT::default(),
+            header_font: HFONT::default(),
+            detail_font: HFONT::default(),
             font_dpi: 0,
+            sizes: SizeMemory::new(),
+            presented: None,
             space_busy: false,
             input_baseline: 0,
             last_nav_tick: None,
@@ -912,8 +932,35 @@ mod win {
 
     fn preview_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         match msg {
+            // Header drag and edge resize. The × button stays client so the
+            // click is ours; returning HTCAPTION there would start a drag.
+            // MA_NOACTIVATE and WS_EX_NOACTIVATE keep Explorer in front. A
+            // caption drag that still activates is handed back on WM_EXITSIZEMOVE.
+            WM_NCHITTEST => LRESULT(zone_to_hit(hit_at_screen(hwnd, lparam)) as isize),
+            WM_GETMINMAXINFO => {
+                apply_min_track(hwnd, lparam);
+                LRESULT(0)
+            }
+            WM_EXITSIZEMOVE => {
+                remember_window_size(hwnd);
+                let explorer = with_app(|app| app.explorer_hwnd);
+                restore_explorer_focus(explorer);
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                if hit_at_client(hwnd, lparam) == HitZone::Close {
+                    dispatch(Event::EscPressed);
+                }
+                LRESULT(0)
+            }
+            WM_ERASEBKGND => LRESULT(1),
+            WM_PAINT => {
+                paint_preview(hwnd);
+                LRESULT(0)
+            }
             WM_SIZE => {
                 resize_edit(hwnd);
+                invalidate_preview(hwnd);
                 LRESULT(0)
             }
             WM_KEYDOWN if wparam.0 == usize::from(VK_ESCAPE.0) => {
@@ -935,6 +982,13 @@ mod win {
                 unsafe {
                     let _ = HideCaret(edit);
                 }
+                // A header click can still focus us. Put Explorer back so arrow
+                // keys keep moving the selection. Skip when Explorer is already
+                // in front, and skip while a size loop has capture.
+                if unsafe { GetCapture() } == HWND::default() {
+                    let explorer = with_app(|app| app.explorer_hwnd);
+                    restore_explorer_focus(explorer);
+                }
                 LRESULT(0)
             }
             WM_DESTROY => {
@@ -942,6 +996,7 @@ mod win {
                     if app.preview_hwnd == hwnd {
                         app.preview_hwnd = HWND::default();
                         app.edit_hwnd = HWND::default();
+                        app.presented = None;
                         publish_preview_hwnd(HWND::default());
                     }
                 });
@@ -971,10 +1026,14 @@ mod win {
         }
         let explorer = unsafe { GetForegroundWindow() };
         with_app_mut(|app| app.explorer_hwnd = explorer);
-        let path = unsafe { selected_path(explorer) };
-        match path {
-            Some(path) => dispatch(Event::SpacePressed(path)),
-            None => dispatch(Event::SpacePressed(PathBuf::new())),
+        let path = nonempty_path(unsafe { selected_path(explorer) });
+        // The hook cannot query the selection. That COM call belongs on this
+        // STA thread; doing it inside the low-level hook would stall every
+        // keystroke. Space was already swallowed. With no filesystem path,
+        // opening a window is the failure — do nothing. Re-injecting the key
+        // would re-enter the hook.
+        if let Some(path) = path {
+            dispatch(Event::SpacePressed(path));
         }
     }
 
@@ -1058,8 +1117,10 @@ mod win {
         if unsafe { GetForegroundWindow() != explorer } {
             return;
         }
-        let path = unsafe { selected_path(explorer) }.unwrap_or_default();
-        dispatch(Event::SelectionChanged(path));
+        // A cleared selection is not a new file. Leave the current preview up.
+        if let Some(path) = nonempty_path(unsafe { selected_path(explorer) }) {
+            dispatch(Event::SelectionChanged(path));
+        }
     }
 
     struct NavBusyGuard;
@@ -1157,14 +1218,6 @@ mod win {
             (app.cancel.clone(), app.msg_hwnd)
         });
         if path.as_os_str().is_empty() {
-            post_load(
-                hwnd,
-                gen,
-                Err(PreviewError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "No file is selected.",
-                ))),
-            );
             return;
         }
         let hwnd_bits = hwnd.0 as isize;
@@ -1172,6 +1225,10 @@ mod win {
             .name("spacepeek-load".to_string())
             .spawn(move || {
                 let result = load_text_preview(&path, PreviewLimits::default(), &cancel, gen);
+                if cancel.is_cancelled(&gen) {
+                    return;
+                }
+                let result = enrich_shortcut(&path, result);
                 if cancel.is_cancelled(&gen) {
                     return;
                 }
@@ -1197,6 +1254,76 @@ mod win {
             unsafe { PostMessageW(hwnd, WM_SPACEPEEK_LOADED, WPARAM(0), LPARAM(raw as isize)) };
         if posted.is_err() {
             drop(unsafe { Box::from_raw(raw) });
+        }
+    }
+
+    /// Fill in a `.lnk` target when the loader classified the file as a shortcut.
+    ///
+    /// The load thread is not the UI STA, so this initializes COM for itself and
+    /// releases it. `IShellLinkW::GetPath` reads the stored path only; `Resolve`
+    /// is not called, because that can search and show UI.
+    fn enrich_shortcut(
+        path: &Path,
+        result: std::result::Result<Preview, PreviewError>,
+    ) -> std::result::Result<Preview, PreviewError> {
+        match result {
+            Err(PreviewError::Shortcut { .. }) => Err(PreviewError::Shortcut {
+                target: read_shortcut_target(path),
+            }),
+            other => other,
+        }
+    }
+
+    fn read_shortcut_target(path: &Path) -> Option<String> {
+        let _com = ComInit::enter()?;
+        unsafe { shortcut_target(path) }
+    }
+
+    struct ComInit;
+
+    impl ComInit {
+        fn enter() -> Option<Self> {
+            match unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() } {
+                Ok(()) => Some(Self),
+                Err(_) => None,
+            }
+        }
+    }
+
+    impl Drop for ComInit {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    unsafe fn shortcut_target(path: &Path) -> Option<String> {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let file: IPersistFile = link.cast().ok()?;
+        let wide = wide_path(path);
+        file.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
+        let mut buf = vec![0u16; 32 * 1024];
+        let mut data = WIN32_FIND_DATAW::default();
+        let flags = u32::try_from(SLGP_RAWPATH.0).unwrap_or(0);
+        link.GetPath(&mut buf, std::ptr::from_mut(&mut data), flags)
+            .ok()?;
+        wide_to_text(&buf)
+    }
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    fn wide_to_text(buf: &[u16]) -> Option<String> {
+        let end = buf.iter().position(|unit| *unit == 0).unwrap_or(buf.len());
+        let text = String::from_utf16_lossy(&buf[..end]);
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
         }
     }
 
@@ -1270,106 +1397,209 @@ mod win {
 
     /// Create the preview hidden, or replace the text of the existing one.
     /// Does not activate or show the window. Returns false if the window
-    /// could not be created.
+    /// could not be created. An existing window keeps its pixel size; only a
+    /// new window takes the remembered (or default) outer size.
     fn fill_preview_window() -> bool {
-        let (title, body, anchor, instance, existing) = with_app(|app| {
-            let (title, body) = window_content(&app.state);
+        let (presented, anchor, instance, existing) = with_app(|app| {
             (
-                title,
-                body,
+                presented_from(&app.state),
                 app.explorer_hwnd,
                 app.instance,
                 app.preview_hwnd,
             )
         });
+        let Some(presented) = presented else {
+            return false;
+        };
         let dpi_anchor = if existing.0.is_null() {
             anchor
         } else {
             existing
         };
         let dpi = dpi_for_anchor(dpi_anchor);
-        let (font, stale) = swap_font(dpi);
-        let _stale = StaleFont(stale);
+        let (fonts, stale) = swap_fonts(dpi);
+        let _stale = stale;
+        let title = presented.header().name.clone();
+
         if existing.0.is_null() {
-            let (x, y, width, height) = preview_bounds(anchor, dpi);
-            let class_name = utf16(PREVIEW_CLASS);
-            let title_w = utf16(&title);
-            let hwnd = unsafe {
-                CreateWindowExW(
-                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                    PCWSTR(class_name.as_ptr()),
-                    PCWSTR(title_w.as_ptr()),
-                    WS_POPUP | WS_BORDER,
-                    x,
-                    y,
-                    width,
-                    height,
-                    HWND::default(),
-                    HMENU::default(),
-                    instance,
-                    None,
-                )
-            };
-            let Ok(hwnd) = hwnd else {
+            let Some(hwnd) = create_preview_window(anchor, instance, dpi, &presented) else {
                 return false;
             };
-            let edit_class = utf16("EDIT");
-            // ES_AUTOHSCROLL turns word wrap off for a multiline EDIT. WS_HSCROLL
-            // keeps a bar so columns and indentation scroll sideways instead of
-            // breaking mid-token.
-            let edit_style = WS_CHILD
-                | WS_VISIBLE
-                | WS_VSCROLL
-                | WS_HSCROLL
-                | WINDOW_STYLE(ES_MULTILINE as u32)
-                | WINDOW_STYLE(ES_READONLY as u32)
-                | WINDOW_STYLE(ES_AUTOVSCROLL as u32)
-                | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
-            let edit = unsafe {
-                CreateWindowExW(
-                    WINDOW_EX_STYLE(0),
-                    PCWSTR(edit_class.as_ptr()),
-                    PCWSTR::null(),
-                    edit_style,
-                    0,
-                    0,
-                    width,
-                    height,
-                    hwnd,
-                    HMENU::default(),
-                    instance,
-                    None,
-                )
-            };
-            let Ok(edit) = edit else {
+            // Publish before the edit is created so parent messages, including
+            // a size from the child, hit `preview_proc`.
+            with_app_mut(|app| {
+                app.preview_hwnd = hwnd;
+                app.edit_hwnd = HWND::default();
+                app.presented = Some(paint_presented(&presented));
+                publish_preview_hwnd(hwnd);
+            });
+            if !install_body(hwnd, instance, &presented, fonts.edit) {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }
+                with_app_mut(|app| {
+                    if app.preview_hwnd == hwnd {
+                        app.preview_hwnd = HWND::default();
+                        app.edit_hwnd = HWND::default();
+                        app.presented = None;
+                        publish_preview_hwnd(HWND::default());
+                    }
+                });
                 return false;
-            };
-            unsafe {
-                let _ = SendMessageW(edit, EM_SETLIMITTEXT, WPARAM(1_048_576), LPARAM(0));
             }
-            subclass_edit(edit);
-            apply_font(edit, font);
-            set_text(edit, &body);
-            resize_edit_pair(hwnd, edit);
-            with_app_mut(|app| {
-                app.preview_hwnd = hwnd;
-                app.edit_hwnd = edit;
-                publish_preview_hwnd(hwnd);
-            });
-            suppress_caret(edit);
+            set_text(hwnd, &title);
+            invalidate_preview(hwnd);
             true
         } else {
-            apply_font(with_app(|app| app.edit_hwnd), font);
+            if !install_body(existing, instance, &presented, fonts.edit) {
+                return false;
+            }
             set_text(existing, &title);
-            let edit = with_app(|app| app.edit_hwnd);
-            set_text(edit, &body);
+            with_app_mut(|app| {
+                app.presented = Some(paint_presented(&presented));
+            });
             publish_preview_hwnd(existing);
-            suppress_caret(edit);
+            invalidate_preview(existing);
             true
         }
+    }
+
+    fn presented_from(state: &PreviewState) -> Option<Presented> {
+        match state {
+            PreviewState::Showing { path, preview, .. } => Some(chrome_for_text(path, preview)),
+            PreviewState::Failed { path, error, .. } => Some(chrome_for_error(path, error)),
+            PreviewState::PendingShow { path, outcome, .. } => match outcome {
+                ShowOutcome::Ready(preview) => Some(chrome_for_text(path, preview)),
+                ShowOutcome::Failed(error) => Some(chrome_for_error(path, error)),
+            },
+            _ => None,
+        }
+    }
+
+    /// Header and message text for painting. The edit control owns file text,
+    /// so that copy is not kept a second time.
+    fn paint_presented(presented: &Presented) -> Presented {
+        match presented {
+            Presented::Text { header, .. } => Presented::Text {
+                header: header.clone(),
+                body: String::new(),
+            },
+            Presented::Message { header, message } => Presented::Message {
+                header: header.clone(),
+                message: message.clone(),
+            },
+        }
+    }
+
+    fn create_preview_window(
+        anchor: HWND,
+        instance: HINSTANCE,
+        dpi: u32,
+        presented: &Presented,
+    ) -> Option<HWND> {
+        let size = with_app(|app| app.sizes.opening_physical(presented.kind(), dpi));
+        let placed = place_preview(
+            anchor_rect(anchor),
+            monitor_work_area(anchor),
+            size.width,
+            size.height,
+        );
+        let class_name = utf16(PREVIEW_CLASS);
+        let title = utf16(&presented.header().name);
+        unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN,
+                placed.x,
+                placed.y,
+                placed.width,
+                placed.height,
+                HWND::default(),
+                HMENU::default(),
+                instance,
+                None,
+            )
+            .ok()
+        }
+    }
+
+    fn install_body(
+        hwnd: HWND,
+        instance: HINSTANCE,
+        presented: &Presented,
+        edit_font: HFONT,
+    ) -> bool {
+        match presented {
+            Presented::Text { body, .. } => {
+                let Some(edit) = ensure_edit(hwnd, instance) else {
+                    return false;
+                };
+                apply_font(edit, edit_font);
+                set_text(edit, body);
+                resize_edit_pair(hwnd, edit);
+                suppress_caret(edit);
+                true
+            }
+            Presented::Message { .. } => {
+                destroy_edit();
+                true
+            }
+        }
+    }
+
+    fn ensure_edit(parent: HWND, instance: HINSTANCE) -> Option<HWND> {
+        let existing = with_app(|app| app.edit_hwnd);
+        if !existing.0.is_null() && unsafe { IsWindow(existing).as_bool() } {
+            return Some(existing);
+        }
+        let edit_class = utf16("EDIT");
+        // ES_AUTOHSCROLL turns word wrap off for a multiline EDIT. WS_HSCROLL
+        // keeps a bar so columns and indentation scroll sideways instead of
+        // breaking mid-token.
+        let edit_style = WS_CHILD
+            | WS_VISIBLE
+            | WS_VSCROLL
+            | WS_HSCROLL
+            | WINDOW_STYLE(ES_MULTILINE as u32)
+            | WINDOW_STYLE(ES_READONLY as u32)
+            | WINDOW_STYLE(ES_AUTOVSCROLL as u32)
+            | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
+        let edit = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PCWSTR(edit_class.as_ptr()),
+                PCWSTR::null(),
+                edit_style,
+                0,
+                0,
+                0,
+                0,
+                parent,
+                HMENU::default(),
+                instance,
+                None,
+            )
+            .ok()?
+        };
+        unsafe {
+            let _ = SendMessageW(edit, EM_SETLIMITTEXT, WPARAM(1_048_576), LPARAM(0));
+        }
+        subclass_edit(edit);
+        with_app_mut(|app| app.edit_hwnd = edit);
+        Some(edit)
+    }
+
+    fn destroy_edit() {
+        let edit = with_app_mut(|app| std::mem::take(&mut app.edit_hwnd));
+        if edit.0.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = DestroyWindow(edit);
+        }
+        EDIT_PROC.store(0, Ordering::Release);
     }
 
     fn reveal_preview() {
@@ -1405,6 +1635,7 @@ mod win {
         with_app_mut(|app| {
             app.preview_hwnd = HWND::default();
             app.edit_hwnd = HWND::default();
+            app.presented = None;
             publish_preview_hwnd(HWND::default());
         });
         EDIT_PROC.store(0, Ordering::Release);
@@ -1512,14 +1743,13 @@ mod win {
         let mut rc = RECT::default();
         unsafe {
             if GetClientRect(parent, &mut rc).is_ok() {
-                let _ = MoveWindow(edit, 0, 0, rc.right - rc.left, rc.bottom - rc.top, true);
+                let dpi = dpi_for_anchor(parent);
+                let header = scaled_header_height(dpi);
+                let width = (rc.right - rc.left).max(0);
+                let height = (rc.bottom - rc.top - header).max(0);
+                let _ = MoveWindow(edit, 0, header, width, height, true);
             }
         }
-    }
-
-    fn preview_bounds(anchor: HWND, dpi: u32) -> (i32, i32, i32, i32) {
-        let placed = preview_placement(anchor_rect(anchor), monitor_work_area(anchor), dpi);
-        (placed.x, placed.y, placed.width, placed.height)
     }
 
     fn anchor_rect(anchor: HWND) -> Option<PxRect> {
@@ -1612,55 +1842,403 @@ mod win {
             }
         }
         let dpi = (wparam.0 as u32) & 0xffff;
-        let (font, stale) = swap_font(dpi);
-        let _stale = StaleFont(stale);
-        apply_font(with_app(|app| app.edit_hwnd), font);
+        let (fonts, stale) = swap_fonts(dpi);
+        let _stale = stale;
+        apply_font(with_app(|app| app.edit_hwnd), fonts.edit);
         resize_edit(hwnd);
+        invalidate_preview(hwnd);
     }
 
-    fn window_content(state: &PreviewState) -> (String, String) {
-        match state {
-            PreviewState::Showing { path, preview, .. } => preview_body(path, preview),
-            PreviewState::Failed { path, error, .. } => error_body(path, error),
-            PreviewState::PendingShow { path, outcome, .. } => match outcome {
-                ShowOutcome::Ready(preview) => preview_body(path, preview),
-                ShowOutcome::Failed(error) => error_body(path, error),
-            },
-            _ => ("Spacepeek".to_string(), String::new()),
+    fn zone_to_hit(zone: HitZone) -> u32 {
+        match zone {
+            HitZone::Caption => HTCAPTION,
+            // The × is client area. `HTCLOSE` would let DefWindowProc post
+            // `WM_CLOSE` as well as the click we handle ourselves.
+            HitZone::Close | HitZone::Client => HTCLIENT,
+            HitZone::Left => HTLEFT,
+            HitZone::Right => HTRIGHT,
+            HitZone::Top => HTTOP,
+            HitZone::TopLeft => HTTOPLEFT,
+            HitZone::TopRight => HTTOPRIGHT,
+            HitZone::Bottom => HTBOTTOM,
+            HitZone::BottomLeft => HTBOTTOMLEFT,
+            HitZone::BottomRight => HTBOTTOMRIGHT,
         }
     }
 
-    /// Title plus the edit text. [`preview_text`] already includes the truncation
-    /// notice and CRLF line endings from the loader.
-    fn preview_body(path: &std::path::Path, preview: &Preview) -> (String, String) {
-        (title_for(path), preview_text(preview))
+    fn hit_at_screen(hwnd: HWND, lparam: LPARAM) -> HitZone {
+        let (x, y) = lparam_xy(lparam.0 as usize);
+        let mut window = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut window).is_err() } {
+            return HitZone::Client;
+        }
+        hit_test(window_layout(hwnd), x - window.left, y - window.top)
     }
 
-    fn error_body(path: &std::path::Path, error: &PreviewError) -> (String, String) {
-        let title = if path.as_os_str().is_empty() {
-            "Spacepeek".to_string()
-        } else {
-            title_for(path)
+    fn hit_at_client(hwnd: HWND, lparam: LPARAM) -> HitZone {
+        let (x, y) = lparam_xy(lparam.0 as usize);
+        let layout = window_layout(hwnd);
+        hit_test(layout, x + layout.frame_left, y + layout.frame_top)
+    }
+
+    fn window_layout(hwnd: HWND) -> ChromeLayout {
+        let dpi = dpi_for_anchor(hwnd);
+        let header_height = scaled_header_height(dpi);
+        let close_width = scaled_close_width(dpi);
+        let mut window = RECT::default();
+        let mut client = RECT::default();
+        let measured = unsafe {
+            GetWindowRect(hwnd, &mut window).is_ok() && GetClientRect(hwnd, &mut client).is_ok()
         };
-        (title, to_crlf(&error.to_string()))
-    }
-
-    fn title_for(path: &std::path::Path) -> String {
-        path.file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| "Spacepeek".to_string())
-    }
-
-    fn to_crlf(text: &str) -> String {
-        let mut out = String::with_capacity(text.len());
-        for (i, line) in text.split('\n').enumerate() {
-            if i > 0 {
-                out.push_str("\r\n");
+        if measured {
+            let mut origin = POINT {
+                x: client.left,
+                y: client.top,
+            };
+            if unsafe { ClientToScreen(hwnd, &mut origin).as_bool() } {
+                let width = window.right.saturating_sub(window.left);
+                let height = window.bottom.saturating_sub(window.top);
+                let client_w = client.right.saturating_sub(client.left);
+                let client_h = client.bottom.saturating_sub(client.top);
+                let mut frame_left = origin.x.saturating_sub(window.left);
+                let mut frame_top = origin.y.saturating_sub(window.top);
+                let mut frame_right = window
+                    .right
+                    .saturating_sub(origin.x)
+                    .saturating_sub(client_w);
+                let mut frame_bottom = window
+                    .bottom
+                    .saturating_sub(origin.y)
+                    .saturating_sub(client_h);
+                if frame_left == 0 && frame_top == 0 && frame_right == 0 && frame_bottom == 0 {
+                    let frame = frame_thickness(dpi);
+                    frame_left = frame;
+                    frame_top = frame;
+                    frame_right = frame;
+                    frame_bottom = frame;
+                }
+                return ChromeLayout {
+                    width,
+                    height,
+                    frame_left,
+                    frame_top,
+                    frame_right,
+                    frame_bottom,
+                    header_height,
+                    close_width,
+                };
             }
-            out.push_str(line.trim_end_matches('\r'));
         }
-        out
+        ChromeLayout {
+            width: 0,
+            height: 0,
+            frame_left: 0,
+            frame_top: 0,
+            frame_right: 0,
+            frame_bottom: 0,
+            header_height,
+            close_width,
+        }
+    }
+
+    fn frame_thickness(dpi: u32) -> i32 {
+        let dpi = effective_dpi(dpi);
+        let frame = unsafe { GetSystemMetricsForDpi(SM_CXFRAME, dpi) };
+        let pad = unsafe { GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) };
+        let sum = frame.saturating_add(pad);
+        if sum > 0 {
+            sum
+        } else {
+            spacepeek::geometry::scale_for_dpi(8, dpi).max(1)
+        }
+    }
+
+    fn apply_min_track(hwnd: HWND, lparam: LPARAM) {
+        if lparam.0 == 0 {
+            return;
+        }
+        let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+        let dpi = dpi_for_anchor(hwnd);
+        let min = min_physical_size(dpi);
+        info.ptMinTrackSize.x = min.width;
+        info.ptMinTrackSize.y = min.height;
+    }
+
+    /// Store the outer size after the user finishes a move or resize.
+    ///
+    /// A drag that leaves the size unchanged does not replace the remembered
+    /// value. DPI moves are `WM_DPICHANGED`, not this path, so the stored
+    /// size stays in logical pixels.
+    fn remember_window_size(hwnd: HWND) {
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect).is_err() } {
+            return;
+        }
+        let width = rect.right.saturating_sub(rect.left);
+        let height = rect.bottom.saturating_sub(rect.top);
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let dpi = dpi_for_anchor(hwnd);
+        with_app_mut(|app| {
+            let kind = app
+                .presented
+                .as_ref()
+                .map(Presented::kind)
+                .unwrap_or(WindowKind::Content);
+            let clamped = spacepeek::chrome::clamp_logical_size(
+                spacepeek::chrome::physical_to_logical(width, height, dpi),
+            );
+            if app.sizes.chosen() == Some(clamped) {
+                return;
+            }
+            if app.sizes.chosen().is_none()
+                && clamped == spacepeek::chrome::default_logical_size(kind)
+            {
+                return;
+            }
+            let _ = app.sizes.remember(clamped);
+        });
+    }
+
+    fn invalidate_preview(hwnd: HWND) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = InvalidateRect(hwnd, None, false);
+        }
+    }
+
+    struct PaintSnap {
+        name: String,
+        details: String,
+        message: Option<String>,
+        header_font: HFONT,
+        detail_font: HFONT,
+    }
+
+    fn paint_preview(hwnd: HWND) {
+        let snap = with_app(|app| {
+            app.presented.as_ref().map(|presented| PaintSnap {
+                name: presented.header().name.clone(),
+                details: presented.header().details.clone(),
+                message: presented.message().map(str::to_owned),
+                header_font: app.header_font,
+                detail_font: app.detail_font,
+            })
+        });
+        let mut ps = PAINTSTRUCT::default();
+        let dc = unsafe { BeginPaint(hwnd, &mut ps) };
+        if !dc.is_invalid() {
+            if let Some(snap) = snap.as_ref() {
+                paint_chrome(hwnd, dc, snap);
+            }
+        }
+        unsafe {
+            let _ = EndPaint(hwnd, &ps);
+        }
+    }
+
+    fn paint_chrome(hwnd: HWND, dc: HDC, snap: &PaintSnap) {
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(hwnd, &mut client).is_err() } {
+            return;
+        }
+        let width = client.right - client.left;
+        let height = client.bottom - client.top;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let dpi = dpi_for_anchor(hwnd);
+        let header_h = scaled_header_height(dpi).clamp(0, height);
+        let close_w = scaled_close_width(dpi).clamp(0, width);
+        let pad = scaled_header_pad(dpi).max(0);
+        fill_rect(
+            dc,
+            &RECT {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: header_h,
+            },
+            rgb(243, 243, 243),
+        );
+        fill_rect(
+            dc,
+            &RECT {
+                left: 0,
+                top: header_h,
+                right: width,
+                bottom: height,
+            },
+            rgb(255, 255, 255),
+        );
+        let text_right = (width - close_w).max(pad);
+        let mid = header_h / 2;
+        let single = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX;
+        draw_text(
+            dc,
+            &snap.name,
+            &mut RECT {
+                left: pad,
+                top: 0,
+                right: text_right,
+                bottom: mid,
+            },
+            single,
+            snap.header_font,
+            rgb(32, 32, 32),
+        );
+        draw_text(
+            dc,
+            &snap.details,
+            &mut RECT {
+                left: pad,
+                top: mid,
+                right: text_right,
+                bottom: header_h.saturating_sub(1),
+            },
+            single,
+            snap.detail_font,
+            rgb(96, 96, 96),
+        );
+        draw_text(
+            dc,
+            "\u{00D7}",
+            &mut RECT {
+                left: width - close_w,
+                top: 0,
+                right: width,
+                bottom: header_h,
+            },
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            snap.header_font,
+            rgb(32, 32, 32),
+        );
+        let sep = spacepeek::geometry::scale_for_dpi(1, dpi).max(1);
+        fill_rect(
+            dc,
+            &RECT {
+                left: 0,
+                top: header_h.saturating_sub(sep),
+                right: width,
+                bottom: header_h,
+            },
+            rgb(210, 210, 210),
+        );
+        if let Some(message) = snap.message.as_deref() {
+            let left = pad.min(width / 4);
+            let right = (width - pad).max(left);
+            paint_message(
+                dc,
+                message,
+                RECT {
+                    left,
+                    top: header_h,
+                    right,
+                    bottom: height,
+                },
+                snap.header_font,
+            );
+        }
+    }
+
+    fn paint_message(dc: HDC, message: &str, area: RECT, font: HFONT) {
+        let left = area.left;
+        let right = area.right;
+        let area_top = area.top;
+        let area_h = (area.bottom - area.top).max(0);
+        if right <= left || area_h <= 0 {
+            return;
+        }
+        let mut wide: Vec<u16> = message.encode_utf16().collect();
+        if wide.is_empty() {
+            return;
+        }
+        let flags = DT_WORDBREAK | DT_NOPREFIX | DT_CENTER;
+        let mut measure = RECT {
+            left,
+            top: area_top,
+            right,
+            bottom: area_top + area_h,
+        };
+        unsafe {
+            let previous = if font.0.is_null() {
+                HGDIOBJ::default()
+            } else {
+                SelectObject(dc, font)
+            };
+            let _ = SetBkMode(dc, TRANSPARENT);
+            let _ = SetTextColor(dc, rgb(32, 32, 32));
+            let _ = DrawTextW(dc, &mut wide, &mut measure, flags | DT_CALCRECT);
+            let text_h = (measure.bottom - measure.top).max(0);
+            let mut draw = if text_h >= area_h {
+                RECT {
+                    left,
+                    top: area_top,
+                    right,
+                    bottom: area_top + area_h,
+                }
+            } else {
+                let top = area_top + (area_h - text_h) / 2;
+                RECT {
+                    left,
+                    top,
+                    right,
+                    bottom: top + text_h,
+                }
+            };
+            let _ = DrawTextW(dc, &mut wide, &mut draw, flags);
+            if !previous.is_invalid() {
+                let _ = SelectObject(dc, previous);
+            }
+        }
+    }
+
+    fn draw_text(
+        dc: HDC,
+        text: &str,
+        rect: &mut RECT,
+        format: DRAW_TEXT_FORMAT,
+        font: HFONT,
+        color: COLORREF,
+    ) {
+        if text.is_empty() || rect.right <= rect.left || rect.bottom <= rect.top {
+            return;
+        }
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            let previous = if font.0.is_null() {
+                HGDIOBJ::default()
+            } else {
+                SelectObject(dc, font)
+            };
+            let _ = SetBkMode(dc, TRANSPARENT);
+            let _ = SetTextColor(dc, color);
+            let _ = DrawTextW(dc, &mut wide, rect, format);
+            if !previous.is_invalid() {
+                let _ = SelectObject(dc, previous);
+            }
+        }
+    }
+
+    fn fill_rect(dc: HDC, rect: &RECT, color: COLORREF) {
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return;
+        }
+        unsafe {
+            let brush = CreateSolidBrush(color);
+            if brush.is_invalid() {
+                return;
+            }
+            let _ = FillRect(dc, rect, brush);
+            let _ = DeleteObject(brush);
+        }
+    }
+
+    fn rgb(r: u32, g: u32, b: u32) -> COLORREF {
+        COLORREF(r | (g << 8) | (b << 16))
     }
 
     fn force_foreground(hwnd: HWND) {
@@ -1962,7 +2540,7 @@ mod win {
             let cursor = LoadCursorW(HINSTANCE::default(), IDC_ARROW)?;
             let brush = GetSysColorBrush(COLOR_WINDOW);
             let class = WNDCLASSW {
-                style: WNDCLASS_STYLES(0),
+                style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(wndproc),
                 cbClsExtra: 0,
                 cbWndExtra: 0,
@@ -2006,14 +2584,16 @@ mod win {
 
     /// Monospace faces for text previews, in preference order. GDI substitutes
     /// when a face is missing, so the created font is kept only when its actual
-    /// face name matches. `WM_DPICHANGED` recreates this through `swap_font`.
+    /// face name matches. `WM_DPICHANGED` recreates this through `swap_fonts`.
     const TEXT_FACES: [&str; 2] = ["Cascadia Mono", "Consolas"];
 
     fn create_ui_font(dpi: u32) -> HFONT {
         let height = -scaled_font_height(dpi);
+        // FIXED_PITCH | FF_MODERN asks for a monospace substitute if the face is missing.
+        let pitch = u32::from(FIXED_PITCH.0) | u32::from(FF_MODERN.0);
         let mut fallback = HFONT::default();
         for face in TEXT_FACES {
-            let font = create_named_font(height, face);
+            let font = create_named_font(height, FW_NORMAL.0 as i32, pitch, face);
             if font.0.is_null() {
                 continue;
             }
@@ -2030,17 +2610,15 @@ mod win {
         fallback
     }
 
-    fn create_named_font(height: i32, face: &str) -> HFONT {
+    fn create_named_font(height: i32, weight: i32, pitch: u32, face: &str) -> HFONT {
         let face = utf16(face);
-        // FIXED_PITCH | FF_MODERN asks for a monospace substitute if the face is missing.
-        let pitch = u32::from(FIXED_PITCH.0) | u32::from(FF_MODERN.0);
         unsafe {
             CreateFontW(
                 height,
                 0,
                 0,
                 0,
-                FW_NORMAL.0 as i32,
+                weight,
                 0,
                 0,
                 0,
@@ -2076,20 +2654,75 @@ mod win {
         }
     }
 
-    fn swap_font(dpi: u32) -> (HFONT, HFONT) {
+    struct UiFonts {
+        edit: HFONT,
+        header: HFONT,
+        detail: HFONT,
+    }
+
+    fn swap_fonts(dpi: u32) -> (UiFonts, StaleFonts) {
         let dpi = effective_dpi(dpi);
         with_app_mut(|app| {
-            if app.font_dpi == dpi && !app.font.0.is_null() {
-                return (app.font, HFONT::default());
+            if app.font_dpi == dpi
+                && !app.font.0.is_null()
+                && !app.header_font.0.is_null()
+                && !app.detail_font.0.is_null()
+            {
+                return (
+                    UiFonts {
+                        edit: app.font,
+                        header: app.header_font,
+                        detail: app.detail_font,
+                    },
+                    StaleFonts(UiFonts {
+                        edit: HFONT::default(),
+                        header: HFONT::default(),
+                        detail: HFONT::default(),
+                    }),
+                );
             }
-            let next = create_ui_font(dpi);
-            if next.0.is_null() {
-                return (app.font, HFONT::default());
+            let edit = create_ui_font(dpi);
+            let ui_pitch = u32::from(VARIABLE_PITCH.0) | u32::from(FF_SWISS.0);
+            let header = create_named_font(
+                -scaled_header_font(dpi),
+                FW_SEMIBOLD.0 as i32,
+                ui_pitch,
+                "Segoe UI",
+            );
+            let detail = create_named_font(
+                -scaled_detail_font(dpi),
+                FW_NORMAL.0 as i32,
+                ui_pitch,
+                "Segoe UI",
+            );
+            let stale_edit = replace_font(&mut app.font, edit);
+            let stale_header = replace_font(&mut app.header_font, header);
+            let stale_detail = replace_font(&mut app.detail_font, detail);
+            if !app.font.0.is_null() && !app.header_font.0.is_null() && !app.detail_font.0.is_null()
+            {
+                app.font_dpi = dpi;
             }
-            let previous = std::mem::replace(&mut app.font, next);
-            app.font_dpi = dpi;
-            (next, previous)
+            (
+                UiFonts {
+                    edit: app.font,
+                    header: app.header_font,
+                    detail: app.detail_font,
+                },
+                StaleFonts(UiFonts {
+                    edit: stale_edit,
+                    header: stale_header,
+                    detail: stale_detail,
+                }),
+            )
         })
+    }
+
+    fn replace_font(slot: &mut HFONT, next: HFONT) -> HFONT {
+        if next.0.is_null() {
+            HFONT::default()
+        } else {
+            std::mem::replace(slot, next)
+        }
     }
 
     fn apply_font(edit: HWND, font: HFONT) {
@@ -2111,20 +2744,28 @@ mod win {
     }
 
     fn discard_current_font() {
-        let font = with_app_mut(|app| {
+        let (edit, header, detail) = with_app_mut(|app| {
             app.font_dpi = 0;
-            std::mem::take(&mut app.font)
+            (
+                std::mem::take(&mut app.font),
+                std::mem::take(&mut app.header_font),
+                std::mem::take(&mut app.detail_font),
+            )
         });
-        discard_font(font);
+        discard_font(edit);
+        discard_font(header);
+        discard_font(detail);
     }
 
-    /// Deletes a font that an edit control no longer uses. Drop runs after the
-    /// new font has been selected into the control.
-    struct StaleFont(HFONT);
+    /// Deletes fonts the window no longer uses. Drop runs after the new fonts
+    /// have been selected into the controls.
+    struct StaleFonts(UiFonts);
 
-    impl Drop for StaleFont {
+    impl Drop for StaleFonts {
         fn drop(&mut self) {
-            discard_font(self.0);
+            discard_font(self.0.edit);
+            discard_font(self.0.header);
+            discard_font(self.0.detail);
         }
     }
 
