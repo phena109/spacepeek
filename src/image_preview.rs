@@ -125,7 +125,9 @@ impl ImageError {
     /// Short second line for the header. The centred body uses [`Self::user_message`].
     pub fn header_status(&self) -> String {
         match self {
-            ImageError::TooLarge { .. } | ImageError::FileTooLarge { .. } => "Too large".to_string(),
+            ImageError::TooLarge { .. } | ImageError::FileTooLarge { .. } => {
+                "Too large".to_string()
+            }
             ImageError::Corrupt => "Damaged".to_string(),
             ImageError::Unsupported => "Not supported".to_string(),
         }
@@ -178,8 +180,7 @@ pub fn decode_image(
         return Err(ImageError::TooLarge { width, height });
     }
 
-    let mut reader =
-        image::ImageReader::with_format(Cursor::new(bytes), image_format(format));
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image_format(format));
     reader.limits(decoder_limits(limits));
     let decoded = reader
         .decode()
@@ -213,12 +214,7 @@ pub fn decode_image(
     let rgba = if out_w == source_width && out_h == source_height {
         rgba
     } else {
-        image::imageops::resize(
-            &rgba,
-            out_w,
-            out_h,
-            image::imageops::FilterType::Triangle,
-        )
+        image::imageops::resize(&rgba, out_w, out_h, image::imageops::FilterType::Triangle)
     };
     let bgra = composite_bgra_on_white(rgba.as_raw())?;
     let stored = u64::from(rgba.width()) * u64::from(rgba.height()) * 4;
@@ -263,8 +259,7 @@ fn decoder_limits(limits: &ImageLimits) -> image::Limits {
 /// a size after it has seen the start of `IDAT`. The chunk is then read here
 /// so an oversized claim is still [`ImageError::TooLarge`] and is not decoded.
 fn probe_dimensions(bytes: &[u8], format: ImageFormat) -> Result<(u32, u32), ImageError> {
-    let mut reader =
-        image::ImageReader::with_format(Cursor::new(bytes), image_format(format));
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image_format(format));
     reader.no_limits();
     match reader.into_dimensions() {
         Ok(dims) => Ok(dims),
@@ -365,7 +360,13 @@ mod tests {
         ImageLimits::default()
     }
 
-    fn encode(width: u32, height: u32, pixels: &[u8], color: ExtendedColorType, jpeg: bool) -> Vec<u8> {
+    fn encode(
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        color: ExtendedColorType,
+        jpeg: bool,
+    ) -> Vec<u8> {
         let mut buf = Vec::new();
         if jpeg {
             JpegEncoder::new_with_quality(&mut buf, 100)
@@ -433,7 +434,10 @@ mod tests {
         assert_eq!(sniff_image(b"hello"), None);
         assert_eq!(sniff_image(b"not a png"), None);
         assert_eq!(sniff_image(b""), None);
-        assert_eq!(sniff_image(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A]), None);
+        assert_eq!(
+            sniff_image(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A]),
+            None
+        );
         assert_eq!(sniff_image(&[0xFF, 0xD8]), None);
         assert_eq!(sniff_image(&[0xFF, 0xD8, 0x00]), None);
         assert_eq!(sniff_image(&[0x00]), None);
@@ -490,7 +494,7 @@ mod tests {
         assert_eq!(decoded.format, ImageFormat::Png);
         assert_eq!((decoded.width, decoded.height), (2, 2));
         assert_eq!((decoded.source_width, decoded.source_height), (2, 2));
-        assert_eq!(decoded.bgra, vec![30, 20, 10, 255].repeat(4));
+        assert_eq!(decoded.bgra, [30, 20, 10, 255].repeat(4));
     }
 
     #[test]

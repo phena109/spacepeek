@@ -60,8 +60,14 @@ pub struct HeaderText {
 /// is painted centred under the header. An image is the decoded bitmap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Presented {
-    Text { header: HeaderText, body: String },
-    Message { header: HeaderText, message: String },
+    Text {
+        header: HeaderText,
+        body: String,
+    },
+    Message {
+        header: HeaderText,
+        message: String,
+    },
     Image {
         header: HeaderText,
         image: Arc<DecodedImage>,
@@ -484,10 +490,7 @@ mod tests {
         assert_eq!(presented.kind(), WindowKind::Image);
         assert_eq!(presented.message(), None);
         assert_eq!(presented.header().name, "photo.jpg");
-        assert_eq!(
-            presented.header().details,
-            "1.2 MB · 4,000 × 3,000 · JPEG"
-        );
+        assert_eq!(presented.header().details, "1.2 MB · 4,000 × 3,000 · JPEG");
         let Presented::Image { image: shown, .. } = presented else {
             panic!("expected image chrome");
         };

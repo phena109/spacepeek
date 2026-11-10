@@ -585,7 +585,9 @@ fn read_whole_image(
         };
         let next = (bytes.len() as u64).saturating_add(n as u64);
         if next > max_file_bytes {
-            return Err(PreviewError::Image(ImageError::FileTooLarge { bytes: next }));
+            return Err(PreviewError::Image(ImageError::FileTooLarge {
+                bytes: next,
+            }));
         }
         bytes.extend_from_slice(&chunk[..n]);
     }
@@ -1668,7 +1670,10 @@ mod tests {
 
         // PNG is no longer refused by extension, so an empty file is empty.
         let png = write_file(&dir, "photo.png", b"");
-        assert_eq!(load(&png, PreviewLimits::default()), Err(PreviewError::Empty));
+        assert_eq!(
+            load(&png, PreviewLimits::default()),
+            Err(PreviewError::Empty)
+        );
         // A still-denied image extension is refused before the empty check.
         let gif = write_file(&dir, "anim.gif", b"");
         assert_eq!(
@@ -1889,7 +1894,7 @@ mod tests {
             Some(crate::image_preview::ImageFormat::Png)
         );
 
-        let jpeg = rgb_jpeg(8, 8, &vec![30u8, 40, 50].repeat(64));
+        let jpeg = rgb_jpeg(8, 8, &[30u8, 40, 50].repeat(64));
         let as_text = write_file(&dir, "scan.txt", &jpeg);
         let preview = load(&as_text, PreviewLimits::default()).unwrap();
         let image = preview.image.expect("jpeg bytes are an image");
@@ -1935,7 +1940,8 @@ mod tests {
     #[test]
     fn image_file_over_the_byte_budget_is_not_decoded() {
         let dir = tempfile::tempdir().unwrap();
-        let png = rgba_png(2, 2, &[1, 2, 3, 255].repeat(4));
+        let pixels = [1u8, 2, 3, 255].repeat(4);
+        let png = rgba_png(2, 2, &pixels);
         let path = write_file(&dir, "big.png", &png);
         let mut limits = PreviewLimits::default();
         limits.image.max_file_bytes = png.len() as u64 - 1;
