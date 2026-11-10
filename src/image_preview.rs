@@ -6,6 +6,7 @@
 
 use std::io::Cursor;
 
+use crate::geometry::{effective_dpi, PxRect, BASE_DPI};
 use crate::preview::{format_compact_size, format_grouped};
 
 /// Image kinds this previewer decodes.
@@ -163,6 +164,88 @@ pub fn fit_size(src_w: u32, src_h: u32, box_w: u32, box_h: u32) -> (u32, u32) {
 /// Integer division can round a very wide image down to 0. Keep a pixel.
 fn nonzero_side(fitted: u64, cap: u32) -> u32 {
     u32::try_from(fitted).unwrap_or(cap).max(1)
+}
+
+/// Where the bitmap is drawn inside `body`.
+///
+/// The desired size is the source size scaled by `dpi / 96` (a missing DPI is
+/// 96). [`fit_size`] then fits that box inside the body, so the picture is
+/// never drawn larger than the DPI-scaled source. The result is centred. A
+/// stored bitmap that was downscaled still uses the source size. An empty
+/// body or a zero image is a zero-size rect at the body's origin.
+pub fn image_dest_rect(
+    body: PxRect,
+    image_w: u32,
+    image_h: u32,
+    source_w: u32,
+    source_h: u32,
+    dpi: u32,
+) -> PxRect {
+    let origin = PxRect {
+        left: body.left,
+        top: body.top,
+        right: body.left,
+        bottom: body.top,
+    };
+    let body_w = body.width();
+    let body_h = body.height();
+    if body_w <= 0
+        || body_h <= 0
+        || image_w == 0
+        || image_h == 0
+        || source_w == 0
+        || source_h == 0
+    {
+        return origin;
+    }
+    let dpi = u64::from(effective_dpi(dpi));
+    let base = u64::from(u32::try_from(BASE_DPI).unwrap_or(96));
+    let desired_w = u64::from(source_w).saturating_mul(dpi) / base;
+    let desired_h = u64::from(source_h).saturating_mul(dpi) / base;
+    if desired_w == 0 || desired_h == 0 {
+        return origin;
+    }
+    let (src_w, src_h) = shrink_to_u32(desired_w, desired_h);
+    let (fit_w, fit_h) = fit_size(src_w, src_h, body_w as u32, body_h as u32);
+    if fit_w == 0 || fit_h == 0 {
+        return origin;
+    }
+    let fit_w = i32::try_from(fit_w).unwrap_or(body_w);
+    let fit_h = i32::try_from(fit_h).unwrap_or(body_h);
+    let left = body.left.saturating_add(body_w.saturating_sub(fit_w) / 2);
+    let top = body.top.saturating_add(body_h.saturating_sub(fit_h) / 2);
+    PxRect {
+        left,
+        top,
+        right: left.saturating_add(fit_w),
+        bottom: top.saturating_add(fit_h),
+    }
+}
+
+/// `fit_size` takes `u32`. A side past that is larger than any body, so keep
+/// the aspect ratio and the larger side at `u32::MAX`.
+fn shrink_to_u32(width: u64, height: u64) -> (u32, u32) {
+    let cap = u64::from(u32::MAX);
+    let max_side = width.max(height);
+    if max_side <= cap {
+        return (
+            u32::try_from(width).unwrap_or(u32::MAX),
+            u32::try_from(height).unwrap_or(u32::MAX),
+        );
+    }
+    (
+        u32::try_from(mul_div_u64(width, cap, max_side).max(1)).unwrap_or(u32::MAX),
+        u32::try_from(mul_div_u64(height, cap, max_side).max(1)).unwrap_or(u32::MAX),
+    )
+}
+
+/// `a * b / d` for a non-zero `d`. The product saturates instead of wrapping.
+fn mul_div_u64(a: u64, b: u64, d: u64) -> u64 {
+    if d == 0 {
+        return u64::MAX;
+    }
+    let product = u128::from(a).saturating_mul(u128::from(b));
+    u64::try_from(product / u128::from(d)).unwrap_or(u64::MAX)
 }
 
 /// Decode `bytes` as `format`, or reject it before pixel work when the header
@@ -740,5 +823,143 @@ mod tests {
         };
         assert_eq!(format_image_details(512, &png), "512 B · 8 × 8 · PNG");
         assert_eq!(format_image_details(0, &png), "0 B · 8 × 8 · PNG");
+    }
+
+    fn body(left: i32, top: i32, right: i32, bottom: i32) -> PxRect {
+        PxRect {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn image_dest_rect_centres_and_letterboxes() {
+        // 200×100 body. A matching landscape source fills it.
+        let wide = body(10, 20, 210, 120);
+        assert_eq!(image_dest_rect(wide, 200, 100, 200, 100, 96), wide);
+
+        // Portrait source: bars on the left and right. (200-50)/2 = 75.
+        assert_eq!(
+            image_dest_rect(wide, 100, 200, 100, 200, 96),
+            body(85, 20, 135, 120)
+        );
+        // Landscape source shorter than the body: bars above and below.
+        assert_eq!(
+            image_dest_rect(wide, 200, 50, 200, 50, 96),
+            body(10, 45, 210, 95)
+        );
+
+        // Odd leftover pixel stays on the right and bottom (integer centre).
+        let odd = body(0, 0, 101, 51);
+        assert_eq!(image_dest_rect(odd, 10, 10, 10, 10, 96), body(45, 20, 55, 30));
+
+        // Negative origin, still centred inside the body.
+        let shifted = body(-20, -10, 180, 90);
+        assert_eq!(
+            image_dest_rect(shifted, 100, 50, 100, 50, 96),
+            body(30, 15, 130, 65)
+        );
+    }
+
+    #[test]
+    fn image_dest_rect_scales_a_small_image_with_dpi() {
+        let area = body(0, 0, 500, 500);
+        // Truncating division: 10 * dpi / 96, never rounded up, never stretched
+        // to the body.
+        assert_eq!(
+            image_dest_rect(area, 10, 8, 10, 8, 96),
+            body(245, 246, 255, 254)
+        );
+        assert_eq!(
+            image_dest_rect(area, 10, 8, 10, 8, 144),
+            body(242, 244, 257, 256)
+        );
+        assert_eq!(
+            image_dest_rect(area, 10, 8, 10, 8, 192),
+            body(240, 242, 260, 258)
+        );
+        // A missing DPI is 96. 1×1 at 144 DPI is 1×1 (1.5 truncates), at 192 it is 2×2.
+        assert_eq!(
+            image_dest_rect(area, 10, 8, 10, 8, 0),
+            image_dest_rect(area, 10, 8, 10, 8, 96)
+        );
+        assert_eq!(image_dest_rect(area, 1, 1, 1, 1, 144), body(249, 249, 250, 250));
+        assert_eq!(image_dest_rect(area, 1, 1, 1, 1, 192), body(249, 249, 251, 251));
+
+        // The DPI-scaled source is larger than the body, so it letterboxes.
+        let tight = body(0, 0, 100, 80);
+        // 200×100 at 192 DPI wants 400×200, which fits as 100×50.
+        assert_eq!(
+            image_dest_rect(tight, 200, 100, 200, 100, 192),
+            body(0, 15, 100, 65)
+        );
+    }
+
+    #[test]
+    fn downscaled_buffer_still_fills_from_the_source_size() {
+        let area = body(0, 0, 1_000, 1_000);
+        let stored = image_dest_rect(area, 8, 4, 400, 200, 96);
+        let full = image_dest_rect(area, 400, 200, 400, 200, 96);
+        assert_eq!(stored, full);
+        assert_eq!(stored, body(300, 400, 700, 600));
+
+        // 192 DPI wants 800×400 from the source, not 16×8 from the buffer.
+        assert_eq!(
+            image_dest_rect(area, 8, 4, 400, 200, 192),
+            image_dest_rect(area, 400, 200, 400, 200, 192)
+        );
+        assert_eq!(
+            image_dest_rect(area, 8, 4, 400, 200, 192),
+            body(100, 300, 900, 700)
+        );
+    }
+
+    #[test]
+    fn empty_or_negative_body_and_zero_image_are_a_point() {
+        let empty = body(5, 7, 5, 100);
+        assert_eq!(
+            image_dest_rect(empty, 10, 10, 10, 10, 96),
+            body(5, 7, 5, 7)
+        );
+        let negative = body(40, 50, 10, 20);
+        assert_eq!(
+            image_dest_rect(negative, 10, 10, 10, 10, 192),
+            body(40, 50, 40, 50)
+        );
+        let area = body(3, 4, 100, 80);
+        let origin = body(3, 4, 3, 4);
+        assert_eq!(image_dest_rect(area, 0, 10, 10, 10, 96), origin);
+        assert_eq!(image_dest_rect(area, 10, 0, 10, 10, 96), origin);
+        assert_eq!(image_dest_rect(area, 10, 10, 0, 10, 96), origin);
+        assert_eq!(image_dest_rect(area, 10, 10, 10, 0, 96), origin);
+        // 1×1 at 1 DPI scales to 0 and stays a point. It is not bumped up to 1.
+        assert_eq!(image_dest_rect(area, 1, 1, 1, 1, 1), origin);
+    }
+
+    #[test]
+    fn image_dest_rect_huge_values_do_not_overflow() {
+        let area = body(0, 0, 100, 40);
+        // Both sides saturate to the same u64 before the divide, so the
+        // picture is square and the short side of the body wins.
+        assert_eq!(
+            image_dest_rect(area, u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX),
+            body(30, 0, 70, 40)
+        );
+        // Wider than any u32, one pixel tall: the body width, one row, centred.
+        let wide = body(-1_000_000, -2_000, 1_000_000, 3_000);
+        assert_eq!(
+            image_dest_rect(wide, 1, 1, u32::MAX, 1, u32::MAX),
+            body(-1_000_000, 499, 1_000_000, 500)
+        );
+        let extreme = body(i32::MIN, i32::MIN, i32::MAX, i32::MAX);
+        let placed = image_dest_rect(extreme, u32::MAX, 1, u32::MAX, u32::MAX, 96);
+        assert_eq!(placed.left, i32::MIN);
+        assert_eq!(placed.top, i32::MIN);
+        assert_eq!(placed.right, -1);
+        assert_eq!(placed.bottom, -1);
+        assert_eq!(placed.width(), i32::MAX);
+        assert_eq!(placed.height(), i32::MAX);
     }
 }

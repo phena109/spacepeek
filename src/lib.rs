@@ -18,8 +18,8 @@ pub use geometry::{
     Placement, PxRect, PxSize, LOGICAL_FONT_HEIGHT, LOGICAL_PREVIEW_HEIGHT, LOGICAL_PREVIEW_WIDTH,
 };
 pub use image_preview::{
-    decode_image, fit_size, format_image_details, sniff_image, DecodedImage, ImageError,
-    ImageFormat, ImageLimits,
+    decode_image, fit_size, format_image_details, image_dest_rect, sniff_image, DecodedImage,
+    ImageError, ImageFormat, ImageLimits,
 };
 pub use keys::{
     classify_typeahead_vk, decide_hook_key, esc_action, hook_key_from_vk, nav_reload_due,
