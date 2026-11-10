@@ -9,7 +9,6 @@ pub enum PreviewError {
     Binary,
     Unsupported,
     Directory,
-    Truncated,
     Cancelled,
     Io(std::io::Error),
 }
@@ -19,7 +18,9 @@ impl PartialEq for PreviewError {
         use std::mem::discriminant;
         if discriminant(self) == discriminant(other) {
             match (self, other) {
-                (PreviewError::Io(a), PreviewError::Io(b)) => a.kind() == b.kind() && a.to_string() == b.to_string(),
+                (PreviewError::Io(a), PreviewError::Io(b)) => {
+                    a.kind() == b.kind() && a.to_string() == b.to_string()
+                }
                 _ => true,
             }
         } else {
@@ -36,7 +37,6 @@ impl std::fmt::Display for PreviewError {
             PreviewError::Binary => write!(f, "file looks binary"),
             PreviewError::Unsupported => write!(f, "unsupported file type"),
             PreviewError::Directory => write!(f, "is a directory"),
-            PreviewError::Truncated => write!(f, "preview truncated"),
             PreviewError::Cancelled => write!(f, "cancelled"),
             PreviewError::Io(e) => write!(f, "io error: {}", e),
         }
@@ -73,21 +73,24 @@ impl Default for PreviewLimits {
 
 impl PreviewLimits {
     pub fn new(max_bytes: usize, max_lines: usize) -> Self {
-        Self { max_bytes, max_lines }
+        Self {
+            max_bytes,
+            max_lines,
+        }
     }
 }
 
 const BINARY_SNIFF_BYTES: usize = 8192;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
-    "txt", "md", "log", "csv", "json", "toml", "yaml", "yml", "ini", "rs", "py", "js", "ts", "c", "h", "cpp",
-    "cs", "xml", "html", "css", "sh", "ps1", "bat",
+    "txt", "md", "log", "csv", "json", "toml", "yaml", "yml", "ini", "rs", "py", "js", "ts", "c",
+    "h", "cpp", "cs", "xml", "html", "css", "sh", "ps1", "bat",
 ];
 
 pub fn is_text_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| ALLOWED_EXTENSIONS.contains(&e))
+        .map(|e| ALLOWED_EXTENSIONS.iter().any(|a| a.eq_ignore_ascii_case(e)))
         .unwrap_or(false)
 }
 
@@ -141,6 +144,7 @@ pub fn load_text_preview<P: AsRef<Path>>(
     path: P,
     limits: PreviewLimits,
     cancel: &CancelToken,
+    gen: Generation,
 ) -> Result<Preview, PreviewError> {
     let path = path.as_ref();
     if path.is_dir() {
@@ -150,7 +154,10 @@ pub fn load_text_preview<P: AsRef<Path>>(
         return Err(PreviewError::Unsupported);
     }
 
-    let gen = cancel.current_generation();
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+
     let mut file = File::open(path).map_err(PreviewError::Io)?;
     let mut reader = BufReader::new(&mut file);
     let mut buffer: Vec<u8> = Vec::new();
@@ -173,17 +180,24 @@ pub fn load_text_preview<P: AsRef<Path>>(
         buffer.extend_from_slice(&chunk[..n]);
     }
 
-    let sniff_len = buffer.len().min(BINARY_SNIFF_BYTES);
-    if buffer[..sniff_len].contains(&0) {
-        return Err(PreviewError::Binary);
-    }
-
-    let mut bytes = buffer;
-    if bytes.starts_with(b"\xEF\xBB\xBF") {
-        bytes.drain(0..3);
-    }
-
-    let content = String::from_utf8_lossy(&bytes).into_owned();
+    // UTF-16 BOM must be recognised before the NUL sniff: ASCII in UTF-16 is
+    // full of 0x00 bytes. UTF-32LE is FF FE 00 00; we do not support UTF-32
+    // and decode that prefix as UTF-16LE.
+    let content = if buffer.starts_with(&[0xFF, 0xFE]) {
+        decode_utf16_payload(&buffer[2..], true, &mut truncated)
+    } else if buffer.starts_with(&[0xFE, 0xFF]) {
+        decode_utf16_payload(&buffer[2..], false, &mut truncated)
+    } else {
+        let sniff_len = buffer.len().min(BINARY_SNIFF_BYTES);
+        if buffer[..sniff_len].contains(&0) {
+            return Err(PreviewError::Binary);
+        }
+        let mut bytes = buffer;
+        if bytes.starts_with(b"\xEF\xBB\xBF") {
+            bytes.drain(0..3);
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
 
     let mut lines: Vec<&str> = content.lines().collect();
     let mut line_count = lines.len();
@@ -201,30 +215,69 @@ pub fn load_text_preview<P: AsRef<Path>>(
     })
 }
 
+fn decode_utf16_payload(payload: &[u8], little_endian: bool, truncated: &mut bool) -> String {
+    let payload = if payload.len() % 2 == 1 {
+        *truncated = true;
+        &payload[..payload.len() - 1]
+    } else {
+        payload
+    };
+    let units: Vec<u16> = payload
+        .chunks_exact(2)
+        .map(|pair| {
+            if little_endian {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
 
-    fn temp_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("spacepeek_test_{}", name))
-    }
-
-    fn write_file(name: &str, bytes: &[u8]) -> PathBuf {
-        let p = temp_path(name);
+    fn write_file(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+        let p = dir.path().join(name);
         fs::write(&p, bytes).unwrap();
         p
     }
 
+    fn encode_utf16(s: &str, little_endian: bool) -> Vec<u8> {
+        let mut out = if little_endian {
+            vec![0xFF, 0xFE]
+        } else {
+            vec![0xFE, 0xFF]
+        };
+        for unit in s.encode_utf16() {
+            if little_endian {
+                out.extend_from_slice(&unit.to_le_bytes());
+            } else {
+                out.extend_from_slice(&unit.to_be_bytes());
+            }
+        }
+        out
+    }
+
+    fn live_token() -> (CancelToken, Generation) {
+        let token = CancelToken::new();
+        let gen = token.generate();
+        (token, gen)
+    }
+
     #[test]
     fn bounded_read_truncates_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
         let mut big = Vec::new();
-        big.extend(std::iter::repeat(b'a').take(300));
-        let p = write_file("trunc.txt", &big);
+        big.extend(std::iter::repeat_n(b'a', 300));
+        let p = write_file(&dir, "trunc.txt", &big);
         let limits = PreviewLimits::new(64, 10);
-        let token = CancelToken::new();
-        let preview = load_text_preview(&p, limits, &token).unwrap();
+        let (token, gen) = live_token();
+        let preview = load_text_preview(&p, limits, &token, gen).unwrap();
         assert!(preview.content.len() <= 64);
         assert!(preview.truncated);
         assert_eq!(preview.line_count, 1);
@@ -232,78 +285,156 @@ mod tests {
 
     #[test]
     fn binary_file_rejected() {
-        let p = write_file("bin.txt", b"ok\x00binary");
-        let token = CancelToken::new();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_file(&dir, "bin.txt", b"ok\x00binary");
+        let (token, gen) = live_token();
         assert_eq!(
-            load_text_preview(&p, PreviewLimits::default(), &token),
+            load_text_preview(&p, PreviewLimits::default(), &token, gen),
             Err(PreviewError::Binary)
         );
     }
 
     #[test]
     fn unsupported_extension_rejected() {
-        let p = temp_path("unsupported.xyz");
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("unsupported.xyz");
         fs::write(&p, b"hello").unwrap();
-        let token = CancelToken::new();
+        let (token, gen) = live_token();
         assert_eq!(
-            load_text_preview(&p, PreviewLimits::default(), &token),
+            load_text_preview(&p, PreviewLimits::default(), &token, gen),
             Err(PreviewError::Unsupported)
         );
     }
 
     #[test]
+    fn extensionless_file_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("extensionless");
+        fs::write(&p, b"hello").unwrap();
+        let (token, gen) = live_token();
+        assert_eq!(
+            load_text_preview(&p, PreviewLimits::default(), &token, gen),
+            Err(PreviewError::Unsupported)
+        );
+    }
+
+    #[test]
+    fn case_insensitive_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let p1 = write_file(&dir, "README.TXT", b"readme content");
+        let p2 = write_file(&dir, "notes.Md", b"notes content");
+        let p3 = write_file(&dir, "SETUP.LOG", b"setup log");
+        let (token, gen) = live_token();
+        assert_eq!(
+            load_text_preview(&p1, PreviewLimits::default(), &token, gen)
+                .unwrap()
+                .content,
+            "readme content"
+        );
+        assert_eq!(
+            load_text_preview(&p2, PreviewLimits::default(), &token, gen)
+                .unwrap()
+                .content,
+            "notes content"
+        );
+        assert_eq!(
+            load_text_preview(&p3, PreviewLimits::default(), &token, gen)
+                .unwrap()
+                .content,
+            "setup log"
+        );
+    }
+
+    #[test]
     fn bom_is_stripped() {
-        let p = write_file("bom.txt", b"\xEF\xBB\xBFhello world");
-        let token = CancelToken::new();
-        let preview = load_text_preview(&p, PreviewLimits::default(), &token).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_file(&dir, "bom.txt", b"\xEF\xBB\xBFhello world");
+        let (token, gen) = live_token();
+        let preview = load_text_preview(&p, PreviewLimits::default(), &token, gen).unwrap();
         assert_eq!(preview.content, "hello world");
     }
 
     #[test]
+    fn utf16le_bom_is_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "hello world é\nsecond line";
+        let p = write_file(&dir, "utf16le.txt", &encode_utf16(text, true));
+        let (token, gen) = live_token();
+        let preview = load_text_preview(&p, PreviewLimits::default(), &token, gen).unwrap();
+        assert_eq!(preview.content, text);
+        assert!(!preview.truncated);
+        assert_eq!(preview.line_count, 2);
+    }
+
+    #[test]
+    fn utf16be_bom_is_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = "hello world é";
+        let p = write_file(&dir, "utf16be.txt", &encode_utf16(text, false));
+        let (token, gen) = live_token();
+        let preview = load_text_preview(&p, PreviewLimits::default(), &token, gen).unwrap();
+        assert_eq!(preview.content, text);
+        assert!(!preview.truncated);
+    }
+
+    #[test]
+    fn utf16_odd_byte_cap_is_truncated_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_file(&dir, "utf16odd.txt", &encode_utf16("hello world", true));
+        // BOM (2) + 'h' (2) + first byte of 'e' = 5, so the last code unit is cut.
+        let limits = PreviewLimits::new(5, 10);
+        let (token, gen) = live_token();
+        let preview = load_text_preview(&p, limits, &token, gen).unwrap();
+        assert!(preview.truncated);
+        assert_eq!(preview.content, "h");
+    }
+
+    #[test]
     fn invalid_utf8_is_lossy() {
-        let p = write_file("lossy.txt", b"hello \xFF world");
-        let token = CancelToken::new();
-        let preview = load_text_preview(&p, PreviewLimits::default(), &token).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_file(&dir, "lossy.txt", b"hello \xFF world");
+        let (token, gen) = live_token();
+        let preview = load_text_preview(&p, PreviewLimits::default(), &token, gen).unwrap();
         assert!(preview.content.contains('\u{FFFD}'));
     }
 
     #[test]
     fn line_cap_applied() {
+        let dir = tempfile::tempdir().unwrap();
         let mut data = String::new();
         for i in 0..3000 {
             data.push_str(&format!("line{}\n", i));
         }
-        let p = write_file("lines.txt", data.as_bytes());
-        let token = CancelToken::new();
-        let preview = load_text_preview(&p, PreviewLimits::default(), &token).unwrap();
+        let p = write_file(&dir, "lines.txt", data.as_bytes());
+        let (token, gen) = live_token();
+        let preview = load_text_preview(&p, PreviewLimits::default(), &token, gen).unwrap();
         assert_eq!(preview.line_count, 2000);
         assert!(preview.truncated);
     }
 
     #[test]
-    fn cancelled_token_returns_cancelled() {
+    fn stale_generation_returns_cancelled() {
         let token = CancelToken::new();
-        token.generate(); // gen0 live
-        token.generate(); // gen1 live; gen0 is now stale
-        assert!(token.is_cancelled(&Generation::new(0)));
-        assert!(!token.is_cancelled(&token.current_generation()));
+        let stale = token.generate();
+        let _live = token.generate();
+        assert!(token.is_cancelled(&stale));
 
-        let p = write_file("cancelled.txt", b"hello");
-        let live_token = CancelToken::new();
-        live_token.generate();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_file(&dir, "cancelled.txt", b"hello");
         assert_eq!(
-            load_text_preview(&p, PreviewLimits::default(), &live_token).unwrap().content,
-            "hello"
+            load_text_preview(&p, PreviewLimits::default(), &token, stale),
+            Err(PreviewError::Cancelled)
         );
     }
 
     #[test]
     fn directory_rejected() {
-        let dir = std::env::temp_dir().join("spacepeek_test_dir");
-        std::fs::create_dir_all(&dir).unwrap();
-        let token = CancelToken::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sub_dir = dir.path().join("spacepeek_test_dir");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+        let (token, gen) = live_token();
         assert_eq!(
-            load_text_preview(&dir, PreviewLimits::default(), &token),
+            load_text_preview(&sub_dir, PreviewLimits::default(), &token, gen),
             Err(PreviewError::Directory)
         );
     }

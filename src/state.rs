@@ -57,13 +57,18 @@ pub fn step(
             | PreviewState::Showing { .. }
             | PreviewState::Failed { .. },
             Event::SpacePressed(_),
-        ) => (PreviewState::Hidden, vec![Effect::HideWindow, Effect::CancelLoad]),
+        ) => (
+            PreviewState::Hidden,
+            vec![Effect::HideWindow, Effect::CancelLoad],
+        ),
         (PreviewState::Showing { .. }, Event::EscPressed)
         | (PreviewState::Failed { .. }, Event::EscPressed) => {
             (PreviewState::Hidden, vec![Effect::HideWindow])
         }
         (PreviewState::Hidden, Event::EscPressed) => (PreviewState::Hidden, vec![]),
-        (PreviewState::Loading { .. }, Event::EscPressed) => (state, vec![]),
+        (PreviewState::Loading { .. }, Event::EscPressed) => {
+            (PreviewState::Hidden, vec![Effect::CancelLoad])
+        }
         (_, Event::FocusLost) => {
             let cancel_effect = match &state {
                 PreviewState::Hidden => None,
@@ -170,6 +175,18 @@ mod tests {
     }
 
     #[test]
+    fn esc_from_loading_cancels() {
+        let cancel = CancelToken::new();
+        let state = PreviewState::Loading {
+            gen: Generation::new(1),
+            path: path(),
+        };
+        let (state, effects) = step(state, Event::EscPressed, &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(effects, vec![Effect::CancelLoad]);
+    }
+
+    #[test]
     fn focus_lost_hides_showing() {
         let cancel = CancelToken::new();
         let (state, effects) = step(showing(), Event::FocusLost, &cancel);
@@ -184,8 +201,11 @@ mod tests {
             gen: Generation::new(5),
             path: path(),
         };
-        let (state, effects) =
-            step(state, Event::LoadFinished(Generation::new(9), Ok(sample_preview())), &cancel);
+        let (state, effects) = step(
+            state,
+            Event::LoadFinished(Generation::new(9), Ok(sample_preview())),
+            &cancel,
+        );
         assert_eq!(
             state,
             PreviewState::Loading {

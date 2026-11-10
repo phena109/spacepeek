@@ -16,10 +16,7 @@ pub fn should_intercept_space(ctx: &FocusContext) -> bool {
     if ctx.foreground_class != "CabinetWClass" {
         return false;
     }
-    match ctx.focus_class.as_str() {
-        "DirectUIHWND" => true,
-        _ => false,
-    }
+    matches!(ctx.focus_class.as_str(), "DirectUIHWND")
 }
 
 #[cfg(test)]
@@ -37,31 +34,58 @@ mod tests {
 
     #[test]
     fn allows_direct_ui_in_explorer() {
-        assert!(should_intercept_space(&ctx("CabinetWClass", "DirectUIHWND", false, false)));
+        assert!(should_intercept_space(&ctx(
+            "CabinetWClass",
+            "DirectUIHWND",
+            false,
+            false
+        )));
     }
 
     #[test]
     fn denies_edit_focus() {
-        assert!(!should_intercept_space(&ctx("CabinetWClass", "Edit", false, false)));
+        assert!(!should_intercept_space(&ctx(
+            "CabinetWClass",
+            "Edit",
+            false,
+            false
+        )));
     }
 
     #[test]
     fn denies_modifiers() {
-        assert!(!should_intercept_space(&ctx("CabinetWClass", "DirectUIHWND", false, true)));
+        assert!(!should_intercept_space(&ctx(
+            "CabinetWClass",
+            "DirectUIHWND",
+            false,
+            true
+        )));
     }
 
     #[test]
     fn denies_non_explorer_foreground() {
-        assert!(!should_intercept_space(&ctx("Notepad", "Edit", false, false)));
+        assert!(!should_intercept_space(&ctx(
+            "Notepad", "Edit", false, false
+        )));
     }
 
     #[test]
     fn preview_visible_intercepts_when_focused_in_preview() {
-        assert!(should_intercept_space(&ctx("SpacepeekPreview", "Edit", true, false)));
+        assert!(should_intercept_space(&ctx(
+            "SpacepeekPreview",
+            "Edit",
+            true,
+            false
+        )));
     }
 
     #[test]
     fn preview_not_visible_denies_other_foregrounds() {
-        assert!(!should_intercept_space(&ctx("SpacepeekPreview", "Edit", false, false)));
+        assert!(!should_intercept_space(&ctx(
+            "SpacepeekPreview",
+            "Edit",
+            false,
+            false
+        )));
     }
 }
