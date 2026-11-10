@@ -110,6 +110,10 @@ pub fn step(
     cancel: &CancelToken,
 ) -> (PreviewState, Vec<Effect>) {
     match (state, event) {
+        (PreviewState::Hidden, Event::SpacePressed(path)) if path.as_os_str().is_empty() => {
+            // No filesystem path. Do not start a load and do not show a window.
+            (PreviewState::Hidden, vec![])
+        }
         (PreviewState::Hidden, Event::SpacePressed(path)) => {
             let gen = cancel.generate();
             (
@@ -224,6 +228,11 @@ fn selection_changed(
     new_path: PathBuf,
     cancel: &CancelToken,
 ) -> (PreviewState, Vec<Effect>) {
+    // A cleared selection, or an item with no filesystem path, is not a file
+    // to load. Keep whatever is already on screen.
+    if new_path.as_os_str().is_empty() {
+        return (state, vec![]);
+    }
     let Some(current) = active_path(&state) else {
         return (state, vec![]);
     };
@@ -338,6 +347,7 @@ mod tests {
             truncated: false,
             line_count: 1,
             truncation: None,
+            total_bytes: 2,
         }
     }
 
@@ -355,6 +365,34 @@ mod tests {
             path: path(),
             replacing,
         }
+    }
+
+    #[test]
+    fn space_with_no_path_does_not_open_a_window() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(
+            PreviewState::Hidden,
+            Event::SpacePressed(PathBuf::new()),
+            &cancel,
+        );
+        assert_eq!(state, PreviewState::Hidden);
+        assert!(effects.is_empty());
+        assert_eq!(session_phase(&state), SessionPhase::Hidden);
+    }
+
+    #[test]
+    fn selection_cleared_keeps_the_current_preview() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(showing(), Event::SelectionChanged(PathBuf::new()), &cancel);
+        assert_eq!(state, showing());
+        assert!(effects.is_empty());
+        let (state, effects) = step(
+            PreviewState::Hidden,
+            Event::SelectionChanged(PathBuf::new()),
+            &cancel,
+        );
+        assert_eq!(state, PreviewState::Hidden);
+        assert!(effects.is_empty());
     }
 
     #[test]

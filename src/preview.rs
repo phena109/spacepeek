@@ -8,9 +8,23 @@ use std::sync::Arc;
 pub enum DeniedKind {
     /// Raster image. Later preview work can match this without a second list.
     Image,
-    /// Executable, archive, document, media, shortcut, or other container.
+    /// Executable, archive, document, media, or other container.
     Binary,
 }
+
+/// How many entries a directory listing produced.
+///
+/// [`DirectoryCount::Capped`] means the listing stopped after [`DIRECTORY_COUNT_CAP`]
+/// so a huge folder cannot be walked without a bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectoryCount {
+    Exact(u64),
+    Capped,
+}
+
+/// Stop counting directory entries after this many. One extra entry is read
+/// so an exact cap and "cap+" stay distinct.
+pub const DIRECTORY_COUNT_CAP: u64 = 10_000;
 
 #[derive(Debug)]
 pub enum PreviewError {
@@ -18,9 +32,19 @@ pub enum PreviewError {
     Binary,
     /// Extension is on the deny-list. The kind says which family it is.
     Denied(DeniedKind),
-    Directory,
+    /// A directory. `count` is omitted when the entries could not be read.
+    Directory {
+        count: Option<DirectoryCount>,
+    },
+    /// Zero-byte file. Distinct from a preview that has not loaded yet.
+    Empty,
     Cancelled,
     Io(std::io::Error),
+    /// `.lnk` shortcut. `target` is the stored path when it could be read
+    /// without searching or showing UI. Resolution itself is Win32 glue.
+    Shortcut {
+        target: Option<String>,
+    },
 }
 
 impl PartialEq for PreviewError {
@@ -30,8 +54,10 @@ impl PartialEq for PreviewError {
                 a.kind() == b.kind() && a.to_string() == b.to_string()
             }
             (PreviewError::Denied(a), PreviewError::Denied(b)) => a == b,
+            (PreviewError::Directory { count: a }, PreviewError::Directory { count: b }) => a == b,
+            (PreviewError::Shortcut { target: a }, PreviewError::Shortcut { target: b }) => a == b,
             (PreviewError::Binary, PreviewError::Binary)
-            | (PreviewError::Directory, PreviewError::Directory)
+            | (PreviewError::Empty, PreviewError::Empty)
             | (PreviewError::Cancelled, PreviewError::Cancelled) => true,
             _ => false,
         }
@@ -46,10 +72,134 @@ impl std::fmt::Display for PreviewError {
             PreviewError::Binary => write!(f, "file looks binary"),
             PreviewError::Denied(DeniedKind::Image) => write!(f, "image file"),
             PreviewError::Denied(DeniedKind::Binary) => write!(f, "unsupported file type"),
-            PreviewError::Directory => write!(f, "is a directory"),
+            PreviewError::Directory { .. } => write!(f, "is a directory"),
+            PreviewError::Empty => write!(f, "empty file"),
             PreviewError::Cancelled => write!(f, "cancelled"),
             PreviewError::Io(e) => write!(f, "io error: {e}"),
+            PreviewError::Shortcut { .. } => write!(f, "shortcut"),
         }
+    }
+}
+
+impl PreviewError {
+    /// Sentence for a person, including the file name where it helps.
+    ///
+    /// [`Display`] stays the short technical form. Callers that draw the
+    /// preview use this instead.
+    pub fn user_message(&self, file_name: &str) -> String {
+        let name = display_name(file_name);
+        match self {
+            PreviewError::Binary => format!("{name} doesn't look like text"),
+            PreviewError::Denied(_) => {
+                format!("{name} can't be previewed — this file type isn't supported yet")
+            }
+            PreviewError::Directory { count } => format_directory_message(name, *count),
+            PreviewError::Empty => "This file is empty".to_string(),
+            PreviewError::Cancelled => "Preview cancelled".to_string(),
+            PreviewError::Shortcut {
+                target: Some(target),
+            } if !target.trim().is_empty() => {
+                format!("Shortcut to {target}")
+            }
+            PreviewError::Shortcut { .. } => {
+                "Shortcut — previewing shortcuts isn't supported yet".to_string()
+            }
+            PreviewError::Io(err) => io_user_message(name, err),
+        }
+    }
+
+    /// Short second line for the header. The centred body uses [`Self::user_message`].
+    pub fn header_status(&self) -> String {
+        match self {
+            PreviewError::Binary => "Not text".to_string(),
+            PreviewError::Denied(_) => "Not supported".to_string(),
+            PreviewError::Directory { count } => match count {
+                Some(count) => format_directory_count(*count),
+                None => "Folder".to_string(),
+            },
+            PreviewError::Empty => format_compact_size(0),
+            PreviewError::Cancelled => "Cancelled".to_string(),
+            PreviewError::Shortcut { .. } => "Shortcut".to_string(),
+            PreviewError::Io(err) => io_header_status(err).to_string(),
+        }
+    }
+}
+
+fn display_name(name: &str) -> &str {
+    if name.is_empty() {
+        "This file"
+    } else {
+        name
+    }
+}
+
+/// `Folder: photos` or `Folder: photos · 12 items`. The count is omitted when
+/// the directory could not be listed. Above [`DIRECTORY_COUNT_CAP`] the count
+/// is `10,000+`.
+pub fn format_directory_message(name: &str, count: Option<DirectoryCount>) -> String {
+    let name = display_name(name);
+    match count {
+        None => format!("Folder: {name}"),
+        Some(count) => format!("Folder: {name} · {}", format_directory_count(count)),
+    }
+}
+
+fn format_directory_count(count: DirectoryCount) -> String {
+    match count {
+        DirectoryCount::Exact(n) => format_item_count(n),
+        DirectoryCount::Capped => format!("{}+ items", format_grouped(DIRECTORY_COUNT_CAP)),
+    }
+}
+
+fn format_item_count(n: u64) -> String {
+    let grouped = format_grouped(n);
+    if n == 1 {
+        format!("{grouped} item")
+    } else {
+        format!("{grouped} items")
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IoClass {
+    Sharing,
+    NotFound,
+    Denied,
+    Other,
+}
+
+fn io_class(err: &std::io::Error) -> IoClass {
+    // Windows codes, compared on the raw value so a constructed error is
+    // classified the same on every host. Kind is the fallback for errors that
+    // `std` built without a raw code.
+    match err.raw_os_error() {
+        Some(32 | 33) => return IoClass::Sharing,
+        Some(2 | 3) => return IoClass::NotFound,
+        Some(5) => return IoClass::Denied,
+        _ => {}
+    }
+    match err.kind() {
+        std::io::ErrorKind::NotFound => IoClass::NotFound,
+        std::io::ErrorKind::PermissionDenied => IoClass::Denied,
+        _ => IoClass::Other,
+    }
+}
+
+fn io_user_message(name: &str, err: &std::io::Error) -> String {
+    match io_class(err) {
+        IoClass::Sharing => format!("{name} is open in another program and can't be read"),
+        IoClass::NotFound => format!("{name} no longer exists"),
+        IoClass::Denied => format!("Access to {name} was denied"),
+        IoClass::Other => format!("{name} can't be read"),
+    }
+}
+
+fn io_header_status(err: &std::io::Error) -> &'static str {
+    match io_class(err) {
+        IoClass::Sharing => "In use",
+        IoClass::NotFound => "Missing",
+        IoClass::Denied => "Access denied",
+        IoClass::Other => "Can't read",
     }
 }
 
@@ -92,6 +242,8 @@ pub struct Preview {
     pub truncated: bool,
     pub line_count: usize,
     pub truncation: Option<Truncation>,
+    /// File size in bytes, including a leading BOM. The header uses this.
+    pub total_bytes: u64,
 }
 
 /// Default file-byte budget for the EDIT control.
@@ -144,7 +296,6 @@ const DENIED_EXTENSIONS: &[(&str, DeniedKind)] = &[
     ("scr", DeniedKind::Binary),
     ("ocx", DeniedKind::Binary),
     ("msi", DeniedKind::Binary),
-    ("lnk", DeniedKind::Binary),
     ("zip", DeniedKind::Binary),
     ("7z", DeniedKind::Binary),
     ("rar", DeniedKind::Binary),
@@ -244,7 +395,17 @@ pub fn load_text_preview<P: AsRef<Path>>(
 ) -> Result<Preview, PreviewError> {
     let path = path.as_ref();
     if path.is_dir() {
-        return Err(PreviewError::Directory);
+        if cancel.is_cancelled(&gen) {
+            return Err(PreviewError::Cancelled);
+        }
+        return Err(PreviewError::Directory {
+            count: directory_count(path),
+        });
+    }
+    // Shortcuts are refused before the byte sniff. The stored target, when one
+    // can be read cheaply, is filled in by the Windows caller.
+    if is_shortcut(path) {
+        return Err(PreviewError::Shortcut { target: None });
     }
     if let Some(kind) = denied_kind(path) {
         return Err(PreviewError::Denied(kind));
@@ -255,6 +416,9 @@ pub fn load_text_preview<P: AsRef<Path>>(
 
     let mut file = File::open(path).map_err(PreviewError::Io)?;
     let mut total_bytes = file.metadata().map_err(PreviewError::Io)?.len();
+    if total_bytes == 0 {
+        return Err(PreviewError::Empty);
+    }
     let mut reader = BufReader::new(&mut file);
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -318,7 +482,33 @@ pub fn load_text_preview<P: AsRef<Path>>(
         truncated,
         line_count: prepared.lines_shown,
         truncation,
+        total_bytes,
     })
+}
+
+fn is_shortcut(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
+}
+
+/// `read_dir` does not yield `.` or `..`. A listing error on one entry still
+/// counts, because something is there. `None` means the directory itself
+/// could not be opened.
+fn directory_count(path: &Path) -> Option<DirectoryCount> {
+    directory_count_capped(path, DIRECTORY_COUNT_CAP)
+}
+
+fn directory_count_capped(path: &Path, cap: u64) -> Option<DirectoryCount> {
+    let entries = std::fs::read_dir(path).ok()?;
+    let mut seen = 0u64;
+    for _entry in entries {
+        seen = seen.saturating_add(1);
+        if seen > cap {
+            return Some(DirectoryCount::Capped);
+        }
+    }
+    Some(DirectoryCount::Exact(seen))
 }
 
 /// Text placed in the preview control, with the truncation notice at the top.
@@ -411,6 +601,30 @@ pub fn format_byte_size(bytes: u64) -> String {
     format_scaled(bytes, unit, name)
 }
 
+/// Compact binary size for the header: `512 B`, `12 KB`, `1.5 MB`.
+///
+/// Same half-up tenths rounding as [`format_byte_size`]. Values under 1024 use
+/// `B` so the header line stays short.
+pub fn format_compact_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let kb = 1024u64;
+    let mb = kb * 1024;
+    let gb = mb * 1024;
+    let tb = gb * 1024;
+    let (unit, name) = if bytes < mb {
+        (kb, "KB")
+    } else if bytes < gb {
+        (mb, "MB")
+    } else if bytes < tb {
+        (gb, "GB")
+    } else {
+        (tb, "TB")
+    };
+    format_scaled(bytes, unit, name)
+}
+
 fn format_scaled(bytes: u64, unit: u64, name: &str) -> String {
     let tenths = (u128::from(bytes) * 10 + u128::from(unit) / 2) / u128::from(unit);
     let whole = tenths / 10;
@@ -422,7 +636,7 @@ fn format_scaled(bytes: u64, unit: u64, name: &str) -> String {
     }
 }
 
-fn format_grouped(n: u64) -> String {
+pub(crate) fn format_grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in digits.chars().enumerate() {
@@ -846,7 +1060,6 @@ mod tests {
             "old.rar",
             "disk.iso",
             "setup.msi",
-            "link.lnk",
         ] {
             let p = write_file(&dir, name, b"hello");
             assert_eq!(
@@ -1247,7 +1460,248 @@ mod tests {
         std::fs::create_dir_all(&sub_dir).unwrap();
         assert_eq!(
             load(&sub_dir, PreviewLimits::default()),
-            Err(PreviewError::Directory)
+            Err(PreviewError::Directory {
+                count: Some(DirectoryCount::Exact(0))
+            })
         );
+    }
+
+    #[test]
+    fn directory_message_names_the_folder_and_caps_the_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("写真");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("a.txt"), b"a").unwrap();
+        fs::write(folder.join("b.txt"), b"b").unwrap();
+        let err = load(&folder, PreviewLimits::default()).unwrap_err();
+        assert_eq!(
+            err,
+            PreviewError::Directory {
+                count: Some(DirectoryCount::Exact(2))
+            }
+        );
+        assert_eq!(err.user_message("写真"), "Folder: 写真 · 2 items");
+        assert_eq!(err.header_status(), "2 items");
+        assert_eq!(err.to_string(), "is a directory");
+
+        let counted = dir.path().join("counted");
+        fs::create_dir(&counted).unwrap();
+        for i in 0..4 {
+            fs::write(counted.join(format!("f{i}")), b"x").unwrap();
+        }
+        assert_eq!(
+            directory_count_capped(&counted, 3),
+            Some(DirectoryCount::Capped)
+        );
+        assert_eq!(
+            directory_count_capped(&counted, 4),
+            Some(DirectoryCount::Exact(4))
+        );
+        assert_eq!(
+            directory_count_capped(&counted, 10),
+            Some(DirectoryCount::Exact(4))
+        );
+        assert_eq!(
+            directory_count_capped(&folder, 2),
+            Some(DirectoryCount::Exact(2))
+        );
+        assert_eq!(
+            directory_count_capped(&folder, 1),
+            Some(DirectoryCount::Capped)
+        );
+
+        assert_eq!(format_directory_message("photos", None), "Folder: photos");
+        assert_eq!(
+            format_directory_message("photos", Some(DirectoryCount::Exact(0))),
+            "Folder: photos · 0 items"
+        );
+        assert_eq!(
+            format_directory_message("photos", Some(DirectoryCount::Exact(1))),
+            "Folder: photos · 1 item"
+        );
+        assert_eq!(
+            format_directory_message("photos", Some(DirectoryCount::Exact(12))),
+            "Folder: photos · 12 items"
+        );
+        assert_eq!(
+            format_directory_message("photos", Some(DirectoryCount::Exact(10_000))),
+            "Folder: photos · 10,000 items"
+        );
+        assert_eq!(
+            format_directory_message("photos", Some(DirectoryCount::Capped)),
+            "Folder: photos · 10,000+ items"
+        );
+        assert_eq!(DIRECTORY_COUNT_CAP, 10_000);
+        assert_eq!(format_directory_message("", None), "Folder: This file");
+    }
+
+    #[test]
+    fn empty_file_is_distinct_from_a_blank_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = write_file(&dir, "empty.txt", b"");
+        let err = load(&empty, PreviewLimits::default()).unwrap_err();
+        assert_eq!(err, PreviewError::Empty);
+        assert_eq!(err.user_message("empty.txt"), "This file is empty");
+        assert_eq!(err.header_status(), "0 B");
+        assert_eq!(err.to_string(), "empty file");
+        assert_ne!(err.to_string(), err.user_message("empty.txt"));
+
+        let png = write_file(&dir, "photo.png", b"");
+        assert_eq!(
+            load(&png, PreviewLimits::default()),
+            Err(PreviewError::Denied(DeniedKind::Image))
+        );
+    }
+
+    #[test]
+    fn shortcut_is_not_opened_as_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = write_file(&dir, "Notes.LNK", b"not really a shortcut");
+        assert_eq!(
+            load(&link, PreviewLimits::default()),
+            Err(PreviewError::Shortcut { target: None })
+        );
+        let err = PreviewError::Shortcut { target: None };
+        assert_eq!(
+            err.user_message("Notes.LNK"),
+            "Shortcut — previewing shortcuts isn't supported yet"
+        );
+        assert_eq!(err.header_status(), "Shortcut");
+        assert_eq!(err.to_string(), "shortcut");
+        let with_target = PreviewError::Shortcut {
+            target: Some(r"C:\docs\ノート.md".to_string()),
+        };
+        assert_eq!(
+            with_target.user_message("Notes.LNK"),
+            "Shortcut to C:\\docs\\ノート.md"
+        );
+        let blank = PreviewError::Shortcut {
+            target: Some("  ".to_string()),
+        };
+        assert_eq!(
+            blank.user_message("Notes.LNK"),
+            "Shortcut — previewing shortcuts isn't supported yet"
+        );
+    }
+
+    #[test]
+    fn user_message_covers_each_error_kind() {
+        assert_eq!(
+            PreviewError::Binary.user_message("notes.md"),
+            "notes.md doesn't look like text"
+        );
+        assert_eq!(
+            PreviewError::Binary.user_message("ノート.md"),
+            "ノート.md doesn't look like text"
+        );
+        assert_eq!(PreviewError::Binary.to_string(), "file looks binary");
+        assert_eq!(PreviewError::Binary.header_status(), "Not text");
+
+        let image = PreviewError::Denied(DeniedKind::Image);
+        assert_eq!(
+            image.user_message("photo.png"),
+            "photo.png can't be previewed — this file type isn't supported yet"
+        );
+        assert_eq!(
+            image.user_message("café.png"),
+            "café.png can't be previewed — this file type isn't supported yet"
+        );
+        assert_eq!(image.to_string(), "image file");
+        assert_eq!(image.header_status(), "Not supported");
+
+        let binary = PreviewError::Denied(DeniedKind::Binary);
+        assert_eq!(
+            binary.user_message("archive.zip"),
+            "archive.zip can't be previewed — this file type isn't supported yet"
+        );
+        assert_eq!(binary.to_string(), "unsupported file type");
+
+        let missing = PreviewError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "The system cannot find the file specified. (os error 2)",
+        ));
+        assert_eq!(
+            missing.user_message("notes.md"),
+            "notes.md no longer exists"
+        );
+        assert_eq!(
+            missing.user_message("ノート.md"),
+            "ノート.md no longer exists"
+        );
+        assert!(missing.to_string().contains("io error"));
+        assert!(!missing.user_message("notes.md").contains("os error"));
+        assert!(!missing.user_message("notes.md").contains("io error"));
+        assert_eq!(missing.header_status(), "Missing");
+
+        let raw_missing = PreviewError::Io(std::io::Error::from_raw_os_error(2));
+        assert_eq!(
+            raw_missing.user_message("notes.md"),
+            "notes.md no longer exists"
+        );
+        let raw_path = PreviewError::Io(std::io::Error::from_raw_os_error(3));
+        assert_eq!(
+            raw_path.user_message("notes.md"),
+            "notes.md no longer exists"
+        );
+
+        let sharing = PreviewError::Io(std::io::Error::from_raw_os_error(32));
+        assert_eq!(
+            sharing.user_message("notes.md"),
+            "notes.md is open in another program and can't be read"
+        );
+        assert_eq!(
+            sharing.user_message("café.txt"),
+            "café.txt is open in another program and can't be read"
+        );
+        assert!(sharing.to_string().contains("io error"));
+        assert!(!sharing.user_message("notes.md").contains("os error"));
+        assert!(!sharing.user_message("notes.md").contains("32"));
+        assert_eq!(sharing.header_status(), "In use");
+
+        let locked = PreviewError::Io(std::io::Error::from_raw_os_error(33));
+        assert_eq!(
+            locked.user_message("notes.md"),
+            "notes.md is open in another program and can't be read"
+        );
+
+        let denied = PreviewError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Access is denied. (os error 5)",
+        ));
+        assert_eq!(
+            denied.user_message("notes.md"),
+            "Access to notes.md was denied"
+        );
+        assert_eq!(
+            denied.user_message("ノート.md"),
+            "Access to ノート.md was denied"
+        );
+        assert!(!denied.user_message("notes.md").contains("os error"));
+        assert_eq!(denied.header_status(), "Access denied");
+
+        let raw_denied = PreviewError::Io(std::io::Error::from_raw_os_error(5));
+        assert_eq!(
+            raw_denied.user_message("secret.txt"),
+            "Access to secret.txt was denied"
+        );
+
+        let other = PreviewError::Io(std::io::Error::other("could not start preview load"));
+        assert_eq!(other.user_message("notes.md"), "notes.md can't be read");
+        assert_eq!(other.user_message(""), "This file can't be read");
+        assert!(!other.user_message("notes.md").contains("could not start"));
+        assert_eq!(other.header_status(), "Can't read");
+
+        assert_eq!(
+            PreviewError::Cancelled.user_message("notes.md"),
+            "Preview cancelled"
+        );
+        assert_eq!(format_compact_size(0), "0 B");
+        assert_eq!(format_compact_size(1), "1 B");
+        assert_eq!(format_compact_size(512), "512 B");
+        assert_eq!(format_compact_size(12 * 1024), "12 KB");
+        assert_eq!(format_compact_size(1536), "1.5 KB");
+        assert_eq!(format_compact_size(1024 * 1024), "1 MB");
+        assert_eq!(format_compact_size(1_258_291), "1.2 MB");
+        assert_eq!(format_compact_size(1024 * 1024 * 1024), "1 GB");
     }
 }
