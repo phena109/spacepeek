@@ -14,6 +14,12 @@ pub fn choose_selected<T>(
     }
 }
 
+/// Drop an empty path. Nothing selected, and a shell item with no filesystem
+/// path, are both `None`. Space must not open a window for either.
+pub fn nonempty_path(path: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    path.filter(|path| !path.as_os_str().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,5 +50,20 @@ mod tests {
     fn nothing_selected_and_nothing_focused_is_none() {
         assert_eq!(choose_selected(None::<i32>, false, None::<i32>), None);
         assert_eq!(choose_selected(None::<i32>, true, None::<i32>), None);
+    }
+
+    #[test]
+    fn nonempty_path_rejects_a_missing_selection() {
+        use std::path::PathBuf;
+        assert_eq!(nonempty_path(None), None);
+        assert_eq!(nonempty_path(Some(PathBuf::new())), None);
+        assert_eq!(
+            nonempty_path(Some(PathBuf::from("ノート.md"))),
+            Some(PathBuf::from("ノート.md"))
+        );
+        assert_eq!(
+            nonempty_path(Some(PathBuf::from("notes.md"))),
+            Some(PathBuf::from("notes.md"))
+        );
     }
 }

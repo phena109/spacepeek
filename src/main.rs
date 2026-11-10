@@ -21,35 +21,43 @@ fn main() -> std::process::ExitCode {
 mod win {
     use std::cell::RefCell;
     use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{
         AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering,
     };
 
     use spacepeek::{
-        choose_selected, classify_typeahead_vk, decide_hook_key, effective_dpi, gate_show,
-        hook_key_from_vk, load_text_preview, nav_reload_remaining, parse_command,
-        preview_placement, preview_text, scaled_font_height, session_phase, step,
-        typeahead_window_ms, wheel_scroll_dy, CancelToken, Command, Effect, Event, Generation,
-        HookContext, HookDecision, HookKey, KeyPhase, Modifiers, NavKey, Preview, PreviewError,
-        PreviewLimits, PreviewState, PxRect, RepeatFilter, ScrollHold, ScrollOp, SessionPhase,
-        ShowGate, ShowOutcome, TrackedKey, Typeahead, TypeaheadKey, NAV_RELOAD_DELAY_MS,
+        choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk, decide_hook_key,
+        effective_dpi, gate_show, hit_test, hook_key_from_vk, load_text_preview, min_physical_size,
+        nav_reload_remaining, nonempty_path, parse_command, place_preview, scaled_close_width,
+        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
+        scaled_header_pad, session_phase, step, typeahead_window_ms, wheel_scroll_dy, CancelToken,
+        ChromeLayout, Command, Effect, Event, Generation, HitZone, HookContext, HookDecision,
+        HookKey, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits,
+        PreviewState, PxRect, RepeatFilter, ScrollHold, ScrollOp, SessionPhase, ShowGate,
+        ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind,
+        NAV_RELOAD_DELAY_MS,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
-        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL,
-        HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+        CloseHandle, GetLastError, SetLastError, COLORREF, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
+        E_FAIL, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
-        CreateFontW, DeleteObject, GetDC, GetMonitorInfoW, GetSysColorBrush, GetTextFaceW,
-        MonitorFromWindow, ReleaseDC, SelectObject, CLEARTYPE_QUALITY, COLOR_WINDOW,
-        DEFAULT_CHARSET, FF_MODERN, FIXED_PITCH, FW_NORMAL, HFONT, MONITORINFO,
-        MONITOR_DEFAULTTONEAREST,
+        BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
+        EndPaint, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush, GetTextFaceW,
+        InvalidateRect, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
+        CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
+        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DRAW_TEXT_FORMAT, FF_MODERN, FF_SWISS,
+        FIXED_PITCH, FW_NORMAL, FW_SEMIBOLD, HDC, HFONT, HGDIOBJ, MONITORINFO,
+        MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
+        TRANSPARENT, VARIABLE_PITCH,
     };
+    use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
     use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IServiceProvider,
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
+        IServiceProvider, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
     };
     use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -58,7 +66,7 @@ mod win {
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
     use windows::Win32::UI::HiDpi::{
-        GetDpiForMonitor, GetDpiForWindow, SetProcessDpiAwarenessContext,
+        GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -69,7 +77,8 @@ mod win {
     use windows::Win32::UI::Shell::{
         FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
         IShellFolder, IShellFolderViewDual, IShellItem, IShellView, IShellWindows, IWebBrowser2,
-        SHCreateItemWithParent, SID_STopLevelBrowser, ShellWindows, Shell_NotifyIconW, NIF_ICON,
+        IShellLinkW, SHCreateItemWithParent, SID_STopLevelBrowser, SLGP_RAWPATH, ShellLink,
+        ShellWindows, Shell_NotifyIconW, NIF_ICON,
         NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT,
         NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SIGDN_FILESYSPATH, SVGIO_SELECTION, SVSI_SELECT,
     };
@@ -83,19 +92,22 @@ mod win {
         PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SendMessageW,
         SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
         SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
-        ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, EVENT_SYSTEM_FOREGROUND,
-        GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU, IDC_ARROW, IDI_APPLICATION,
-        KBDLLHOOKSTRUCT, LLKHF_UP, MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-        MESSAGEBOX_STYLE, MF_STRING, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN,
-        SB_PAGEUP, SB_TOP, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
-        SW_SHOWNOACTIVATE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
+        CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY,
+        EVENT_SYSTEM_FOREGROUND, GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU,
+        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+        HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_UP,
+        MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MF_STRING,
+        MINMAXINFO, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP,
+        SM_CXPADDEDBORDER, SM_CXFRAME, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+        SW_HIDE, SW_SHOWNOACTIVATE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
         WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CHAR,
-        WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KEYUP,
-        WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
-        WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL, WM_NULL, WM_QUIT, WM_RBUTTONDBLCLK,
-        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
-        WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSW, WNDCLASS_STYLES, WS_BORDER, WS_CHILD,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_VISIBLE,
+        WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE,
+        WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL,
+        WM_NCHITTEST, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
+        WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER,
+        WM_VSCROLL, WNDCLASSW, WNDCLASS_STYLES, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE,
         WS_VSCROLL,
     };
 
@@ -139,7 +151,13 @@ mod win {
         explorer_hwnd: HWND,
         instance: HINSTANCE,
         font: HFONT,
+        header_font: HFONT,
+        detail_font: HFONT,
         font_dpi: u32,
+        /// Last user-chosen outer size, in logical pixels. Empty until a resize.
+        sizes: SizeMemory,
+        /// Header and, for errors, the centred message. The edit holds file text.
+        presented: Option<Presented>,
         /// Set for the duration of `on_space`. Explorer COM calls pump this STA
         /// thread, so a posted Space can otherwise re-enter `on_space`.
         space_busy: bool,
@@ -214,7 +232,11 @@ mod win {
             explorer_hwnd: HWND::default(),
             instance,
             font: HFONT::default(),
+            header_font: HFONT::default(),
+            detail_font: HFONT::default(),
             font_dpi: 0,
+            sizes: SizeMemory::new(),
+            presented: None,
             space_busy: false,
             input_baseline: 0,
             last_nav_tick: None,
@@ -912,8 +934,37 @@ mod win {
 
     fn preview_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         match msg {
+            // Header drag and edge resize. The × button stays client so the
+            // click is ours; returning HTCAPTION there would start a drag.
+            // MA_NOACTIVATE and WS_EX_NOACTIVATE keep Explorer in front. A
+            // caption drag that still activates is handed back on WM_EXITSIZEMOVE.
+            WM_NCHITTEST => LRESULT(i32::from_ne_bytes(
+                zone_to_hit(hit_at_screen(hwnd, lparam)).to_ne_bytes(),
+            ) as isize),
+            WM_GETMINMAXINFO => {
+                apply_min_track(hwnd, lparam);
+                LRESULT(0)
+            }
+            WM_EXITSIZEMOVE => {
+                remember_window_size(hwnd);
+                let explorer = with_app(|app| app.explorer_hwnd);
+                restore_explorer_focus(explorer);
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                if hit_at_client(hwnd, lparam) == HitZone::Close {
+                    dispatch(Event::EscPressed);
+                }
+                LRESULT(0)
+            }
+            WM_ERASEBKGND => LRESULT(1),
+            WM_PAINT => {
+                paint_preview(hwnd);
+                LRESULT(0)
+            }
             WM_SIZE => {
                 resize_edit(hwnd);
+                invalidate_preview(hwnd);
                 LRESULT(0)
             }
             WM_KEYDOWN if wparam.0 == usize::from(VK_ESCAPE.0) => {
@@ -934,6 +985,13 @@ mod win {
                 let edit = with_app(|app| app.edit_hwnd);
                 unsafe {
                     let _ = HideCaret(edit);
+                }
+                // A header click can still focus us. Put Explorer back so arrow
+                // keys keep moving the selection. Skip when Explorer is already
+                // in front, and skip while a size loop has capture.
+                if unsafe { GetCapture() } == HWND::default() {
+                    let explorer = with_app(|app| app.explorer_hwnd);
+                    restore_explorer_focus(explorer);
                 }
                 LRESULT(0)
             }
@@ -971,10 +1029,14 @@ mod win {
         }
         let explorer = unsafe { GetForegroundWindow() };
         with_app_mut(|app| app.explorer_hwnd = explorer);
-        let path = unsafe { selected_path(explorer) };
-        match path {
-            Some(path) => dispatch(Event::SpacePressed(path)),
-            None => dispatch(Event::SpacePressed(PathBuf::new())),
+        let path = nonempty_path(unsafe { selected_path(explorer) });
+        // The hook cannot query the selection. That COM call belongs on this
+        // STA thread; doing it inside the low-level hook would stall every
+        // keystroke. Space was already swallowed. With no filesystem path,
+        // opening a window is the failure — do nothing. Re-injecting the key
+        // would re-enter the hook.
+        if let Some(path) = path {
+            dispatch(Event::SpacePressed(path));
         }
     }
 
@@ -1058,8 +1120,10 @@ mod win {
         if unsafe { GetForegroundWindow() != explorer } {
             return;
         }
-        let path = unsafe { selected_path(explorer) }.unwrap_or_default();
-        dispatch(Event::SelectionChanged(path));
+        // A cleared selection is not a new file. Leave the current preview up.
+        if let Some(path) = nonempty_path(unsafe { selected_path(explorer) }) {
+            dispatch(Event::SelectionChanged(path));
+        }
     }
 
     struct NavBusyGuard;
@@ -1157,14 +1221,6 @@ mod win {
             (app.cancel.clone(), app.msg_hwnd)
         });
         if path.as_os_str().is_empty() {
-            post_load(
-                hwnd,
-                gen,
-                Err(PreviewError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "No file is selected.",
-                ))),
-            );
             return;
         }
         let hwnd_bits = hwnd.0 as isize;
@@ -1172,6 +1228,10 @@ mod win {
             .name("spacepeek-load".to_string())
             .spawn(move || {
                 let result = load_text_preview(&path, PreviewLimits::default(), &cancel, gen);
+                if cancel.is_cancelled(&gen) {
+                    return;
+                }
+                let result = enrich_shortcut(&path, result);
                 if cancel.is_cancelled(&gen) {
                     return;
                 }
