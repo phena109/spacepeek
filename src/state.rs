@@ -144,6 +144,7 @@ mod tests {
             content: "hi".to_string(),
             truncated: false,
             line_count: 1,
+            truncation: None,
         }
     }
 
@@ -231,7 +232,7 @@ mod tests {
         let state = PreviewState::Failed {
             gen: Generation::new(1),
             path: path(),
-            error: PreviewError::Unsupported,
+            error: PreviewError::Binary,
         };
         let (state, effects) = step(state, Event::EscPressed, &cancel);
         assert_eq!(state, PreviewState::Hidden);
@@ -274,7 +275,7 @@ mod tests {
         let state = PreviewState::Failed {
             gen: Generation::new(1),
             path: path(),
-            error: PreviewError::Unsupported,
+            error: PreviewError::Binary,
         };
         let (state, effects) = step(state, Event::FocusLost, &cancel);
         assert_eq!(state, PreviewState::Hidden);
@@ -348,7 +349,7 @@ mod tests {
         let state = PreviewState::Failed {
             gen: Generation::new(1),
             path: path(),
-            error: PreviewError::Unsupported,
+            error: PreviewError::Binary,
         };
         let (state, effects) = step(state, Event::SpacePressed(path()), &cancel);
         assert_eq!(state, PreviewState::Hidden);

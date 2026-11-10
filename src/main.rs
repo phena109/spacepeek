@@ -27,9 +27,9 @@ mod win {
 
     use spacepeek::{
         choose_selected, effective_dpi, esc_action, load_text_preview, parse_command,
-        preview_placement, scaled_font_height, should_intercept_space, step, CancelToken, Command,
-        Effect, EscAction, Event, FocusContext, Generation, KeyPhase, Preview, PreviewError,
-        PreviewLimits, PreviewState, PxRect, RepeatFilter, TrackedKey,
+        preview_placement, preview_text, scaled_font_height, should_intercept_space, step,
+        CancelToken, Command, Effect, EscAction, Event, FocusContext, Generation, KeyPhase,
+        Preview, PreviewError, PreviewLimits, PreviewState, PxRect, RepeatFilter, TrackedKey,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -37,8 +37,9 @@ mod win {
         HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
-        CreateFontW, DeleteObject, GetMonitorInfoW, GetSysColorBrush, MonitorFromWindow,
-        CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET, FW_NORMAL, HFONT, MONITORINFO,
+        CreateFontW, DeleteObject, GetDC, GetMonitorInfoW, GetSysColorBrush, GetTextFaceW,
+        MonitorFromWindow, ReleaseDC, SelectObject, CLEARTYPE_QUALITY, COLOR_WINDOW,
+        DEFAULT_CHARSET, FF_MODERN, FIXED_PITCH, FW_NORMAL, HFONT, MONITORINFO,
         MONITOR_DEFAULTTONEAREST,
     };
     use windows::Win32::System::Com::{
@@ -73,15 +74,15 @@ mod win {
         IsWindowVisible, LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, PeekMessageW,
         PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, RegisterWindowMessageW,
         SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, SetWindowsHookExW,
-        ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, ES_AUTOVSCROLL,
-        ES_MULTILINE, ES_READONLY, GUITHREADINFO, HHOOK, HICON, HMENU, IDC_ARROW, IDI_APPLICATION,
-        KBDLLHOOKSTRUCT, LLKHF_UP, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE,
-        MF_STRING, MSG, PM_NOREMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
-        SW_HIDE, SW_SHOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE,
+        ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, ES_AUTOHSCROLL,
+        ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GUITHREADINFO, HHOOK, HICON, HMENU, IDC_ARROW,
+        IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_UP, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+        MESSAGEBOX_STYLE, MF_STRING, MSG, PM_NOREMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
+        SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE,
         WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE,
         WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONUP, WM_NULL, WM_QUIT,
         WM_RBUTTONUP, WM_SETFONT, WM_SIZE, WM_USER, WNDCLASSW, WNDCLASS_STYLES, WS_BORDER,
-        WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WS_VSCROLL,
+        WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_VISIBLE, WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -820,12 +821,17 @@ mod win {
                 return;
             };
             let edit_class = utf16("EDIT");
+            // ES_AUTOHSCROLL turns word wrap off for a multiline EDIT. WS_HSCROLL
+            // keeps a bar so columns and indentation scroll sideways instead of
+            // breaking mid-token.
             let edit_style = WS_CHILD
                 | WS_VISIBLE
                 | WS_VSCROLL
+                | WS_HSCROLL
                 | WINDOW_STYLE(ES_MULTILINE as u32)
                 | WINDOW_STYLE(ES_READONLY as u32)
-                | WINDOW_STYLE(ES_AUTOVSCROLL as u32);
+                | WINDOW_STYLE(ES_AUTOVSCROLL as u32)
+                | WINDOW_STYLE(ES_AUTOHSCROLL as u32);
             let edit = unsafe {
                 CreateWindowExW(
                     WINDOW_EX_STYLE(0),
@@ -1026,16 +1032,7 @@ mod win {
 
     fn window_content(state: &PreviewState) -> (String, String) {
         match state {
-            PreviewState::Showing { path, preview, .. } => {
-                let mut body = to_crlf(&preview.content);
-                if preview.truncated {
-                    if !body.is_empty() {
-                        body.push_str("\r\n\r\n");
-                    }
-                    body.push_str("[preview truncated]");
-                }
-                (title_for(path), body)
-            }
+            PreviewState::Showing { path, preview, .. } => (title_for(path), preview_text(preview)),
             PreviewState::Failed { path, error, .. } => {
                 let title = if path.as_os_str().is_empty() {
                     "Spacepeek".to_string()
@@ -1407,9 +1404,36 @@ mod win {
         }
     }
 
+    /// Monospace faces for text previews, in preference order. GDI substitutes
+    /// when a face is missing, so the created font is kept only when its actual
+    /// face name matches. `WM_DPICHANGED` recreates this through `swap_font`.
+    const TEXT_FACES: [&str; 2] = ["Cascadia Mono", "Consolas"];
+
     fn create_ui_font(dpi: u32) -> HFONT {
-        let face = utf16("Segoe UI");
         let height = -scaled_font_height(dpi);
+        let mut fallback = HFONT::default();
+        for face in TEXT_FACES {
+            let font = create_named_font(height, face);
+            if font.0.is_null() {
+                continue;
+            }
+            if font_face_name(font).is_some_and(|actual| actual.eq_ignore_ascii_case(face)) {
+                discard_font(fallback);
+                return font;
+            }
+            if fallback.0.is_null() {
+                fallback = font;
+            } else {
+                discard_font(font);
+            }
+        }
+        fallback
+    }
+
+    fn create_named_font(height: i32, face: &str) -> HFONT {
+        let face = utf16(face);
+        // FIXED_PITCH | FF_MODERN asks for a monospace substitute if the face is missing.
+        let pitch = u32::from(FIXED_PITCH.0) | u32::from(FF_MODERN.0);
         unsafe {
             CreateFontW(
                 height,
@@ -1424,9 +1448,31 @@ mod win {
                 0,
                 0,
                 u32::from(CLEARTYPE_QUALITY.0),
-                0,
+                pitch,
                 PCWSTR(face.as_ptr()),
             )
+        }
+    }
+
+    fn font_face_name(font: HFONT) -> Option<String> {
+        unsafe {
+            let dc = GetDC(HWND::default());
+            if dc.is_invalid() {
+                return None;
+            }
+            let previous = SelectObject(dc, font);
+            let mut buf = [0u16; 64];
+            let copied = GetTextFaceW(dc, Some(&mut buf));
+            if !previous.is_invalid() {
+                let _ = SelectObject(dc, previous);
+            }
+            let _ = ReleaseDC(HWND::default(), dc);
+            if copied <= 1 {
+                return None;
+            }
+            let len = usize::try_from(copied).unwrap_or(0).saturating_sub(1);
+            let len = len.min(buf.len());
+            String::from_utf16(&buf[..len]).ok()
         }
     }
 

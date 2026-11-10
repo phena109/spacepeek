@@ -2,11 +2,13 @@
 
 Space-bar file preview for Windows Explorer. Select a file, press Space, and a single topmost window shows a bounded text preview. Press Space or Esc again to close it.
 
+Text is drawn in a monospace font (Cascadia Mono, then Consolas) with word wrap off and a horizontal scrollbar, so columns and indentation stay aligned. Each line sent to the preview is capped at 2,000 characters. The preview loads at most the first 64 KiB. When that is not the whole file, or when lines were shortened, a notice at the top says what is shown (for example `Showing the first 64 KB of 1.2 MB`).
+
 ## Status
 
 First runnable vertical slice.
 
-The preview core (bounded reads, binary sniffing, extension allow-list, cancellation, state machine, and Space interception rules) is implemented and unit-tested. The Windows runtime is wired: single-instance mutex, low-level keyboard hook, Explorer selection lookup, and one `SpacepeekPreview` window. Every UI transition goes through `state::step`.
+The preview core (bounded reads, character-boundary truncation, binary sniffing, a deny-list of known binary and image extensions, cancellation, state machine, and Space interception rules) is implemented and unit-tested. The Windows runtime is wired: single-instance mutex, low-level keyboard hook, Explorer selection lookup, and one `SpacepeekPreview` window. Every UI transition goes through `state::step`.
 
 Compile-checked for the Windows targets below on a Linux host. **Never executed on Windows.** No timings are claimed.
 
@@ -42,12 +44,12 @@ On Linux and macOS the binary prints `Spacepeek runs on Windows only` and exits 
 ## Manual Explorer test (Windows 11)
 
 1. Build and start `spacepeek.exe`.
-2. Open File Explorer and select a text file (`.txt`, `.md`, `.log`, `.csv`, `.json`, `.toml`, `.yaml`, `.yml`, `.ini`, `.rs`, `.py`, `.js`, `.ts`, `.c`, `.h`, `.cpp`, `.cs`, `.xml`, `.html`, `.css`, `.sh`, `.ps1`, `.bat`).
-3. Press Space. A preview window should open over that Explorer window with the file text.
+2. Open File Explorer and select a text file. The extension does not decide this: `.txt`, source code, `Makefile`, `Dockerfile`, `LICENSE`, and `.gitignore` all preview when the bytes look like text.
+3. Press Space. A preview window should open over that Explorer window with the file text in a monospace font. A long file shows a truncation notice at the top of the text.
 4. Press Space or Esc. The window closes and focus returns to Explorer.
 5. Press F2 to rename, then type a space. The space is inserted into the rename edit.
 6. Click the address bar and press Space. The space is typed there.
-7. Select a binary file or an extension outside the allow-list and press Space. The window shows an error message.
+7. Select a known binary or image file (for example `.exe`, `.zip`, `.pdf`, `.png`, `.jpg`) and press Space. The window shows an error. Image extensions are reported as image files. A text extension whose first 8 KB contains a NUL or invalid UTF-8 shows `file looks binary`.
 8. With the preview open, activate another app. The preview closes.
 
 If nothing is selected, or the selection has no filesystem path, the window shows `io error: No file is selected.`
@@ -62,10 +64,11 @@ The tests run on Linux. They cover the platform-independent core only.
 
 ## Limitations
 
-- No process isolation or sandbox. Parsing runs in-process. The mitigations are a bounded read, an extension allow-list, binary sniffing, and never executing the file.
+- No process isolation or sandbox. Parsing runs in-process. The mitigations are a bounded read, a deny-list of known binary and image extensions, binary sniffing, and never executing the file.
 - Space is intercepted with a global low-level keyboard hook.
 - Only the first selected item is previewed.
-- Text formats only. Binary and unsupported files show a message.
+- Text only. Files are text when the first 8 KB has no NUL and is valid UTF-8 (a partial character at that 8 KB edge is allowed), or when the file starts with a UTF-16 BOM. Known binary and image extensions are refused before that sniff. There is no image preview yet.
+- The preview keeps at most 2,000 lines and 2,000 characters of each line. Cuts are on a character boundary. The notice at the top reports the bytes shown and the file size, and says when lines were left out or shortened.
 - The Windows runtime has not been executed. Compile checks are not a substitute for that.
 
 ## License
