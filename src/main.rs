@@ -46,14 +46,15 @@ mod win {
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, GetFocus, SetFocus, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN,
-        VK_SHIFT, VK_SPACE, VIRTUAL_KEY,
+        GetAsyncKeyState, GetFocus, SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU,
+        VK_RWIN, VK_SHIFT, VK_SPACE,
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
-        FolderItem, IEnumIDList, IFolderView, IShellBrowser, IShellFolder, IShellFolderViewDual,
-        IShellItem, IShellView, IShellWindows, IWebBrowser2, ILFree, SHCreateItemWithParent,
-        SID_STopLevelBrowser, SIGDN_FILESYSPATH, SVGIO_SELECTION, ShellWindows,
+        FolderItem, IEnumIDList, IFolderView, ILFree, IShellBrowser, IShellFolder,
+        IShellFolderViewDual, IShellItem, IShellView, IShellWindows, IWebBrowser2,
+        SHCreateItemWithParent, SID_STopLevelBrowser, ShellWindows, SIGDN_FILESYSPATH,
+        SVGIO_SELECTION,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -64,8 +65,8 @@ mod win {
         ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GUITHREADINFO, HHOOK, HICON, HMENU,
         HWND_MESSAGE, IDC_ARROW, KBDLLHOOKSTRUCT, LLKHF_UP, MB_ICONERROR, MB_OK, MSG, SM_CXSCREEN,
         SM_CYSCREEN, SW_HIDE, SW_SHOW, WA_INACTIVE, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE,
-        WNDCLASSW, WNDCLASS_STYLES, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_KEYDOWN,
-        WM_SETFONT, WM_SIZE, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_SETFONT, WM_SIZE, WNDCLASSW,
+        WNDCLASS_STYLES, WS_BORDER, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         WS_VISIBLE, WS_VSCROLL,
     };
 
@@ -221,7 +222,9 @@ mod win {
         }
         let vk = VIRTUAL_KEY(kb.vkCode as u16);
         if vk == VK_ESCAPE {
-            if PREVIEW_VISIBLE.load(Ordering::Acquire) && !modifiers_down() && post_app(WM_SPACEPEEK_ESC)
+            if PREVIEW_VISIBLE.load(Ordering::Acquire)
+                && !modifiers_down()
+                && post_app(WM_SPACEPEEK_ESC)
             {
                 return LRESULT(1);
             }
@@ -394,7 +397,10 @@ mod win {
             let state = std::mem::replace(&mut app.state, PreviewState::Hidden);
             let (next, effects) = step(state, event, &app.cancel);
             app.state = next;
-            PREVIEW_VISIBLE.store(!matches!(app.state, PreviewState::Hidden), Ordering::Release);
+            PREVIEW_VISIBLE.store(
+                !matches!(app.state, PreviewState::Hidden),
+                Ordering::Release,
+            );
             effects
         });
         for effect in effects {
@@ -432,7 +438,7 @@ mod win {
         let spawned = std::thread::Builder::new()
             .name("spacepeek-load".to_string())
             .spawn(move || {
-                let result = load_text_preview(&path, PreviewLimits::default(), &cancel);
+                let result = load_text_preview(&path, PreviewLimits::default(), &cancel, gen);
                 if cancel.is_cancelled(&gen) {
                     return;
                 }
@@ -454,7 +460,8 @@ mod win {
             return;
         }
         let raw = Box::into_raw(Box::new(LoadMsg { gen, result }));
-        let posted = unsafe { PostMessageW(hwnd, WM_SPACEPEEK_LOADED, WPARAM(0), LPARAM(raw as isize)) };
+        let posted =
+            unsafe { PostMessageW(hwnd, WM_SPACEPEEK_LOADED, WPARAM(0), LPARAM(raw as isize)) };
         if posted.is_err() {
             drop(unsafe { Box::from_raw(raw) });
         }
@@ -519,7 +526,9 @@ mod win {
                 )
             };
             let Ok(edit) = edit else {
-                unsafe { let _ = DestroyWindow(hwnd); }
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                }
                 return;
             };
             unsafe {
