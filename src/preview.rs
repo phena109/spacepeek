@@ -33,14 +33,18 @@ pub enum PreviewError {
     /// Extension is on the deny-list. The kind says which family it is.
     Denied(DeniedKind),
     /// A directory. `count` is omitted when the entries could not be read.
-    Directory { count: Option<DirectoryCount> },
+    Directory {
+        count: Option<DirectoryCount>,
+    },
     /// Zero-byte file. Distinct from a preview that has not loaded yet.
     Empty,
     Cancelled,
     Io(std::io::Error),
     /// `.lnk` shortcut. `target` is the stored path when it could be read
     /// without searching or showing UI. Resolution itself is Win32 glue.
-    Shortcut { target: Option<String> },
+    Shortcut {
+        target: Option<String>,
+    },
 }
 
 impl PartialEq for PreviewError {
@@ -92,7 +96,9 @@ impl PreviewError {
             PreviewError::Directory { count } => format_directory_message(name, *count),
             PreviewError::Empty => "This file is empty".to_string(),
             PreviewError::Cancelled => "Preview cancelled".to_string(),
-            PreviewError::Shortcut { target: Some(target) } if !target.trim().is_empty() => {
+            PreviewError::Shortcut {
+                target: Some(target),
+            } if !target.trim().is_empty() => {
                 format!("Shortcut to {target}")
             }
             PreviewError::Shortcut { .. } => {
@@ -1504,10 +1510,7 @@ mod tests {
             Some(DirectoryCount::Capped)
         );
 
-        assert_eq!(
-            format_directory_message("photos", None),
-            "Folder: photos"
-        );
+        assert_eq!(format_directory_message("photos", None), "Folder: photos");
         assert_eq!(
             format_directory_message("photos", Some(DirectoryCount::Exact(0))),
             "Folder: photos · 0 items"
@@ -1617,7 +1620,10 @@ mod tests {
             std::io::ErrorKind::NotFound,
             "The system cannot find the file specified. (os error 2)",
         ));
-        assert_eq!(missing.user_message("notes.md"), "notes.md no longer exists");
+        assert_eq!(
+            missing.user_message("notes.md"),
+            "notes.md no longer exists"
+        );
         assert_eq!(
             missing.user_message("ノート.md"),
             "ノート.md no longer exists"

@@ -9,9 +9,7 @@ use crate::geometry::{
     effective_dpi, muldiv, scale_for_dpi, PxSize, BASE_DPI, LOGICAL_PREVIEW_HEIGHT,
     LOGICAL_PREVIEW_WIDTH,
 };
-use crate::preview::{
-    format_compact_size, format_grouped, preview_text, Preview, PreviewError,
-};
+use crate::preview::{format_compact_size, format_grouped, preview_text, Preview, PreviewError};
 
 /// Logical height of the header strip at 96 DPI.
 pub const LOGICAL_HEADER_HEIGHT: i32 = 52;
@@ -121,7 +119,11 @@ pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
     Presented::Text {
         header: HeaderText {
             name: path_label(path),
-            details: format_header_details(preview.total_bytes, preview.line_count as u64, preview.truncated),
+            details: format_header_details(
+                preview.total_bytes,
+                preview.line_count as u64,
+                preview.truncated,
+            ),
         },
         body: preview_text(preview),
     }
@@ -344,7 +346,7 @@ pub fn hit_test(layout: ChromeLayout, x: i32, y: i32) -> HitZone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preview::{Truncation, Preview};
+    use crate::preview::{Preview, Truncation};
     use std::path::PathBuf;
 
     fn sample_layout() -> ChromeLayout {
@@ -405,9 +407,9 @@ mod tests {
     #[test]
     fn header_keeps_non_ascii_names_and_reuses_truncation() {
         let path = PathBuf::from("dir").join("ノート.md");
-        let mut preview = preview(1_258_291, 2_000, true);
-        preview.content = "line\r\n".to_string();
-        preview.truncation = Some(Truncation {
+        let mut shown = preview(1_258_291, 2_000, true);
+        shown.content = "line\r\n".to_string();
+        shown.truncation = Some(Truncation {
             bytes_shown: 64 * 1024,
             total_bytes: 1_258_291,
             lines_shown: 2_000,
@@ -415,7 +417,7 @@ mod tests {
             lines_omitted: true,
             lines_shortened: false,
         });
-        let presented = chrome_for_text(&path, &preview);
+        let presented = chrome_for_text(&path, &shown);
         let Presented::Text { header, body } = presented else {
             panic!("expected text chrome");
         };
@@ -464,10 +466,7 @@ mod tests {
 
         let missing = chrome_for_error(
             Path::new("café.txt"),
-            &PreviewError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "missing",
-            )),
+            &PreviewError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
         );
         assert_eq!(missing.header().name, "café.txt");
         assert_eq!(missing.message(), Some("café.txt no longer exists"));
@@ -494,10 +493,11 @@ mod tests {
         assert_eq!(hit_test(layout, 2, 596), HitZone::BottomLeft);
         assert_eq!(hit_test(layout, 796, 596), HitZone::BottomRight);
 
-        // The left frame wins over the header, and the top frame wins over it too.
+        // The frame wins over the header, including the × button. The right
+        // frame starts at x = 792.
         assert_eq!(hit_test(layout, 3, 30), HitZone::Left);
         assert_eq!(hit_test(layout, 100, 4), HitZone::Top);
-        assert_eq!(hit_test(layout, 790, 30), HitZone::Right);
+        assert_eq!(hit_test(layout, 793, 30), HitZone::Right);
 
         assert_eq!(
             hit_test(

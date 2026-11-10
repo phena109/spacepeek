@@ -46,13 +46,12 @@ mod win {
     };
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
-        EndPaint, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush, GetTextFaceW,
-        InvalidateRect, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
-        CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
-        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DRAW_TEXT_FORMAT, FF_MODERN, FF_SWISS,
-        FIXED_PITCH, FW_NORMAL, FW_SEMIBOLD, HDC, HFONT, HGDIOBJ, MONITORINFO,
-        MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
-        TRANSPARENT, VARIABLE_PITCH,
+        EndPaint, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush, GetTextFaceW, InvalidateRect,
+        MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, CLEARTYPE_QUALITY,
+        COLOR_WINDOW, DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
+        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH,
+        FW_NORMAL, FW_SEMIBOLD, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        PAINTSTRUCT, TRANSPARENT, VARIABLE_PITCH,
     };
     use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
     use windows::Win32::System::Com::{
@@ -71,17 +70,16 @@ mod win {
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, SetFocus, VIRTUAL_KEY,
-        VK_CONTROL,
-        VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+        VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
         FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
-        IShellFolder, IShellFolderViewDual, IShellItem, IShellView, IShellWindows, IWebBrowser2,
-        IShellLinkW, SHCreateItemWithParent, SID_STopLevelBrowser, SLGP_RAWPATH, ShellLink,
-        ShellWindows, Shell_NotifyIconW, NIF_ICON,
-        NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT,
-        NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SIGDN_FILESYSPATH, SVGIO_SELECTION, SVSI_SELECT,
+        IShellFolder, IShellFolderViewDual, IShellItem, IShellLinkW, IShellView, IShellWindows,
+        IWebBrowser2, SHCreateItemWithParent, SID_STopLevelBrowser, ShellLink, ShellWindows,
+        Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
+        NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SIGDN_FILESYSPATH,
+        SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, BringWindowToTop, CallNextHookEx, CallWindowProcW, CreatePopupMenu,
@@ -99,7 +97,7 @@ mod win {
         HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_UP,
         MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MF_STRING,
         MINMAXINFO, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP,
-        SM_CXPADDEDBORDER, SM_CXFRAME, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+        SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
         SW_HIDE, SW_SHOWNOACTIVATE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
         WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CHAR,
         WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE,
@@ -107,9 +105,8 @@ mod win {
         WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL,
         WM_NCHITTEST, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
         WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER,
-        WM_VSCROLL, WNDCLASSW, WNDCLASS_STYLES, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE,
-        WS_VSCROLL,
+        WM_VSCROLL, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -1307,7 +1304,8 @@ mod win {
         let mut buf = vec![0u16; 32 * 1024];
         let mut data = WIN32_FIND_DATAW::default();
         let flags = u32::try_from(SLGP_RAWPATH.0).unwrap_or(0);
-        link.GetPath(&mut buf, &mut data, flags).ok()?;
+        link.GetPath(&mut buf, std::ptr::from_mut(&mut data), flags)
+            .ok()?;
         wide_to_text(&buf)
     }
 
@@ -1527,7 +1525,12 @@ mod win {
         }
     }
 
-    fn install_body(hwnd: HWND, instance: HINSTANCE, presented: &Presented, edit_font: HFONT) -> bool {
+    fn install_body(
+        hwnd: HWND,
+        instance: HINSTANCE,
+        presented: &Presented,
+        edit_font: HFONT,
+    ) -> bool {
         match presented {
             Presented::Text { body, .. } => {
                 let Some(edit) = ensure_edit(hwnd, instance) else {
@@ -1589,7 +1592,7 @@ mod win {
     }
 
     fn destroy_edit() {
-        let edit = with_app_mut(|app| std::mem::replace(&mut app.edit_hwnd, HWND::default()));
+        let edit = with_app_mut(|app| std::mem::take(&mut app.edit_hwnd));
         if edit.0.is_null() {
             return;
         }
@@ -1899,7 +1902,10 @@ mod win {
                 let client_h = client.bottom.saturating_sub(client.top);
                 let mut frame_left = origin.x.saturating_sub(window.left);
                 let mut frame_top = origin.y.saturating_sub(window.top);
-                let mut frame_right = window.right.saturating_sub(origin.x).saturating_sub(client_w);
+                let mut frame_right = window
+                    .right
+                    .saturating_sub(origin.x)
+                    .saturating_sub(client_w);
                 let mut frame_bottom = window
                     .bottom
                     .saturating_sub(origin.y)
@@ -2122,23 +2128,27 @@ mod win {
             rgb(210, 210, 210),
         );
         if let Some(message) = snap.message.as_deref() {
-            paint_message(dc, message, width, height, header_h, pad, snap.header_font);
+            let left = pad.min(width / 4);
+            let right = (width - pad).max(left);
+            paint_message(
+                dc,
+                message,
+                RECT {
+                    left,
+                    top: header_h,
+                    right,
+                    bottom: height,
+                },
+                snap.header_font,
+            );
         }
     }
 
-    fn paint_message(
-        dc: HDC,
-        message: &str,
-        width: i32,
-        height: i32,
-        header_h: i32,
-        pad: i32,
-        font: HFONT,
-    ) {
-        let left = pad.min(width / 4);
-        let right = (width - pad).max(left);
-        let area_top = header_h;
-        let area_h = (height - header_h).max(0);
+    fn paint_message(dc: HDC, message: &str, area: RECT, font: HFONT) {
+        let left = area.left;
+        let right = area.right;
+        let area_top = area.top;
+        let area_h = (area.bottom - area.top).max(0);
         if right <= left || area_h <= 0 {
             return;
         }
@@ -2574,14 +2584,16 @@ mod win {
 
     /// Monospace faces for text previews, in preference order. GDI substitutes
     /// when a face is missing, so the created font is kept only when its actual
-    /// face name matches. `WM_DPICHANGED` recreates this through `swap_font`.
+    /// face name matches. `WM_DPICHANGED` recreates this through `swap_fonts`.
     const TEXT_FACES: [&str; 2] = ["Cascadia Mono", "Consolas"];
 
     fn create_ui_font(dpi: u32) -> HFONT {
         let height = -scaled_font_height(dpi);
+        // FIXED_PITCH | FF_MODERN asks for a monospace substitute if the face is missing.
+        let pitch = u32::from(FIXED_PITCH.0) | u32::from(FF_MODERN.0);
         let mut fallback = HFONT::default();
         for face in TEXT_FACES {
-            let font = create_named_font(height, face);
+            let font = create_named_font(height, FW_NORMAL.0 as i32, pitch, face);
             if font.0.is_null() {
                 continue;
             }
@@ -2598,17 +2610,15 @@ mod win {
         fallback
     }
 
-    fn create_named_font(height: i32, face: &str) -> HFONT {
+    fn create_named_font(height: i32, weight: i32, pitch: u32, face: &str) -> HFONT {
         let face = utf16(face);
-        // FIXED_PITCH | FF_MODERN asks for a monospace substitute if the face is missing.
-        let pitch = u32::from(FIXED_PITCH.0) | u32::from(FF_MODERN.0);
         unsafe {
             CreateFontW(
                 height,
                 0,
                 0,
                 0,
-                FW_NORMAL.0 as i32,
+                weight,
                 0,
                 0,
                 0,
@@ -2644,20 +2654,75 @@ mod win {
         }
     }
 
-    fn swap_font(dpi: u32) -> (HFONT, HFONT) {
+    struct UiFonts {
+        edit: HFONT,
+        header: HFONT,
+        detail: HFONT,
+    }
+
+    fn swap_fonts(dpi: u32) -> (UiFonts, StaleFonts) {
         let dpi = effective_dpi(dpi);
         with_app_mut(|app| {
-            if app.font_dpi == dpi && !app.font.0.is_null() {
-                return (app.font, HFONT::default());
+            if app.font_dpi == dpi
+                && !app.font.0.is_null()
+                && !app.header_font.0.is_null()
+                && !app.detail_font.0.is_null()
+            {
+                return (
+                    UiFonts {
+                        edit: app.font,
+                        header: app.header_font,
+                        detail: app.detail_font,
+                    },
+                    StaleFonts(UiFonts {
+                        edit: HFONT::default(),
+                        header: HFONT::default(),
+                        detail: HFONT::default(),
+                    }),
+                );
             }
-            let next = create_ui_font(dpi);
-            if next.0.is_null() {
-                return (app.font, HFONT::default());
+            let edit = create_ui_font(dpi);
+            let ui_pitch = u32::from(VARIABLE_PITCH.0) | u32::from(FF_SWISS.0);
+            let header = create_named_font(
+                -scaled_header_font(dpi),
+                FW_SEMIBOLD.0 as i32,
+                ui_pitch,
+                "Segoe UI",
+            );
+            let detail = create_named_font(
+                -scaled_detail_font(dpi),
+                FW_NORMAL.0 as i32,
+                ui_pitch,
+                "Segoe UI",
+            );
+            let stale_edit = replace_font(&mut app.font, edit);
+            let stale_header = replace_font(&mut app.header_font, header);
+            let stale_detail = replace_font(&mut app.detail_font, detail);
+            if !app.font.0.is_null() && !app.header_font.0.is_null() && !app.detail_font.0.is_null()
+            {
+                app.font_dpi = dpi;
             }
-            let previous = std::mem::replace(&mut app.font, next);
-            app.font_dpi = dpi;
-            (next, previous)
+            (
+                UiFonts {
+                    edit: app.font,
+                    header: app.header_font,
+                    detail: app.detail_font,
+                },
+                StaleFonts(UiFonts {
+                    edit: stale_edit,
+                    header: stale_header,
+                    detail: stale_detail,
+                }),
+            )
         })
+    }
+
+    fn replace_font(slot: &mut HFONT, next: HFONT) -> HFONT {
+        if next.0.is_null() {
+            HFONT::default()
+        } else {
+            std::mem::replace(slot, next)
+        }
     }
 
     fn apply_font(edit: HWND, font: HFONT) {
@@ -2679,20 +2744,28 @@ mod win {
     }
 
     fn discard_current_font() {
-        let font = with_app_mut(|app| {
+        let (edit, header, detail) = with_app_mut(|app| {
             app.font_dpi = 0;
-            std::mem::take(&mut app.font)
+            (
+                std::mem::take(&mut app.font),
+                std::mem::take(&mut app.header_font),
+                std::mem::take(&mut app.detail_font),
+            )
         });
-        discard_font(font);
+        discard_font(edit);
+        discard_font(header);
+        discard_font(detail);
     }
 
-    /// Deletes a font that an edit control no longer uses. Drop runs after the
-    /// new font has been selected into the control.
-    struct StaleFont(HFONT);
+    /// Deletes fonts the window no longer uses. Drop runs after the new fonts
+    /// have been selected into the controls.
+    struct StaleFonts(UiFonts);
 
-    impl Drop for StaleFont {
+    impl Drop for StaleFonts {
         fn drop(&mut self) {
-            discard_font(self.0);
+            discard_font(self.0.edit);
+            discard_font(self.0.header);
+            discard_font(self.0.detail);
         }
     }
 
