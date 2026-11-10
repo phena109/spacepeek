@@ -23,18 +23,23 @@ mod win {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, Ordering};
+    use std::sync::atomic::{
+        AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering,
+    };
 
     use spacepeek::{
-        choose_selected, effective_dpi, esc_action, load_text_preview, parse_command,
-        preview_placement, preview_text, scaled_font_height, should_intercept_space, step,
-        CancelToken, Command, Effect, EscAction, Event, FocusContext, Generation, KeyPhase,
-        Preview, PreviewError, PreviewLimits, PreviewState, PxRect, RepeatFilter, TrackedKey,
+        choose_selected, classify_typeahead_vk, decide_hook_key, effective_dpi, gate_show,
+        hook_key_from_vk, load_text_preview, nav_reload_remaining, parse_command,
+        preview_placement, preview_text, scaled_font_height, session_phase, step,
+        typeahead_window_ms, wheel_scroll_dy, CancelToken, Command, Effect, Event, Generation,
+        HookContext, HookDecision, HookKey, KeyPhase, Modifiers, NavKey, Preview, PreviewError,
+        PreviewLimits, PreviewState, PxRect, RepeatFilter, ScrollHold, ScrollOp, SessionPhase,
+        ShowGate, ShowOutcome, TrackedKey, Typeahead, TypeaheadKey, NAV_RELOAD_DELAY_MS,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, E_FAIL,
-        HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+        HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
         CreateFontW, DeleteObject, GetDC, GetMonitorInfoW, GetSysColorBrush, GetTextFaceW,
@@ -49,14 +54,16 @@ mod win {
     use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Ole::IOleWindow;
+    use windows::Win32::System::SystemInformation::GetTickCount;
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
+    use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
     use windows::Win32::UI::HiDpi::{
         GetDpiForMonitor, GetDpiForWindow, SetProcessDpiAwarenessContext,
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, GetFocus, SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU,
-        VK_RWIN, VK_SHIFT, VK_SPACE,
+        GetAsyncKeyState, GetDoubleClickTime, GetFocus, SetFocus, VIRTUAL_KEY, VK_CONTROL,
+        VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
@@ -67,22 +74,29 @@ mod win {
         NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SIGDN_FILESYSPATH, SVGIO_SELECTION, SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        AppendMenuW, BringWindowToTop, CallNextHookEx, CreatePopupMenu, CreateWindowExW,
-        DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW,
-        GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetGUIThreadInfo,
-        GetMessageW, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, IsWindow,
-        IsWindowVisible, LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, PeekMessageW,
-        PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassW, RegisterWindowMessageW,
-        SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, SetWindowsHookExW,
-        ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, ES_AUTOHSCROLL,
-        ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GUITHREADINFO, HHOOK, HICON, HMENU, IDC_ARROW,
-        IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_UP, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
-        MESSAGEBOX_STYLE, MF_STRING, MSG, PM_NOREMOVE, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE,
-        SWP_NOZORDER, SW_HIDE, SW_SHOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WA_INACTIVE,
-        WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATE, WM_APP, WM_CLOSE,
-        WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONUP, WM_NULL, WM_QUIT,
-        WM_RBUTTONUP, WM_SETFONT, WM_SIZE, WM_USER, WNDCLASSW, WNDCLASS_STYLES, WS_BORDER,
-        WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_VISIBLE, WS_VSCROLL,
+        AppendMenuW, BringWindowToTop, CallNextHookEx, CallWindowProcW, CreatePopupMenu,
+        CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
+        FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
+        GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
+        GetWindowThreadProcessId, HideCaret, IsWindow, IsWindowVisible, KillTimer, LoadCursorW,
+        LoadIconW, MessageBoxW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage,
+        PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SendMessageW,
+        SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+        SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
+        ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, EVENT_SYSTEM_FOREGROUND,
+        GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU, IDC_ARROW, IDI_APPLICATION,
+        KBDLLHOOKSTRUCT, LLKHF_UP, MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+        MESSAGEBOX_STYLE, MF_STRING, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN,
+        SB_PAGEUP, SB_TOP, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
+        SW_SHOWNOACTIVATE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
+        WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CHAR,
+        WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_KEYDOWN, WM_KEYUP,
+        WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
+        WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL, WM_NULL, WM_QUIT, WM_RBUTTONDBLCLK,
+        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSW, WNDCLASS_STYLES, WS_BORDER, WS_CHILD,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_VISIBLE,
+        WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -91,9 +105,20 @@ mod win {
     const WM_SPACEPEEK_ESC: u32 = WM_APP + 2;
     const WM_SPACEPEEK_LOADED: u32 = WM_APP + 3;
     const WM_SPACEPEEK_TRAY: u32 = WM_APP + 4;
+    const WM_SPACEPEEK_NAV: u32 = WM_APP + 5;
+    const WM_SPACEPEEK_SCROLL: u32 = WM_APP + 6;
+    const WM_SPACEPEEK_WHEEL: u32 = WM_APP + 7;
+    const WM_SPACEPEEK_FOREGROUND: u32 = WM_APP + 8;
     /// `NIN_KEYSELECT` is `WM_USER + 1`. The windows crate exports `NIN_SELECT` only.
     const NIN_KEYSELECT: u32 = WM_USER + 1;
     const EM_SETLIMITTEXT: u32 = 0x00C5;
+    /// `EM_LINESCROLL`. Kept local so the edit control does not need the Controls feature.
+    const EM_LINESCROLL: u32 = 0x00B6;
+    const NAV_TIMER_ID: usize = 1;
+    const WATCH_TIMER_ID: usize = 2;
+    /// Backup for a missed foreground event while a session is open.
+    const WATCH_INTERVAL_MS: u32 = 250;
+    const WHEEL_LINES_PER_NOTCH: i32 = 3;
     const TRAY_ID: u32 = 1;
     const CMD_EXIT: usize = 1;
     const ALREADY_RUNNING: &str = "Spacepeek is already running. Right-click its icon in the notification area and choose Exit, or run spacepeek.exe --quit.";
@@ -115,10 +140,16 @@ mod win {
         instance: HINSTANCE,
         font: HFONT,
         font_dpi: u32,
-        suppress_focus: bool,
         /// Set for the duration of `on_space`. Explorer COM calls pump this STA
         /// thread, so a posted Space can otherwise re-enter `on_space`.
         space_busy: bool,
+        /// `INPUT_GEN` at the moment the current load started. A Space or Esc
+        /// posted after that must not be followed by a show.
+        input_baseline: u64,
+        /// Tick of the latest arrow that should reload the selection.
+        last_nav_tick: Option<u32>,
+        /// `selected_path` pumps the STA. Ignore a nested navigation read.
+        nav_busy: bool,
     }
 
     static APP: AtomicPtr<RefCell<App>> = AtomicPtr::new(std::ptr::null_mut());
@@ -128,14 +159,20 @@ mod win {
     static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
     /// Preview HWND for the hook thread. Zero when there is no preview window.
     static PREVIEW_HWND: AtomicIsize = AtomicIsize::new(0);
-    static PREVIEW_VISIBLE: AtomicBool = AtomicBool::new(false);
-    /// UI thread publishes this while `PreviewState` is `Loading`.
-    static LOADING: AtomicBool = AtomicBool::new(false);
-    /// Explorer HWND that started the in-flight load. Read only while `LOADING` is set.
-    static LOADING_EXPLORER: AtomicIsize = AtomicIsize::new(0);
+    /// [`SessionPhase`] as a byte. The hook thread reads it.
+    static PHASE: AtomicU8 = AtomicU8::new(0);
+    /// Explorer that owns the current session. Zero when nothing is open.
+    static ORIGIN_EXPLORER: AtomicIsize = AtomicIsize::new(0);
+    /// Bumped when Space or Esc is posted to the UI thread.
+    static INPUT_GEN: AtomicU64 = AtomicU64::new(0);
+    /// Previous edit-control window procedure. Zero when the edit is gone.
+    static EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
+    static FOREGROUND_HOOK: AtomicIsize = AtomicIsize::new(0);
     // Hook-thread only. The low-level hook runs on `spacepeek-hook`.
     thread_local! {
         static REPEATS: RefCell<RepeatFilter> = const { RefCell::new(RepeatFilter::new()) };
+        static TYPEAHEAD: RefCell<Typeahead> = const { RefCell::new(Typeahead::new(1_000)) };
+        static SCROLLS: RefCell<ScrollHold> = const { RefCell::new(ScrollHold::new()) };
     }
 
     struct HookThread {
@@ -178,8 +215,10 @@ mod win {
             instance,
             font: HFONT::default(),
             font_dpi: 0,
-            suppress_focus: false,
             space_busy: false,
+            input_baseline: 0,
+            last_nav_tick: None,
+            nav_busy: false,
         })));
         APP.store(app, Ordering::Release);
 
@@ -193,12 +232,14 @@ mod win {
             MAIN_HWND.store(msg_hwnd.0 as isize, Ordering::Release);
             register_taskbar_created();
             add_tray_icon(msg_hwnd);
+            install_foreground_hook();
 
             // The hook cannot share this thread: a slow Explorer COM call on the
             // STA would stall every keystroke, and Windows may silently unhook it.
             let hook = match start_hook_thread(instance) {
                 Ok(hook) => hook,
                 Err(err) => {
+                    remove_foreground_hook();
                     remove_tray_icon(msg_hwnd);
                     let _ = DestroyWindow(msg_hwnd);
                     CoUninitialize();
@@ -215,6 +256,7 @@ mod win {
                 DispatchMessageW(&msg);
             }
             stop_hook_thread(hook);
+            remove_foreground_hook();
             CoUninitialize();
         }
 
@@ -351,7 +393,14 @@ mod win {
                     return;
                 }
             };
+            let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), instance, 0).ok();
+            if mouse.is_none() {
+                debug_log("Spacepeek: mouse wheel hook was not installed\n");
+            }
             if tx.send(Ok(id)).is_err() {
+                if let Some(mouse) = mouse {
+                    let _ = UnhookWindowsHookEx(mouse);
+                }
                 let _ = UnhookWindowsHookEx(hook);
                 return;
             }
@@ -363,6 +412,9 @@ mod win {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            if let Some(mouse) = mouse {
+                let _ = UnhookWindowsHookEx(mouse);
+            }
             let _ = UnhookWindowsHookEx(hook);
         }
     }
@@ -372,83 +424,261 @@ mod win {
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-        let vk = VIRTUAL_KEY(kb.vkCode as u16);
-        let key = if vk == VK_ESCAPE {
-            TrackedKey::Esc
-        } else if vk == VK_SPACE {
-            TrackedKey::Space
-        } else {
+        let vk = kb.vkCode as u16;
+        let up = kb.flags.contains(LLKHF_UP);
+        let phase = if up { KeyPhase::Up } else { KeyPhase::Down };
+        let Some(key) = hook_key_from_vk(vk) else {
+            if !up {
+                note_typeahead(vk, kb.time);
+            }
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         };
-        let up = kb.flags.contains(LLKHF_UP);
-        // `pass_through` is CancelLoad: the filter's `intercept` flag both acts and
-        // swallows, so the latch is cleared after the post. Repeats and key-up then
-        // follow that latch and Explorer still sees the whole press.
-        let (intercept, pass_through) = if up {
-            (false, false)
-        } else {
-            match key {
-                TrackedKey::Esc => esc_hook_flags(),
-                TrackedKey::Space => (space_should_intercept(), false),
+        match key {
+            HookKey::Nav(nav) => handle_nav(code, wparam, lparam, nav, phase, kb.time),
+            HookKey::Space => handle_toggle(
+                code,
+                wparam,
+                lparam,
+                HookKey::Space,
+                TrackedKey::Space,
+                phase,
+                kb.time,
+            ),
+            HookKey::Esc => handle_toggle(
+                code,
+                wparam,
+                lparam,
+                HookKey::Esc,
+                TrackedKey::Esc,
+                phase,
+                kb.time,
+            ),
+        }
+    }
+
+    fn handle_nav(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        nav: NavKey,
+        phase: KeyPhase,
+        tick: u32,
+    ) -> LRESULT {
+        let ctx = hook_context(tick);
+        let decision = decide_hook_key(&ctx, HookKey::Nav(nav));
+        if phase == KeyPhase::Down {
+            note_nav_typeahead(&ctx, &decision);
+        }
+        match (phase, decision) {
+            (KeyPhase::Down, HookDecision::Scroll(op)) => {
+                let repeat =
+                    SCROLLS.with(|slot| slot.borrow_mut().observe(nav, KeyPhase::Down, true));
+                if repeat.act && !post_app_param(WM_SPACEPEEK_SCROLL, usize::from(op.code())) {
+                    SCROLLS.with(|slot| slot.borrow_mut().release(nav));
+                    return call_next(code, wparam, lparam);
+                }
+                if repeat.swallow {
+                    return LRESULT(1);
+                }
             }
-        };
-        let phase = if up { KeyPhase::Up } else { KeyPhase::Down };
-        let mut decision = REPEATS.with(|slot| slot.borrow_mut().observe(key, phase, intercept));
-        if decision.act {
-            let msg = match key {
-                TrackedKey::Esc => WM_SPACEPEEK_ESC,
-                TrackedKey::Space => WM_SPACEPEEK_SPACE,
-            };
-            if !post_app(msg) {
-                // The down was not taken. Let this event and the rest of the press through.
-                REPEATS.with(|slot| slot.borrow_mut().set_swallowed(key, false));
-                return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+            (KeyPhase::Down, HookDecision::FollowSelection) => {
+                // Explorer still has focus, so the key moves the selection.
+                // The UI re-reads it after the debounce.
+                let _ = post_app(WM_SPACEPEEK_NAV);
             }
-            if pass_through {
-                REPEATS.with(|slot| slot.borrow_mut().set_swallowed(key, false));
-                decision.swallow = false;
+            _ => {
+                let take = matches!(decision, HookDecision::Scroll(_));
+                let repeat = SCROLLS.with(|slot| slot.borrow_mut().observe(nav, phase, take));
+                if repeat.swallow {
+                    return LRESULT(1);
+                }
             }
         }
-        if decision.swallow {
+        call_next(code, wparam, lparam)
+    }
+
+    fn note_nav_typeahead(ctx: &HookContext, decision: &HookDecision) {
+        if !ctx.explorer_list_focused {
+            TYPEAHEAD.with(|slot| slot.borrow_mut().clear());
+            return;
+        }
+        if ctx.modifiers.command() {
+            return;
+        }
+        // Arrows end Explorer's search. Page keys are swallowed, but the search
+        // is over either way, so the next Space can open a preview again.
+        if matches!(
+            decision,
+            HookDecision::FollowSelection | HookDecision::Scroll(_) | HookDecision::Pass
+        ) {
+            TYPEAHEAD.with(|slot| slot.borrow_mut().observe(TypeaheadKey::Cancels, 0));
+        }
+    }
+
+    fn handle_toggle(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        key: HookKey,
+        tracked: TrackedKey,
+        phase: KeyPhase,
+        tick: u32,
+    ) -> LRESULT {
+        let ctx = hook_context(tick);
+        let decision = decide_hook_key(&ctx, key);
+        if phase == KeyPhase::Down {
+            note_toggle_typeahead(&ctx, key, &decision, tick);
+        }
+        // CancelPending posts and does not swallow, so Explorer still sees Esc.
+        // The repeat filter would swallow the rest of the press, so the latch
+        // is cleared after a successful post.
+        let (intercept, pass_through) = match decision {
+            HookDecision::Space | HookDecision::Dismiss => (true, false),
+            HookDecision::CancelPending => (true, true),
+            _ => (false, false),
+        };
+        let intercept = if phase == KeyPhase::Up {
+            false
+        } else {
+            intercept
+        };
+        let mut repeat = REPEATS.with(|slot| slot.borrow_mut().observe(tracked, phase, intercept));
+        if repeat.act {
+            let msg = match tracked {
+                TrackedKey::Space => WM_SPACEPEEK_SPACE,
+                TrackedKey::Esc => WM_SPACEPEEK_ESC,
+            };
+            if !post_app(msg) {
+                REPEATS.with(|slot| slot.borrow_mut().set_swallowed(tracked, false));
+                return call_next(code, wparam, lparam);
+            }
+            INPUT_GEN.fetch_add(1, Ordering::Release);
+            if pass_through {
+                REPEATS.with(|slot| slot.borrow_mut().set_swallowed(tracked, false));
+                repeat.swallow = false;
+            }
+        }
+        if repeat.swallow {
+            return LRESULT(1);
+        }
+        call_next(code, wparam, lparam)
+    }
+
+    fn note_toggle_typeahead(ctx: &HookContext, key: HookKey, decision: &HookDecision, tick: u32) {
+        if !ctx.explorer_list_focused {
+            TYPEAHEAD.with(|slot| slot.borrow_mut().clear());
+            return;
+        }
+        if ctx.modifiers.command() {
+            return;
+        }
+        match (key, decision) {
+            (HookKey::Esc, _) => {
+                TYPEAHEAD.with(|slot| slot.borrow_mut().observe(TypeaheadKey::Cancels, tick));
+            }
+            (HookKey::Space, HookDecision::Pass) if ctx.typeahead_active => {
+                TYPEAHEAD.with(|slot| slot.borrow_mut().observe(TypeaheadKey::PassedSpace, tick));
+            }
+            _ => {}
+        }
+    }
+
+    unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code < 0 {
+            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+        }
+        if wparam.0 as u32 != WM_MOUSEWHEEL {
+            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+        }
+        let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+        if !point_in_preview(ms.pt) {
+            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+        }
+        let delta = i32::from((ms.mouseData >> 16) as i16);
+        if delta != 0 && post_app_param(WM_SPACEPEEK_WHEEL, delta as u32 as usize) {
             return LRESULT(1);
         }
         CallNextHookEx(HHOOK::default(), code, wparam, lparam)
     }
 
-    /// `(intercept, pass_through)` for an Esc key-down.
-    fn esc_hook_flags() -> (bool, bool) {
-        match esc_action(
-            preview_is_foreground(),
-            loading_in_origin_explorer(),
-            modifiers_down(),
-        ) {
-            EscAction::Dismiss => (true, false),
-            EscAction::CancelLoad => (true, true),
-            EscAction::Ignore => (false, false),
+    fn call_next(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        unsafe { CallNextHookEx(HHOOK::default(), code, wparam, lparam) }
+    }
+
+    fn hook_context(tick: u32) -> HookContext {
+        let modifiers = read_modifiers();
+        let explorer_list_focused = explorer_list_focused();
+        let typeahead_active = explorer_list_focused
+            && TYPEAHEAD.with(|slot| {
+                let mut typeahead = slot.borrow_mut();
+                typeahead.set_window_ms(typeahead_window_ms(unsafe { GetDoubleClickTime() }));
+                typeahead.active(tick)
+            });
+        HookContext {
+            phase: current_phase(),
+            explorer_list_focused,
+            preview_is_foreground: preview_is_foreground(),
+            origin_is_foreground: origin_is_foreground(),
+            modifiers,
+            typeahead_active,
         }
     }
 
-    fn loading_in_origin_explorer() -> bool {
-        if !LOADING.load(Ordering::Acquire) {
-            return false;
+    fn note_typeahead(vk: u16, tick: u32) {
+        let modifiers = read_modifiers();
+        let kind = classify_typeahead_vk(vk, modifiers);
+        if kind == TypeaheadKey::Ignored {
+            return;
         }
-        let bits = LOADING_EXPLORER.load(Ordering::Acquire);
+        let list = explorer_list_focused();
+        TYPEAHEAD.with(|slot| {
+            let mut typeahead = slot.borrow_mut();
+            if !list {
+                typeahead.clear();
+                return;
+            }
+            typeahead.set_window_ms(typeahead_window_ms(unsafe { GetDoubleClickTime() }));
+            typeahead.observe(kind, tick);
+        });
+    }
+
+    fn current_phase() -> SessionPhase {
+        SessionPhase::from_code(PHASE.load(Ordering::Acquire))
+    }
+
+    fn publish_session(state: &PreviewState, explorer: HWND) {
+        let phase = session_phase(state);
+        let origin = if phase.is_hidden() {
+            0
+        } else {
+            explorer.0 as isize
+        };
+        // Window first, then the phase, so a hook that sees a session also sees it.
+        ORIGIN_EXPLORER.store(origin, Ordering::Release);
+        PHASE.store(phase as u8, Ordering::Release);
+    }
+
+    fn sync_watch_timer() {
+        let hwnd = main_hwnd();
+        if hwnd.0.is_null() {
+            return;
+        }
+        unsafe {
+            if current_phase().is_hidden() {
+                let _ = KillTimer(hwnd, WATCH_TIMER_ID);
+            } else {
+                let _ = SetTimer(hwnd, WATCH_TIMER_ID, WATCH_INTERVAL_MS, None);
+            }
+        }
+    }
+
+    fn origin_is_foreground() -> bool {
+        let bits = ORIGIN_EXPLORER.load(Ordering::Acquire);
         if bits == 0 {
             return false;
         }
         let explorer = HWND(bits as *mut _);
-        unsafe { GetForegroundWindow() == explorer }
-    }
-
-    fn publish_loading(state: &PreviewState, explorer: HWND) {
-        if matches!(state, PreviewState::Loading { .. }) {
-            // HWND first, then the flag, so a hook that sees LOADING also sees this window.
-            LOADING_EXPLORER.store(explorer.0 as isize, Ordering::Release);
-            LOADING.store(true, Ordering::Release);
-        } else {
-            LOADING.store(false, Ordering::Release);
-            LOADING_EXPLORER.store(0, Ordering::Release);
-        }
+        unsafe { IsWindow(explorer).as_bool() && GetForegroundWindow() == explorer }
     }
 
     fn preview_is_foreground() -> bool {
@@ -464,19 +694,12 @@ mod win {
         }
     }
 
-    fn space_should_intercept() -> bool {
-        if modifiers_down() {
+    fn explorer_list_focused() -> bool {
+        let foreground = unsafe { GetForegroundWindow() };
+        if !class_eq(foreground, "CabinetWClass") {
             return false;
         }
-        let foreground = unsafe { GetForegroundWindow() };
-        let focus = focus_hwnd(foreground);
-        let ctx = FocusContext {
-            foreground_class: class_name(foreground),
-            focus_class: class_name(focus),
-            preview_visible: PREVIEW_VISIBLE.load(Ordering::Acquire),
-            modifiers_down: false,
-        };
-        should_intercept_space(&ctx)
+        class_eq(focus_hwnd(foreground), "DirectUIHWND")
     }
 
     fn publish_preview_hwnd(hwnd: HWND) {
@@ -484,18 +707,90 @@ mod win {
     }
 
     fn post_app(msg: u32) -> bool {
+        post_app_param(msg, 0)
+    }
+
+    fn post_app_param(msg: u32, wparam: usize) -> bool {
         let hwnd = main_hwnd();
         if hwnd.0.is_null() {
             return false;
         }
-        unsafe { PostMessageW(hwnd, msg, WPARAM(0), LPARAM(0)).is_ok() }
+        unsafe { PostMessageW(hwnd, msg, WPARAM(wparam), LPARAM(0)).is_ok() }
     }
 
-    fn modifiers_down() -> bool {
+    fn read_modifiers() -> Modifiers {
         fn down(vk: VIRTUAL_KEY) -> bool {
             unsafe { GetAsyncKeyState(i32::from(vk.0)) < 0 }
         }
-        down(VK_CONTROL) || down(VK_MENU) || down(VK_SHIFT) || down(VK_LWIN) || down(VK_RWIN)
+        Modifiers {
+            ctrl: down(VK_CONTROL),
+            alt: down(VK_MENU),
+            win: down(VK_LWIN) || down(VK_RWIN),
+            shift: down(VK_SHIFT),
+        }
+    }
+
+    fn point_in_preview(pt: POINT) -> bool {
+        let bits = PREVIEW_HWND.load(Ordering::Acquire);
+        if bits == 0 {
+            return false;
+        }
+        let hwnd = HWND(bits as *mut _);
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() {
+                return false;
+            }
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, &mut rect).is_err() {
+                return false;
+            }
+            pt.x >= rect.left && pt.x < rect.right && pt.y >= rect.top && pt.y < rect.bottom
+        }
+    }
+
+    fn install_foreground_hook() {
+        unsafe {
+            let hook = SetWinEventHook(
+                EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_FOREGROUND,
+                HMODULE(std::ptr::null_mut()),
+                Some(foreground_event),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
+            FOREGROUND_HOOK.store(hook.0 as isize, Ordering::Release);
+            if hook.0.is_null() {
+                debug_log("Spacepeek: foreground hook was not installed\n");
+            }
+        }
+    }
+
+    fn remove_foreground_hook() {
+        let bits = FOREGROUND_HOOK.swap(0, Ordering::AcqRel);
+        if bits == 0 {
+            return;
+        }
+        unsafe {
+            let _ = UnhookWinEvent(HWINEVENTHOOK(bits as *mut _));
+        }
+    }
+
+    unsafe extern "system" fn foreground_event(
+        _hook: HWINEVENTHOOK,
+        event: u32,
+        hwnd: HWND,
+        _id_object: i32,
+        _id_child: i32,
+        _thread: u32,
+        _time: u32,
+    ) {
+        if event != EVENT_SYSTEM_FOREGROUND || hwnd.0.is_null() {
+            return;
+        }
+        let root = GetAncestor(hwnd, GA_ROOT);
+        let hwnd = if root.0.is_null() { hwnd } else { root };
+        let _ = post_app_param(WM_SPACEPEEK_FOREGROUND, hwnd.0 as usize);
     }
 
     fn focus_hwnd(foreground: HWND) -> HWND {
@@ -519,17 +814,18 @@ mod win {
         }
     }
 
-    fn class_name(hwnd: HWND) -> String {
+    fn class_eq(hwnd: HWND, expected: &str) -> bool {
         if hwnd.0.is_null() {
-            return String::new();
+            return false;
         }
-        let mut buf = [0u16; 256];
+        let mut buf = [0u16; 64];
         let n = unsafe { GetClassNameW(hwnd, &mut buf) };
         if n <= 0 {
-            String::new()
-        } else {
-            String::from_utf16_lossy(&buf[..n as usize])
+            return false;
         }
+        expected
+            .encode_utf16()
+            .eq(buf[..n as usize].iter().copied())
     }
 
     unsafe extern "system" fn wndproc(
@@ -570,6 +866,32 @@ mod win {
                 on_loaded(lparam);
                 LRESULT(0)
             }
+            WM_SPACEPEEK_NAV => {
+                on_nav_request();
+                LRESULT(0)
+            }
+            WM_SPACEPEEK_SCROLL => {
+                if let Some(op) = ScrollOp::from_code(wparam.0 as u8) {
+                    scroll_preview(op);
+                }
+                LRESULT(0)
+            }
+            WM_SPACEPEEK_WHEEL => {
+                scroll_wheel(wparam.0 as u32 as i32);
+                LRESULT(0)
+            }
+            WM_SPACEPEEK_FOREGROUND => {
+                on_foreground_hwnd(HWND(wparam.0 as *mut _));
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                match wparam.0 {
+                    NAV_TIMER_ID => on_nav_timer(),
+                    WATCH_TIMER_ID => on_watch_timer(),
+                    _ => {}
+                }
+                LRESULT(0)
+            }
             WM_SPACEPEEK_TRAY => {
                 on_tray_message(hwnd, wparam, lparam);
                 LRESULT(0)
@@ -606,13 +928,14 @@ mod win {
                 on_preview_dpi_changed(hwnd, wparam, lparam);
                 LRESULT(0)
             }
-            WM_ACTIVATE => {
-                let active = (wparam.0 & 0xffff) as u32;
-                let suppress = with_app(|app| app.suppress_focus);
-                if active == WA_INACTIVE && !suppress {
-                    dispatch(Event::FocusLost);
+            // Clicks must not activate the preview. Scrollbar input still arrives.
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_SETFOCUS => {
+                let edit = with_app(|app| app.edit_hwnd);
+                unsafe {
+                    let _ = HideCaret(edit);
                 }
-                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+                LRESULT(0)
             }
             WM_DESTROY => {
                 with_app_mut(|app| {
@@ -665,41 +988,138 @@ mod win {
 
     fn on_loaded(lparam: LPARAM) {
         let msg = unsafe { Box::from_raw(lparam.0 as *mut LoadMsg) };
-        let cancelled = with_app(|app| app.cancel.is_cancelled(&msg.gen));
-        if cancelled {
-            return;
-        }
-        if load_left_explorer(&msg.gen) {
-            return;
-        }
         dispatch(Event::LoadFinished(msg.gen, msg.result));
     }
 
-    /// The user left the Explorer window that started this load. Drop the
-    /// result instead of showing the preview over whatever is now in front.
-    fn load_left_explorer(gen: &Generation) -> bool {
-        let explorer = with_app(|app| {
-            if matches!(app.state, PreviewState::Loading { gen: cur, .. } if cur == *gen) {
-                Some(app.explorer_hwnd)
+    fn on_nav_request() {
+        if current_phase().is_hidden() {
+            return;
+        }
+        let now = unsafe { GetTickCount() };
+        with_app_mut(|app| app.last_nav_tick = Some(now));
+        schedule_nav_timer(NAV_RELOAD_DELAY_MS);
+    }
+
+    fn on_nav_timer() {
+        let now = unsafe { GetTickCount() };
+        let remaining =
+            with_app(|app| nav_reload_remaining(app.last_nav_tick, now, NAV_RELOAD_DELAY_MS));
+        match remaining {
+            Some(0) => {
+                with_app_mut(|app| app.last_nav_tick = None);
+                let hwnd = main_hwnd();
+                unsafe {
+                    let _ = KillTimer(hwnd, NAV_TIMER_ID);
+                }
+                reload_selection();
+            }
+            Some(ms) => schedule_nav_timer(ms.max(1)),
+            None => {
+                let hwnd = main_hwnd();
+                unsafe {
+                    let _ = KillTimer(hwnd, NAV_TIMER_ID);
+                }
+            }
+        }
+    }
+
+    fn schedule_nav_timer(delay_ms: u32) {
+        let hwnd = main_hwnd();
+        if hwnd.0.is_null() {
+            return;
+        }
+        let id = unsafe { SetTimer(hwnd, NAV_TIMER_ID, delay_ms, None) };
+        if id == 0 {
+            debug_log("Spacepeek: navigation timer was not set\n");
+        }
+    }
+
+    fn reload_selection() {
+        if current_phase().is_hidden() {
+            return;
+        }
+        let busy = with_app_mut(|app| {
+            if app.nav_busy {
+                true
             } else {
-                None
+                app.nav_busy = true;
+                false
             }
         });
-        let Some(explorer) = explorer else {
-            return false;
-        };
-        if unsafe { GetForegroundWindow() } == explorer {
+        if busy {
+            return;
+        }
+        let _guard = NavBusyGuard;
+        let explorer = with_app(|app| app.explorer_hwnd);
+        if unsafe { !IsWindow(explorer).as_bool() } {
+            dispatch(Event::FocusLost);
+            return;
+        }
+        if unsafe { GetForegroundWindow() != explorer } {
+            return;
+        }
+        let path = unsafe { selected_path(explorer) }.unwrap_or_default();
+        dispatch(Event::SelectionChanged(path));
+    }
+
+    struct NavBusyGuard;
+
+    impl Drop for NavBusyGuard {
+        fn drop(&mut self) {
+            with_app_mut(|app| app.nav_busy = false);
+        }
+    }
+
+    fn on_watch_timer() {
+        if current_phase().is_hidden() {
+            let hwnd = main_hwnd();
+            unsafe {
+                let _ = KillTimer(hwnd, WATCH_TIMER_ID);
+            }
+            return;
+        }
+        if !foreground_allows_preview() {
+            dispatch(Event::FocusLost);
+        }
+    }
+
+    fn on_foreground_hwnd(hwnd: HWND) {
+        if current_phase().is_hidden() || foreground_hwnd_allowed(hwnd) {
+            return;
+        }
+        dispatch(Event::FocusLost);
+    }
+
+    fn foreground_hwnd_allowed(hwnd: HWND) -> bool {
+        let (explorer, preview, message) =
+            with_app(|app| (app.explorer_hwnd, app.preview_hwnd, app.msg_hwnd));
+        hwnd == explorer || hwnd == preview || hwnd == message
+    }
+
+    fn foreground_allows_preview() -> bool {
+        let foreground = unsafe { GetForegroundWindow() };
+        if foreground.0.is_null() {
             return false;
         }
-        with_app_mut(|app| {
-            if matches!(app.state, PreviewState::Loading { gen: cur, .. } if cur == *gen) {
-                app.state = PreviewState::Hidden;
-                PREVIEW_VISIBLE.store(false, Ordering::Release);
-                publish_loading(&app.state, app.explorer_hwnd);
-                let _ = app.cancel.generate();
-            }
-        });
-        true
+        let root = unsafe { GetAncestor(foreground, GA_ROOT) };
+        let foreground = if root.0.is_null() { foreground } else { root };
+        let explorer = with_app(|app| app.explorer_hwnd);
+        if unsafe { !IsWindow(explorer).as_bool() } {
+            return false;
+        }
+        foreground_hwnd_allowed(foreground)
+    }
+
+    fn dismiss_queued() -> bool {
+        let baseline = with_app(|app| app.input_baseline);
+        INPUT_GEN.load(Ordering::Acquire) != baseline
+    }
+
+    fn origin_ready_to_show() -> bool {
+        let explorer = with_app(|app| app.explorer_hwnd);
+        let alive = unsafe { IsWindow(explorer).as_bool() };
+        let foreground = unsafe { GetForegroundWindow() == explorer };
+        gate_show(alive, foreground, false) == ShowGate::Show
     }
 
     fn dispatch(event: Event) {
@@ -707,13 +1127,10 @@ mod win {
             let state = std::mem::replace(&mut app.state, PreviewState::Hidden);
             let (next, effects) = step(state, event, &app.cancel);
             app.state = next;
-            PREVIEW_VISIBLE.store(
-                !matches!(app.state, PreviewState::Hidden),
-                Ordering::Release,
-            );
-            publish_loading(&app.state, app.explorer_hwnd);
+            publish_session(&app.state, app.explorer_hwnd);
             effects
         });
+        sync_watch_timer();
         for effect in effects {
             apply(effect);
         }
@@ -722,7 +1139,8 @@ mod win {
     fn apply(effect: Effect) {
         match effect {
             Effect::StartLoad { gen, path } => start_load(gen, path),
-            Effect::ShowWindow => show_preview(),
+            Effect::PresentPreview => present_preview(),
+            Effect::UpdateContent => update_content(),
             Effect::HideWindow { restore_focus } => hide_preview(restore_focus),
             Effect::CancelLoad => {
                 with_app(|app| {
@@ -733,7 +1151,11 @@ mod win {
     }
 
     fn start_load(gen: Generation, path: PathBuf) {
-        let (cancel, hwnd) = with_app(|app| (app.cancel.clone(), app.msg_hwnd));
+        let baseline = INPUT_GEN.load(Ordering::Acquire);
+        let (cancel, hwnd) = with_app_mut(|app| {
+            app.input_baseline = baseline;
+            (app.cancel.clone(), app.msg_hwnd)
+        });
         if path.as_os_str().is_empty() {
             post_load(
                 hwnd,
@@ -778,7 +1200,78 @@ mod win {
         }
     }
 
-    fn show_preview() {
+    fn present_preview() {
+        if !is_pending_show() || dismiss_queued() {
+            return;
+        }
+        if !origin_ready_to_show() {
+            debug_log("Spacepeek: preview discarded before show\n");
+            dispatch(Event::ShowAborted);
+            return;
+        }
+        // Filling the edit can take long enough for Esc or a focus change to
+        // land in the queue. Check again before the window becomes visible.
+        if !fill_preview_window() {
+            dispatch(Event::ShowAborted);
+            return;
+        }
+        if !is_pending_show() || dismiss_queued() {
+            return;
+        }
+        if !origin_ready_to_show() {
+            debug_log("Spacepeek: preview discarded before show\n");
+            dispatch(Event::ShowAborted);
+            return;
+        }
+        reveal_preview();
+        // ShowWindow itself can overlap a key or a focus change. Roll the
+        // pixels back. A queued Space or Esc must stay PendingShow: aborting
+        // to Hidden would let that Space start a second preview.
+        if !is_pending_show() {
+            return;
+        }
+        if dismiss_queued() {
+            hide_preview(false);
+            return;
+        }
+        if !origin_ready_to_show() {
+            debug_log("Spacepeek: preview discarded before show\n");
+            dispatch(Event::ShowAborted);
+            return;
+        }
+        dispatch(Event::ShowCommitted);
+    }
+
+    fn update_content() {
+        if current_phase() != SessionPhase::Visible {
+            return;
+        }
+        if !foreground_allows_preview() {
+            dispatch(Event::FocusLost);
+            return;
+        }
+        if dismiss_queued() {
+            return;
+        }
+        if !fill_preview_window() {
+            dispatch(Event::FocusLost);
+            return;
+        }
+        if !foreground_allows_preview() {
+            dispatch(Event::FocusLost);
+            return;
+        }
+        reveal_preview();
+    }
+
+    fn is_pending_show() -> bool {
+        with_app(|app| matches!(app.state, PreviewState::PendingShow { .. }))
+    }
+
+    /// Create the preview hidden, or replace the text of the existing one.
+    /// Does not activate or show the window. Returns false if the window
+    /// could not be created.
+    fn fill_preview_window() -> bool {
         let (title, body, anchor, instance, existing) = with_app(|app| {
             let (title, body) = window_content(&app.state);
             (
@@ -803,7 +1296,7 @@ mod win {
             let title_w = utf16(&title);
             let hwnd = unsafe {
                 CreateWindowExW(
-                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                     PCWSTR(class_name.as_ptr()),
                     PCWSTR(title_w.as_ptr()),
                     WS_POPUP | WS_BORDER,
@@ -818,7 +1311,7 @@ mod win {
                 )
             };
             let Ok(hwnd) = hwnd else {
-                return;
+                return false;
             };
             let edit_class = utf16("EDIT");
             // ES_AUTOHSCROLL turns word wrap off for a multiline EDIT. WS_HSCROLL
@@ -852,52 +1345,59 @@ mod win {
                 unsafe {
                     let _ = DestroyWindow(hwnd);
                 }
-                return;
+                return false;
             };
             unsafe {
                 let _ = SendMessageW(edit, EM_SETLIMITTEXT, WPARAM(1_048_576), LPARAM(0));
             }
+            subclass_edit(edit);
             apply_font(edit, font);
             set_text(edit, &body);
             resize_edit_pair(hwnd, edit);
             with_app_mut(|app| {
                 app.preview_hwnd = hwnd;
                 app.edit_hwnd = edit;
-                app.suppress_focus = true;
                 publish_preview_hwnd(hwnd);
             });
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOW);
-            }
-            force_foreground(hwnd);
-            unsafe {
-                let _ = SetFocus(edit);
-            }
-            with_app_mut(|app| app.suppress_focus = false);
+            suppress_caret(edit);
+            true
         } else {
             apply_font(with_app(|app| app.edit_hwnd), font);
             set_text(existing, &title);
             let edit = with_app(|app| app.edit_hwnd);
             set_text(edit, &body);
             publish_preview_hwnd(existing);
-            with_app_mut(|app| app.suppress_focus = true);
-            unsafe {
-                let _ = ShowWindow(existing, SW_SHOW);
-            }
-            force_foreground(existing);
-            unsafe {
-                let _ = SetFocus(edit);
-            }
-            with_app_mut(|app| app.suppress_focus = false);
+            suppress_caret(edit);
+            true
         }
+    }
+
+    fn reveal_preview() {
+        let hwnd = with_app(|app| app.preview_hwnd);
+        if hwnd.0.is_null() {
+            return;
+        }
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+        }
+        suppress_caret(with_app(|app| app.edit_hwnd));
     }
 
     fn hide_preview(restore_focus: bool) {
         let (preview, explorer) = with_app(|app| (app.preview_hwnd, app.explorer_hwnd));
+        with_app_mut(|app| app.last_nav_tick = None);
+        let hwnd = main_hwnd();
+        unsafe {
+            let _ = KillTimer(hwnd, NAV_TIMER_ID);
+        }
         if preview.0.is_null() {
+            if restore_focus {
+                restore_explorer_focus(explorer);
+            }
             return;
         }
-        with_app_mut(|app| app.suppress_focus = true);
         unsafe {
             let _ = ShowWindow(preview, SW_HIDE);
             let _ = DestroyWindow(preview);
@@ -905,12 +1405,100 @@ mod win {
         with_app_mut(|app| {
             app.preview_hwnd = HWND::default();
             app.edit_hwnd = HWND::default();
-            app.suppress_focus = false;
             publish_preview_hwnd(HWND::default());
         });
-        if restore_focus && unsafe { IsWindow(explorer).as_bool() } {
-            force_foreground(explorer);
+        EDIT_PROC.store(0, Ordering::Release);
+        if restore_focus {
+            restore_explorer_focus(explorer);
         }
+    }
+
+    fn restore_explorer_focus(explorer: HWND) {
+        unsafe {
+            if !IsWindow(explorer).as_bool() || GetForegroundWindow() == explorer {
+                return;
+            }
+        }
+        force_foreground(explorer);
+    }
+
+    fn scroll_preview(op: ScrollOp) {
+        let edit = with_app(|app| app.edit_hwnd);
+        if edit.0.is_null() {
+            return;
+        }
+        let command = match op {
+            ScrollOp::PageUp => SB_PAGEUP,
+            ScrollOp::PageDown => SB_PAGEDOWN,
+            ScrollOp::Top => SB_TOP,
+            ScrollOp::Bottom => SB_BOTTOM,
+        };
+        unsafe {
+            let _ = SendMessageW(edit, WM_VSCROLL, WPARAM(command.0 as usize), LPARAM(0));
+        }
+        suppress_caret(edit);
+    }
+
+    fn scroll_wheel(delta: i32) {
+        let edit = with_app(|app| app.edit_hwnd);
+        if edit.0.is_null() {
+            return;
+        }
+        let dy = wheel_scroll_dy(delta, WHEEL_LINES_PER_NOTCH);
+        if dy == 0 {
+            return;
+        }
+        unsafe {
+            let _ = SendMessageW(edit, EM_LINESCROLL, WPARAM(0), LPARAM(dy as isize));
+        }
+        suppress_caret(edit);
+    }
+
+    fn suppress_caret(edit: HWND) {
+        if edit.0.is_null() {
+            return;
+        }
+        unsafe {
+            let _ = HideCaret(edit);
+        }
+    }
+
+    fn subclass_edit(edit: HWND) {
+        unsafe {
+            let previous = SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc as *const () as isize);
+            EDIT_PROC.store(previous, Ordering::Release);
+        }
+    }
+
+    unsafe extern "system" fn edit_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        // Client clicks would focus the edit and show a caret. Scrollbar clicks
+        // are non-client and still reach the original procedure.
+        match msg {
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP
+            | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MBUTTONDBLCLK | WM_KEYDOWN
+            | WM_KEYUP | WM_CHAR | WM_SYSKEYDOWN | WM_SYSKEYUP => LRESULT(0),
+            WM_SETFOCUS => {
+                let result = call_edit_proc(hwnd, msg, wparam, lparam);
+                let _ = HideCaret(hwnd);
+                result
+            }
+            _ => call_edit_proc(hwnd, msg, wparam, lparam),
+        }
+    }
+
+    fn call_edit_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        let bits = EDIT_PROC.load(Ordering::Acquire);
+        if bits == 0 {
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+        type EditFn = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+        let previous = unsafe { std::mem::transmute::<isize, EditFn>(bits) };
+        unsafe { CallWindowProcW(Some(previous), hwnd, msg, wparam, lparam) }
     }
 
     fn resize_edit(hwnd: HWND) {
@@ -1032,17 +1620,29 @@ mod win {
 
     fn window_content(state: &PreviewState) -> (String, String) {
         match state {
-            PreviewState::Showing { path, preview, .. } => (title_for(path), preview_text(preview)),
-            PreviewState::Failed { path, error, .. } => {
-                let title = if path.as_os_str().is_empty() {
-                    "Spacepeek".to_string()
-                } else {
-                    title_for(path)
-                };
-                (title, to_crlf(&error.to_string()))
-            }
+            PreviewState::Showing { path, preview, .. } => preview_body(path, preview),
+            PreviewState::Failed { path, error, .. } => error_body(path, error),
+            PreviewState::PendingShow { path, outcome, .. } => match outcome {
+                ShowOutcome::Ready(preview) => preview_body(path, preview),
+                ShowOutcome::Failed(error) => error_body(path, error),
+            },
             _ => ("Spacepeek".to_string(), String::new()),
         }
+    }
+
+    /// Title plus the edit text. [`preview_text`] already includes the truncation
+    /// notice and CRLF line endings from the loader.
+    fn preview_body(path: &std::path::Path, preview: &Preview) -> (String, String) {
+        (title_for(path), preview_text(preview))
+    }
+
+    fn error_body(path: &std::path::Path, error: &PreviewError) -> (String, String) {
+        let title = if path.as_os_str().is_empty() {
+            "Spacepeek".to_string()
+        } else {
+            title_for(path)
+        };
+        (title, to_crlf(&error.to_string()))
     }
 
     fn title_for(path: &std::path::Path) -> String {
@@ -1535,9 +2135,9 @@ mod win {
         with_app_mut(|app| {
             let _ = app.cancel.generate();
             app.state = PreviewState::Hidden;
-            PREVIEW_VISIBLE.store(false, Ordering::Release);
-            publish_loading(&app.state, app.explorer_hwnd);
+            publish_session(&app.state, app.explorer_hwnd);
         });
+        sync_watch_timer();
         hide_preview(false);
         discard_current_font();
         remove_tray_icon(hwnd);

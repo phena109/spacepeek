@@ -11,8 +11,11 @@ pub use geometry::{
     Placement, PxRect, PxSize, LOGICAL_FONT_HEIGHT, LOGICAL_PREVIEW_HEIGHT, LOGICAL_PREVIEW_WIDTH,
 };
 pub use keys::{
-    esc_action, should_intercept_esc, should_intercept_space, EscAction, FocusContext, KeyPhase,
-    RepeatFilter, TrackedKey,
+    classify_typeahead_vk, decide_hook_key, esc_action, hook_key_from_vk, nav_reload_due,
+    nav_reload_remaining, should_intercept_esc, should_intercept_space, typeahead_window_ms,
+    wheel_scroll_dy, EscAction, EscQuery, FocusContext, HookContext, HookDecision, HookKey,
+    KeyPhase, Modifiers, NavKey, RepeatFilter, ScrollHold, ScrollOp, SessionPhase, TrackedKey,
+    Typeahead, TypeaheadKey, NAV_RELOAD_DELAY_MS,
 };
 pub use preview::{
     format_byte_size, format_truncation_notice, load_text_preview, preview_text, CancelToken,
@@ -20,4 +23,6 @@ pub use preview::{
     MAX_LINE_CHARS,
 };
 pub use selection::choose_selected;
-pub use state::{step, Effect, Event, PreviewState};
+pub use state::{
+    gate_show, session_phase, step, Effect, Event, PreviewState, ShowGate, ShowOutcome,
+};
