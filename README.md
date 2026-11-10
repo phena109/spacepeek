@@ -31,7 +31,13 @@ cargo check --target aarch64-pc-windows-msvc
 
 ## Run
 
-Start `spacepeek.exe` and leave it running. A second start exits immediately if the named mutex is already held. On Linux and macOS the binary prints `Spacepeek runs on Windows only` and exits with code 1.
+Start `spacepeek.exe` and leave it running. Spacepeek does not start automatically with Windows. To start it when you sign in, put a shortcut in the Startup folder (`shell:startup`).
+
+A Spacepeek icon stays in the notification area while it is running. Right-click that icon and choose Exit Spacepeek to quit. A left-click opens the same menu. Or run `spacepeek.exe --quit`. That exits with code 0 when it finds the running instance, and with code 1 when nothing is running. If nothing is running, `--quit` shows a short notice.
+
+A second launch shows a message that Spacepeek is already running and exits with a non-zero code.
+
+On Linux and macOS the binary prints `Spacepeek runs on Windows only` and exits with code 1.
 
 ## Manual Explorer test (Windows 11)
 
