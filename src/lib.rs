@@ -1,3 +1,9 @@
+/// Build version string.
+///
+/// Taken from `SPACEPEEK_BUILD_VERSION` when that environment variable is set
+/// to a non-empty value at compile time, otherwise from `CARGO_PKG_VERSION`.
+pub const VERSION: &str = env!("SPACEPEEK_VERSION");
+
 pub mod chrome;
 pub mod cli;
 pub mod geometry;

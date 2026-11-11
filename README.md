@@ -37,7 +37,7 @@ cargo check --target aarch64-pc-windows-msvc
 
 Start `spacepeek.exe` and leave it running. Spacepeek does not start automatically with Windows. To start it when you sign in, put a shortcut in the Startup folder (`shell:startup`).
 
-A Spacepeek icon stays in the notification area while it is running. Right-click that icon and choose Exit Spacepeek to quit. A left-click opens the same menu. Or run `spacepeek.exe --quit`. That exits with code 0 when it finds the running instance, and with code 1 when nothing is running. If nothing is running, `--quit` shows a short notice.
+A Spacepeek icon stays in the notification area while it is running. Right-click that icon and choose Exit Spacepeek to quit. A left-click opens the same menu. Or run `spacepeek.exe --quit`. That exits with code 0 when it finds the running instance, and with code 1 when nothing is running. If nothing is running, `--quit` shows a short notice. `spacepeek.exe --version` prints the build version.
 
 A second launch shows a message that Spacepeek is already running and exits with a non-zero code.
 

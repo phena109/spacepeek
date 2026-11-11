@@ -2,8 +2,22 @@
 
 #[cfg(not(windows))]
 fn main() -> std::process::ExitCode {
-    eprintln!("Spacepeek runs on Windows only");
-    std::process::ExitCode::from(1)
+    match spacepeek::parse_command(std::env::args()) {
+        spacepeek::Command::Version => {
+            println!("spacepeek {}", spacepeek::VERSION);
+            std::process::ExitCode::SUCCESS
+        }
+        spacepeek::Command::Help => {
+            eprintln!("Spacepeek {}", spacepeek::VERSION);
+            eprintln!("Usage: spacepeek [--quit] [--version]");
+            eprintln!("Spacepeek runs on Windows only");
+            std::process::ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("Spacepeek runs on Windows only");
+            std::process::ExitCode::from(1)
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -37,7 +51,7 @@ mod win {
         Generation, HitZone, HookContext, HookDecision, HookKey, KeyPhase, Modifiers, NavKey,
         Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, RepeatFilter,
         ScrollHold, ScrollOp, SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey,
-        Typeahead, TypeaheadKey, WindowKind, NAV_RELOAD_DELAY_MS,
+        Typeahead, TypeaheadKey, WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -60,6 +74,7 @@ mod win {
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
         IServiceProvider, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
     };
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
     use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Ole::IOleWindow;
@@ -135,7 +150,12 @@ mod win {
     const CMD_EXIT: usize = 1;
     const ALREADY_RUNNING: &str = "Spacepeek is already running. Right-click its icon in the notification area and choose Exit, or run spacepeek.exe --quit.";
     const NOT_RUNNING: &str = "Spacepeek is not running.";
-    const USAGE: &str = "Usage: spacepeek.exe [--quit]\r\n\r\nStart spacepeek.exe and leave it running. spacepeek.exe --quit asks the running instance to exit.";
+
+    fn usage_text() -> String {
+        format!(
+            "Spacepeek {VERSION}\r\n\r\nUsage: spacepeek.exe [--quit] [--version]\r\n\r\nStart spacepeek.exe and leave it running. spacepeek.exe --quit asks the running instance to exit. spacepeek.exe --version prints the build version."
+        )
+    }
 
     struct LoadMsg {
         gen: Generation,
@@ -202,11 +222,23 @@ mod win {
         match parse_command(std::env::args()) {
             Command::Quit => return quit_running(),
             Command::Help => {
-                info_box(USAGE);
+                info_box(&usage_text());
+                return Ok(std::process::ExitCode::SUCCESS);
+            }
+            Command::Version => {
+                let line = format!("spacepeek {VERSION}\n");
+                if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) }.is_ok() {
+                    use std::io::Write;
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(line.as_bytes());
+                    let _ = stdout.flush();
+                } else {
+                    info_box(line.trim_end());
+                }
                 return Ok(std::process::ExitCode::SUCCESS);
             }
             Command::Unknown => {
-                info_box(USAGE);
+                info_box(&usage_text());
                 return Ok(std::process::ExitCode::from(1));
             }
             Command::Run => {}
