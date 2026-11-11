@@ -1977,10 +1977,7 @@ mod tests {
         assert_eq!(format_size_line(0), "0 B (0 bytes)");
         assert_eq!(format_size_line(1), "1 B (1 byte)");
         assert_eq!(format_size_line(1536), "1.5 KB (1,536 bytes)");
-        assert_eq!(
-            format_size_line(1_234_567),
-            "1.2 MB (1,234,567 bytes)"
-        );
+        assert_eq!(format_size_line(1_234_567), "1.2 MB (1,234,567 bytes)");
         assert_eq!(fallback_type_name("zip"), Some("ZIP file".to_string()));
         assert_eq!(fallback_type_name(".Zip"), Some("ZIP file".to_string()));
         assert_eq!(fallback_type_name("7z"), Some("7Z file".to_string()));

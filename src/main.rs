@@ -43,24 +43,26 @@ mod win {
 
     use spacepeek::{
         choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk,
-        fallback_type_name,
-        close_button_bounds, decide_hook_key, double_click_action, effective_dpi, gate_show,
-        hit_test, hook_key_from_vk, image_dest_rect, load_text_preview, min_physical_size,
-        nav_reload_remaining, nonempty_path, parse_command, place_preview, pointer_over_close,
-        scaled_close_width, scaled_detail_font, scaled_font_height, scaled_header_font,
-        scaled_header_height, scaled_header_pad, session_phase, step, typeahead_window_ms,
-        wheel_scroll_dy, CancelToken, ChromeLayout, Command, DecodedImage, DoubleClickAction,
-        Effect, Event, Generation, HitZone, HookContext, HookDecision, HookKey, KeyPhase,
-        Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect,
-        QuickInfo,
-        RepeatFilter, ScrollHold, ScrollOp, SessionPhase, ShowGate, ShowOutcome, SizeMemory,
-        TrackedKey, Typeahead, TypeaheadKey, WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
+        close_button_bounds, decide_hook_key, double_click_action, effective_dpi,
+        fallback_type_name, gate_show, hit_test, hook_key_from_vk, image_dest_rect,
+        load_text_preview, min_physical_size, nav_reload_remaining, nonempty_path, parse_command,
+        place_preview, pointer_over_close, scaled_close_width, scaled_detail_font,
+        scaled_font_height, scaled_header_font, scaled_header_height, scaled_header_pad,
+        session_phase, step, typeahead_window_ms, wheel_scroll_dy, CancelToken, ChromeLayout,
+        Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone, HookContext,
+        HookDecision, HookKey, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError,
+        PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
+        SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey,
+        WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, COLORREF, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
-        E_FAIL, FILETIME, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME,
-        WPARAM,
+        E_FAIL, FILETIME, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT,
+        SYSTEMTIME, WPARAM,
+    };
+    use windows::Win32::Globalization::{
+        GetDateFormatEx, GetTimeFormatEx, DATE_LONGDATE, TIME_NOSECONDS,
     };
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, ClientToScreen, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject,
@@ -73,11 +75,7 @@ mod win {
         FW_SEMIBOLD, HALFTONE, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
     };
-    use windows::Win32::Globalization::{
-        GetDateFormatEx, GetTimeFormatEx, DATE_LONGDATE, TIME_NOSECONDS,
-    };
     use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, WIN32_FIND_DATAW};
-    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
         IServiceProvider, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
@@ -88,6 +86,7 @@ mod win {
     use windows::Win32::System::Ole::IOleWindow;
     use windows::Win32::System::SystemInformation::GetTickCount;
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
     use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
     use windows::Win32::UI::HiDpi::{
         GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
@@ -102,12 +101,11 @@ mod win {
     use windows::Win32::UI::Shell::{
         FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
         IShellFolder, IShellFolderViewDual, IShellItem, IShellLinkW, IShellView, IShellWindows,
-        IWebBrowser2, SHCreateItemWithParent, SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES,
-        SHGetFileInfoW, SID_STopLevelBrowser, ShellExecuteExW, ShellLink,
-        ShellWindows, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD,
-        NIM_DELETE, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
-        SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH, SLGP_RAWPATH, SVGIO_SELECTION,
-        SVSI_SELECT,
+        IWebBrowser2, SHCreateItemWithParent, SHGetFileInfoW, SID_STopLevelBrowser,
+        ShellExecuteExW, ShellLink, ShellWindows, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE,
+        NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW,
+        NOTIFYICON_VERSION_4, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_TYPENAME,
+        SHGFI_USEFILEATTRIBUTES, SIGDN_FILESYSPATH, SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, BringWindowToTop, CallNextHookEx, CallWindowProcW, CreatePopupMenu,
@@ -1497,11 +1495,11 @@ mod win {
     }
 
     fn locale_text(buf: &[u16], written: i32) -> Option<String> {
-        if written <= 1 {
+        let len = usize::try_from(written).ok()?.checked_sub(1)?;
+        if len == 0 {
             return None;
         }
-        let len = (written as usize).saturating_sub(1).min(buf.len());
-        wide_to_text(&buf[..len])
+        wide_to_text(&buf[..len.min(buf.len())])
     }
 
     /// 100-nanosecond ticks since 1601-01-01 UTC. `None` before the Unix epoch.
@@ -1511,8 +1509,8 @@ mod win {
         let ticks = since_unix.as_nanos() / 100 + HUNDRED_NS_TO_UNIX;
         let ticks = u64::try_from(ticks).ok()?;
         Some(FILETIME {
-            dwLowDateTime: ticks as u32,
-            dwHighDateTime: (ticks >> 32) as u32,
+            dwLowDateTime: u32::try_from(ticks & 0xFFFF_FFFF).unwrap_or(0),
+            dwHighDateTime: u32::try_from(ticks >> 32).unwrap_or(0),
         })
     }
 

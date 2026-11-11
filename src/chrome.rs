@@ -646,10 +646,7 @@ mod tests {
             Path::new("secret.txt"),
             &PreviewError::Io(std::io::Error::from_raw_os_error(5)),
         );
-        assert_eq!(
-            denied.message(),
-            Some("Access to secret.txt was denied")
-        );
+        assert_eq!(denied.message(), Some("Access to secret.txt was denied"));
     }
 
     #[test]
