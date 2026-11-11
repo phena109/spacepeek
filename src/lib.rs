@@ -37,7 +37,7 @@ pub use keys::{
 pub use preview::{
     format_byte_size, format_compact_size, format_truncation_notice, load_text_preview,
     preview_text, CancelToken, DeniedKind, Generation, Preview, PreviewError, PreviewLimits,
-    Truncation, DEFAULT_MAX_BYTES, MAX_LINE_CHARS,
+    Truncation, DEFAULT_MAX_BYTES, MAX_LINE_UTF16,
 };
 pub use selection::{choose_selected, nonempty_path};
 pub use state::{

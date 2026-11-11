@@ -241,7 +241,7 @@ pub struct Truncation {
     pub total_lines: Option<u64>,
     /// Some decoded lines were dropped because of the line cap.
     pub lines_omitted: bool,
-    /// At least one shown line was cut to [`MAX_LINE_CHARS`] and marked with `…`.
+    /// At least one shown line was cut to [`MAX_LINE_UTF16`] and marked with `…`.
     pub lines_shortened: bool,
 }
 
@@ -262,8 +262,18 @@ pub struct Preview {
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 /// Default cap on the number of lines placed in the control.
 pub const DEFAULT_MAX_LINES: usize = 2_000;
-/// Maximum Unicode scalar values kept from one source line, before the `…` marker.
-pub const MAX_LINE_CHARS: usize = 2_000;
+/// UTF-16 code units kept from one source line, before the `…` marker.
+///
+/// The multiline EDIT control stores UTF-16 and breaks one displayed row at
+/// about 1,024 code units even with `ES_AUTOHSCROLL` and word wrap off. A
+/// non-BMP scalar is two units. U+2026 is one unit, so a cut line is at most
+/// [`MAX_LINE_UTF16`] + 1 units, under that split.
+pub const MAX_LINE_UTF16: usize = 1_000;
+/// U+2026 HORIZONTAL ELLIPSIS. One UTF-16 code unit, so it never splits a pair.
+const LINE_ELLIPSIS: char = '\u{2026}';
+/// Longest UTF-16 sequence the EDIT control keeps on one row, marker included.
+const EDIT_LINE_UTF16_LIMIT: usize = 1_023;
+const _: () = assert!(MAX_LINE_UTF16 + LINE_ELLIPSIS.len_utf16() <= EDIT_LINE_UTF16_LIMIT);
 /// How many leading bytes the text sniff inspects.
 pub const BINARY_SNIFF_BYTES: usize = 8192;
 
@@ -620,6 +630,10 @@ fn directory_count_capped(path: &Path, cap: u64) -> Option<DirectoryCount> {
 }
 
 /// Text placed in the preview control, with the truncation notice at the top.
+///
+/// Every line, including the notice, stays within [`EDIT_LINE_UTF16_LIMIT`]
+/// UTF-16 code units. Source lines are already capped; the notice is capped
+/// here so a long counts line cannot be split by the EDIT control either.
 pub fn preview_text(preview: &Preview) -> String {
     let Some(info) = preview.truncation.as_ref() else {
         return preview.content.clone();
@@ -628,20 +642,23 @@ pub fn preview_text(preview: &Preview) -> String {
         return preview.content.clone();
     };
     if preview.content.is_empty() {
-        notice
-    } else {
-        let mut body = String::with_capacity(notice.len() + 4 + preview.content.len());
-        body.push_str(&notice);
-        body.push_str("\r\n\r\n");
-        body.push_str(&preview.content);
-        body
+        let mut out = String::new();
+        push_capped_line(&mut out, &notice);
+        return out;
     }
+    let mut body = String::with_capacity(notice.len() + 4 + preview.content.len());
+    push_capped_line(&mut body, &notice);
+    body.push_str("\r\n\r\n");
+    body.push_str(&preview.content);
+    body
 }
 
 /// Human-readable truncation line, such as `Showing the first 64 KB of 1.2 MB`.
 ///
 /// Sizes use binary units (1024). An exact multiple prints as `64 KB`; anything
-/// else prints one decimal digit (`1.2 MB`). Returns `None` when nothing was cut.
+/// else prints one decimal digit (`1.2 MB`). When those two labels are the same
+/// text, the notice uses grouped byte counts instead
+/// (`Showing the first 65,536 of 65,537 bytes`). Returns `None` when nothing was cut.
 pub fn format_truncation_notice(info: &Truncation) -> Option<String> {
     let byte_cut = info.bytes_shown < info.total_bytes;
     let known_lines = info.total_lines.filter(|total| *total > info.lines_shown);
@@ -649,9 +666,7 @@ pub fn format_truncation_notice(info: &Truncation) -> Option<String> {
     let mut notice = String::new();
     if byte_cut {
         notice.push_str("Showing the first ");
-        notice.push_str(&format_byte_size(info.bytes_shown));
-        notice.push_str(" of ");
-        notice.push_str(&format_byte_size(info.total_bytes));
+        notice.push_str(&format_shown_of_total(info.bytes_shown, info.total_bytes));
         if info.lines_omitted {
             notice.push_str(" (");
             notice.push_str(&format_grouped(info.lines_shown));
@@ -681,6 +696,21 @@ pub fn format_truncation_notice(info: &Truncation) -> Option<String> {
         None
     } else {
         Some(notice)
+    }
+}
+
+/// `64 KB of 1.2 MB`, or exact bytes when the rounded labels would match.
+fn format_shown_of_total(shown: u64, total: u64) -> String {
+    let shown_label = format_byte_size(shown);
+    let total_label = format_byte_size(total);
+    if shown_label == total_label {
+        format!(
+            "{} of {} bytes",
+            format_grouped(shown),
+            format_grouped(total)
+        )
+    } else {
+        format!("{shown_label} of {total_label}")
     }
 }
 
@@ -756,7 +786,7 @@ pub(crate) fn format_grouped(n: u64) -> String {
     out
 }
 
-/// Edit-control text: each source line capped on a char boundary, joined with CRLF.
+/// Edit-control text: each source line capped on a scalar boundary, joined with CRLF.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedText {
     pub content: String,
@@ -767,7 +797,11 @@ pub struct PreparedText {
 }
 
 pub fn prepare_edit_text(text: &str, max_lines: usize) -> PreparedText {
-    let mut content = String::with_capacity(text.len().min(max_lines.saturating_mul(8)));
+    // Reserve one capped line, not the source length. A 300 KB one-line file
+    // then copies only the kept prefix; further lines grow this buffer
+    // geometrically up to the line cap, which stays linear in the output.
+    let per_line = MAX_LINE_UTF16.saturating_mul(3).saturating_add(8);
+    let mut content = String::with_capacity(per_line.min(text.len().saturating_add(per_line)));
     let mut lines_in_source = 0usize;
     let mut lines_shown = 0usize;
     let mut lines_shortened = false;
@@ -795,25 +829,27 @@ pub fn prepare_edit_text(text: &str, max_lines: usize) -> PreparedText {
     }
 }
 
-/// Append up to [`MAX_LINE_CHARS`] scalar values. Returns true when the line was cut.
+/// Append up to [`MAX_LINE_UTF16`] UTF-16 code units from `line`.
+///
+/// Returns true when `line` was cut. The walk stops at the first scalar that
+/// would pass the cap, so the discarded tail of a long line is not copied.
+/// A scalar is kept whole: a non-BMP character is two units and is never
+/// emitted as a lone surrogate. A line that lands exactly on the cap is not cut.
 fn push_capped_line(out: &mut String, line: &str) -> bool {
-    let mut chars = line.chars();
-    let mut written = 0usize;
-    while written < MAX_LINE_CHARS {
-        match chars.next() {
-            Some(ch) => {
-                out.push(ch);
-                written += 1;
-            }
-            None => return false,
+    let mut units = 0usize;
+    let mut end = 0usize;
+    for (idx, ch) in line.char_indices() {
+        let width = ch.len_utf16();
+        if units + width > MAX_LINE_UTF16 {
+            out.push_str(&line[..end]);
+            out.push(LINE_ELLIPSIS);
+            return true;
         }
+        units += width;
+        end = idx + ch.len_utf8();
     }
-    if chars.next().is_some() {
-        out.push('\u{2026}');
-        true
-    } else {
-        false
-    }
+    out.push_str(&line[..end]);
+    false
 }
 
 /// Text sniff. A partial UTF-8 sequence is allowed only at the end of the
@@ -983,7 +1019,8 @@ mod tests {
         let limits = PreviewLimits::default();
         assert_eq!(limits.max_bytes, 64 * 1024);
         assert_eq!(limits.max_lines, 2_000);
-        assert_eq!(MAX_LINE_CHARS, 2_000);
+        assert_eq!(MAX_LINE_UTF16, 1_000);
+        assert!(MAX_LINE_UTF16 + LINE_ELLIPSIS.len_utf16() <= EDIT_LINE_UTF16_LIMIT);
     }
 
     #[test]
@@ -1353,7 +1390,12 @@ mod tests {
             assert!(preview.truncated, "budget {budget}");
             assert!(!preview.content.contains('\u{FFFD}'), "budget {budget}");
             assert!(preview.content.ends_with('\u{2026}'), "budget {budget}");
-            assert!(preview.content.chars().take(2000).all(|c| c == 'a'));
+            let shown_line = preview.content.trim_end_matches('\u{2026}');
+            assert!(shown_line.chars().all(|c| c == 'a'), "budget {budget}");
+            assert!(
+                preview.content.encode_utf16().count() <= EDIT_LINE_UTF16_LIMIT,
+                "budget {budget}"
+            );
             let info = preview.truncation.as_ref().unwrap();
             assert_eq!(info.bytes_shown, shown, "budget {budget}");
             assert_eq!(info.total_bytes, data.len() as u64);
@@ -1415,44 +1457,172 @@ mod tests {
         );
     }
 
+    fn utf16_units(text: &str) -> usize {
+        text.encode_utf16().count()
+    }
+
+    fn assert_whole_scalars(text: &str) {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut i = 0;
+        while i < units.len() {
+            let unit = units[i];
+            if (0xD800..=0xDBFF).contains(&unit) {
+                assert!(i + 1 < units.len(), "lone high surrogate");
+                assert!(
+                    (0xDC00..=0xDFFF).contains(&units[i + 1]),
+                    "high surrogate not followed by a low surrogate"
+                );
+                i += 2;
+            } else {
+                assert!(!(0xDC00..=0xDFFF).contains(&unit), "lone low surrogate");
+                i += 1;
+            }
+        }
+        assert!(!text.contains('\u{FFFD}'));
+    }
+
     #[test]
-    fn long_lines_are_capped_on_char_boundary() {
-        let mut line = "a".repeat(1999);
+    fn long_lines_are_capped_on_utf16_boundary() {
+        // 999 ASCII units, then é (1 unit) fills the cap. The rest is cut.
+        let mut line = "a".repeat(MAX_LINE_UTF16 - 1);
         line.push('é');
         line.push('b');
         line.push('é');
         let prepared = prepare_edit_text(&line, 10);
-        let expected = format!("{}é…", "a".repeat(1999));
+        let expected = format!("{}é…", "a".repeat(MAX_LINE_UTF16 - 1));
         assert_eq!(prepared.content, expected);
         assert!(prepared.lines_shortened);
-        assert_eq!(prepared.content.chars().count(), MAX_LINE_CHARS + 1);
-        assert!(!prepared.content.contains('\u{FFFD}'));
+        assert_eq!(utf16_units(&prepared.content), MAX_LINE_UTF16 + 1);
+        assert!(utf16_units(&prepared.content) <= EDIT_LINE_UTF16_LIMIT);
+        assert_whole_scalars(&prepared.content);
         assert!(!prepared.content.contains('b'));
 
-        let exact = "é".repeat(MAX_LINE_CHARS);
+        let exact = "é".repeat(MAX_LINE_UTF16);
         let prepared = prepare_edit_text(&exact, 10);
         assert_eq!(prepared.content, exact);
         assert!(!prepared.lines_shortened);
+        assert_eq!(utf16_units(&prepared.content), MAX_LINE_UTF16);
 
-        let emoji = "\u{1F600}".repeat(MAX_LINE_CHARS + 1);
-        let prepared = prepare_edit_text(&emoji, 10);
-        assert_eq!(
-            prepared
-                .content
-                .chars()
-                .filter(|c| *c == '\u{1F600}')
-                .count(),
-            MAX_LINE_CHARS
-        );
+        // One past the cap: still one scalar boundary, not a split `é`.
+        let over = "é".repeat(MAX_LINE_UTF16 + 40);
+        let prepared = prepare_edit_text(&over, 10);
+        assert!(prepared.lines_shortened);
         assert!(prepared.content.ends_with('\u{2026}'));
-        assert!(!prepared.content.contains('\u{FFFD}'));
-        assert_eq!(prepared.content.chars().count(), MAX_LINE_CHARS + 1);
+        assert_eq!(
+            prepared.content.chars().filter(|c| *c == 'é').count(),
+            MAX_LINE_UTF16
+        );
+        assert_eq!(utf16_units(&prepared.content), MAX_LINE_UTF16 + 1);
+        assert_whole_scalars(&prepared.content);
 
         let mixed = format!("short\r\n{line}\n");
         let prepared = prepare_edit_text(&mixed, 10);
         assert_eq!(prepared.content, format!("short\r\n{expected}"));
         assert!(prepared.lines_shortened);
         assert_eq!(prepared.lines_shown, 2);
+    }
+
+    #[test]
+    fn emoji_and_accented_lines_stay_within_one_edit_row() {
+        let emoji = "\u{1F600}";
+        assert_eq!(utf16_units(emoji), 2);
+        let exact_count = MAX_LINE_UTF16 / 2;
+        let exact = emoji.repeat(exact_count);
+        let prepared = prepare_edit_text(&exact, 10);
+        assert_eq!(prepared.content, exact);
+        assert!(!prepared.lines_shortened);
+        assert_eq!(utf16_units(&prepared.content), MAX_LINE_UTF16);
+
+        let over = emoji.repeat(exact_count + 30);
+        let prepared = prepare_edit_text(&over, 10);
+        assert!(prepared.lines_shortened);
+        assert!(prepared.content.ends_with('\u{2026}'));
+        assert_eq!(
+            prepared
+                .content
+                .chars()
+                .filter(|c| *c == '\u{1F600}')
+                .count(),
+            exact_count
+        );
+        assert_eq!(utf16_units(&prepared.content), MAX_LINE_UTF16 + 1);
+        assert!(utf16_units(&prepared.content) <= EDIT_LINE_UTF16_LIMIT);
+        assert_whole_scalars(&prepared.content);
+
+        // 999 ASCII units leave room for one more unit, not an emoji.
+        let mut odd = "a".repeat(MAX_LINE_UTF16 - 1);
+        odd.push('\u{1F600}');
+        odd.push('b');
+        let prepared = prepare_edit_text(&odd, 10);
+        assert_eq!(
+            prepared.content,
+            format!("{}…", "a".repeat(MAX_LINE_UTF16 - 1))
+        );
+        assert!(prepared.lines_shortened);
+        assert!(!prepared.content.contains('\u{1F600}'));
+        assert_eq!(utf16_units(&prepared.content), MAX_LINE_UTF16);
+        assert_whole_scalars(&prepared.content);
+
+        // 998 units leave room for the emoji, then the marker.
+        let mut fit = "a".repeat(MAX_LINE_UTF16 - 2);
+        fit.push('\u{1F600}');
+        fit.push('b');
+        let prepared = prepare_edit_text(&fit, 10);
+        let mut expected = "a".repeat(MAX_LINE_UTF16 - 2);
+        expected.push('\u{1F600}');
+        expected.push('\u{2026}');
+        assert_eq!(prepared.content, expected);
+        assert_eq!(utf16_units(&prepared.content), MAX_LINE_UTF16 + 1);
+        assert_whole_scalars(&prepared.content);
+    }
+
+    #[test]
+    fn single_line_json_is_one_edit_line() {
+        const BYTES: usize = 300_030;
+        let prefix = "{\"items\":[";
+        let suffix = "]}";
+        let mut json = String::with_capacity(BYTES);
+        json.push_str(prefix);
+        json.extend(std::iter::repeat_n(
+            'a',
+            BYTES - prefix.len() - suffix.len(),
+        ));
+        json.push_str(suffix);
+        assert_eq!(json.len(), BYTES);
+        assert!(!json.contains('\n'));
+        assert!(!json.contains('\r'));
+
+        let prepared = prepare_edit_text(&json, DEFAULT_MAX_LINES);
+        assert_eq!(prepared.lines_shown, 1);
+        assert_eq!(prepared.lines_in_source, 1);
+        assert!(prepared.lines_shortened);
+        assert!(!prepared.content.contains('\n'));
+        assert!(!prepared.content.contains('\r'));
+        assert!(prepared.content.ends_with('\u{2026}'));
+        assert!(utf16_units(&prepared.content) <= EDIT_LINE_UTF16_LIMIT);
+        assert!(prepared.content.len() < 8 * 1024);
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_file(&dir, "oneline-300k.json", json.as_bytes());
+        let preview = load(&p, PreviewLimits::default()).unwrap();
+        assert_eq!(preview.line_count, 1);
+        assert!(preview.truncated);
+        assert!(!preview.content.contains('\n'));
+        assert!(!preview.content.contains('\r'));
+        assert!(utf16_units(&preview.content) <= EDIT_LINE_UTF16_LIMIT);
+        let body = preview_text(&preview);
+        for (i, line) in body.split("\r\n").enumerate() {
+            let units = utf16_units(line);
+            assert!(
+                units <= EDIT_LINE_UTF16_LIMIT,
+                "edit line {i} is {units} UTF-16 units"
+            );
+        }
+        assert_eq!(
+            body.matches("\r\n").count(),
+            2,
+            "notice, blank line, and one content line"
+        );
     }
 
     #[test]
@@ -1479,7 +1649,7 @@ mod tests {
         let p = write_file(&dir, "long.txt", "a".repeat(2001).as_bytes());
         let preview = load(&p, PreviewLimits::default()).unwrap();
         assert!(preview.truncated);
-        assert_eq!(preview.content.chars().count(), MAX_LINE_CHARS + 1);
+        assert_eq!(utf16_units(&preview.content), MAX_LINE_UTF16 + 1);
         assert!(preview.content.ends_with('\u{2026}'));
         assert!(!preview.content.contains('\u{FFFD}'));
         let info = preview.truncation.as_ref().unwrap();
@@ -1558,6 +1728,54 @@ mod tests {
             lines_shortened: false,
         };
         assert_eq!(format_truncation_notice(&untouched), None);
+    }
+
+    fn byte_notice(shown: u64, total: u64) -> Option<String> {
+        format_truncation_notice(&Truncation {
+            bytes_shown: shown,
+            total_bytes: total,
+            lines_shown: 1,
+            total_lines: None,
+            lines_omitted: false,
+            lines_shortened: false,
+        })
+    }
+
+    #[test]
+    fn truncation_notice_uses_exact_bytes_when_rounded_sizes_match() {
+        assert_eq!(format_byte_size(65_536), "64 KB");
+        assert_eq!(format_byte_size(65_537), "64 KB");
+        assert_eq!(
+            byte_notice(65_536, 65_537).as_deref(),
+            Some("Showing the first 65,536 of 65,537 bytes")
+        );
+
+        // 65,600 is 64.1 KB, so it does not read as 64 KB. Keep the compact form.
+        assert_eq!(format_byte_size(65_600), "64.1 KB");
+        assert_eq!(
+            byte_notice(65_536, 65_600).as_deref(),
+            Some("Showing the first 64 KB of 64.1 KB")
+        );
+
+        assert_eq!(
+            byte_notice(64 * 1024, 1_258_291).as_deref(),
+            Some("Showing the first 64 KB of 1.2 MB")
+        );
+
+        let with_lines = Truncation {
+            bytes_shown: 65_536,
+            total_bytes: 65_537,
+            lines_shown: 2_000,
+            total_lines: None,
+            lines_omitted: true,
+            lines_shortened: true,
+        };
+        assert_eq!(
+            format_truncation_notice(&with_lines).as_deref(),
+            Some(
+                "Showing the first 65,536 of 65,537 bytes (2,000 lines). Some lines were shortened."
+            )
+        );
     }
 
     #[test]
