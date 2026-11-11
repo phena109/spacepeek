@@ -831,7 +831,10 @@ mod tests {
 
     #[test]
     fn double_click_opens_only_the_body() {
-        assert_eq!(double_click_action(HitZone::Client), DoubleClickAction::Open);
+        assert_eq!(
+            double_click_action(HitZone::Client),
+            DoubleClickAction::Open
+        );
         for zone in [
             HitZone::Caption,
             HitZone::Close,
@@ -844,7 +847,11 @@ mod tests {
             HitZone::BottomLeft,
             HitZone::BottomRight,
         ] {
-            assert_eq!(double_click_action(zone), DoubleClickAction::Ignore, "{zone:?}");
+            assert_eq!(
+                double_click_action(zone),
+                DoubleClickAction::Ignore,
+                "{zone:?}"
+            );
         }
     }
 }
