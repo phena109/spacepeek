@@ -6,6 +6,15 @@ Text is drawn in a monospace font (Cascadia Mono, then Consolas) with word wrap 
 
 A slim header shows the file name and that details line. Drag the header to move the window. Drag the edges to resize it. The last size you set is reused for the next preview until Spacepeek exits. The size is stored in logical pixels and scaled for the monitor's DPI. The smallest size is 320×200 logical pixels. Error and empty-file windows start smaller (480×240 logical) until you resize.
 
+## Download
+
+- Nightly builds are published as a rolling pre-release at [Nightly release](https://github.com/phena109/spacepeek/releases/tag/nightly).
+- A new nightly is built about 2am Sydney time only on days when main changed.
+- Each nightly has two files, `spacepeek-<version>-x64.exe` for Intel and AMD PCs and `spacepeek-<version>-arm64.exe` for Arm PCs (Snapdragon, or a Windows VM on Apple silicon), plus `SHA256SUMS.txt`.
+- Check the version with `spacepeek.exe --version` (looks like `0.0.1-nightly.YYYYMMDD+commit`).
+- Builds are unsigned, so Windows SmartScreen may warn on first run (More info, then Run anyway) and Smart App Control may block them.
+- Nightlies are untested previews, not releases.
+
 ## Status
 
 First runnable vertical slice.
