@@ -2,7 +2,7 @@
 
 Space-bar file preview for Windows Explorer. Select a file, press Space, and a single topmost window shows a bounded text preview. The preview does not take focus from Explorer. Press Space or Esc again to close it. The header has an × button as well. PNG and JPEG are previewed too: the format is sniffed from the magic bytes, and the file has to fit the size limits.
 
-Text is drawn in a monospace font (Cascadia Mono, then Consolas) with word wrap off and a horizontal scrollbar, so columns and indentation stay aligned. Each line sent to the preview is capped at 2,000 characters. The preview loads at most the first 64 KiB. When that is not the whole file, or when lines were shortened, a notice at the top of the text says what is shown (for example `Showing the first 64 KB of 1.2 MB`). The header repeats that state in short form, such as `12 KB · 2,000 lines (truncated)`.
+Text is drawn in a monospace font (Cascadia Mono, then Consolas) with word wrap off and a horizontal scrollbar, so columns and indentation stay aligned. Each line sent to the preview is capped at 1,000 UTF-16 code units. A cut line adds a … marker (one more unit). That stays under 1,024 units, which is where the edit control would otherwise split one source line into a second row. The preview loads at most the first 64 KiB. When that is not the whole file, or when lines were shortened, a notice at the top of the text says what is shown (for example `Showing the first 64 KB of 1.2 MB`). The header repeats that state in short form, such as `12 KB · 2,000 lines (truncated)`.
 
 A slim header shows the file name and that details line. Drag the header to move the window. Drag the edges to resize it. The last size you set is reused for the next preview until Spacepeek exits. The size is stored in logical pixels and scaled for the monitor's DPI. The smallest size is 320×200 logical pixels. Error and empty-file windows start smaller (480×240 logical) until you resize.
 
@@ -10,7 +10,7 @@ A slim header shows the file name and that details line. Drag the header to move
 
 First runnable vertical slice.
 
-The preview core (bounded reads, character-boundary truncation, binary sniffing, a deny-list of known binary and image extensions, cancellation, state machine, keyboard rules, header text, hit testing, remembered window size, and the sentences shown for errors and empty files) is implemented and unit-tested. The Windows runtime is wired: single-instance mutex, low-level keyboard hook, Explorer selection lookup, and one non-activating `SpacepeekPreview` window. Every UI transition goes through `state::step`.
+The preview core (bounded reads, character-boundary truncation to 1,000 UTF-16 code units per line, binary sniffing, a deny-list of known binary and image extensions, cancellation, state machine, keyboard rules, header text, hit testing, remembered window size, and the sentences shown for errors and empty files) is implemented and unit-tested. The Windows runtime is wired: single-instance mutex, low-level keyboard hook, Explorer selection lookup, and one non-activating `SpacepeekPreview` window. Every UI transition goes through `state::step`.
 
 Compile-checked for the Windows targets below on a Linux host. **Never executed on Windows.** No timings are claimed.
 
@@ -72,7 +72,7 @@ The tests run on Linux. They cover the platform-independent core only.
 - Space is intercepted with a global low-level keyboard hook.
 - Only the first selected item is previewed.
 - Files are text when the first 8 KB has no NUL and is valid UTF-8 (a partial character at that 8 KB edge is allowed), or when the file starts with a UTF-16 BOM. PNG and JPEG are previewed (magic-byte sniffed, with size limits); the extension is ignored. Known binary and other image extensions are refused before that sniff and reported in a sentence that includes the file name. A `.lnk` file is not opened as text; the Windows build reads the shortcut's stored target for the message and does not search or show a link dialog. A zero-byte file is an empty-file message, not a blank preview. A folder is not listed as text; the message names the folder and, when listing succeeds, how many entries it has, stopping at 10,000.
-- The preview keeps at most 2,000 lines and 2,000 characters of each line. Cuts are on a character boundary. The notice at the top reports the bytes shown and the file size, and says when lines were left out or shortened.
+- The preview keeps at most 2,000 lines and 1,000 UTF-16 code units of each line. Cuts are on a character boundary, so a surrogate pair is not split. The notice at the top reports the bytes shown and the file size, and says when lines were left out or shortened.
 - Arrow keys are delivered to Explorer while that window still has focus. The preview reloads only when the selected path changes. In Details view, Left and Right often leave the same file selected. Clicking another file does not retarget the preview. Arrow keys are not forwarded when the preview window itself is in the foreground.
 - A Space that continues an Explorer type-ahead search is passed through. While a preview is already open, that Space does not move the preview.
 - The Windows runtime has not been executed. Compile checks are not a substitute for that.
