@@ -656,7 +656,9 @@ pub fn preview_text(preview: &Preview) -> String {
 /// Human-readable truncation line, such as `Showing the first 64 KB of 1.2 MB`.
 ///
 /// Sizes use binary units (1024). An exact multiple prints as `64 KB`; anything
-/// else prints one decimal digit (`1.2 MB`). Returns `None` when nothing was cut.
+/// else prints one decimal digit (`1.2 MB`). When those two labels are the same
+/// text, the notice uses grouped byte counts instead
+/// (`Showing the first 65,536 of 65,537 bytes`). Returns `None` when nothing was cut.
 pub fn format_truncation_notice(info: &Truncation) -> Option<String> {
     let byte_cut = info.bytes_shown < info.total_bytes;
     let known_lines = info.total_lines.filter(|total| *total > info.lines_shown);
@@ -664,9 +666,7 @@ pub fn format_truncation_notice(info: &Truncation) -> Option<String> {
     let mut notice = String::new();
     if byte_cut {
         notice.push_str("Showing the first ");
-        notice.push_str(&format_byte_size(info.bytes_shown));
-        notice.push_str(" of ");
-        notice.push_str(&format_byte_size(info.total_bytes));
+        notice.push_str(&format_shown_of_total(info.bytes_shown, info.total_bytes));
         if info.lines_omitted {
             notice.push_str(" (");
             notice.push_str(&format_grouped(info.lines_shown));
@@ -696,6 +696,21 @@ pub fn format_truncation_notice(info: &Truncation) -> Option<String> {
         None
     } else {
         Some(notice)
+    }
+}
+
+/// `64 KB of 1.2 MB`, or exact bytes when the rounded labels would match.
+fn format_shown_of_total(shown: u64, total: u64) -> String {
+    let shown_label = format_byte_size(shown);
+    let total_label = format_byte_size(total);
+    if shown_label == total_label {
+        format!(
+            "{} of {} bytes",
+            format_grouped(shown),
+            format_grouped(total)
+        )
+    } else {
+        format!("{shown_label} of {total_label}")
     }
 }
 
@@ -1568,7 +1583,10 @@ mod tests {
         let suffix = "]}";
         let mut json = String::with_capacity(BYTES);
         json.push_str(prefix);
-        json.extend(std::iter::repeat('a').take(BYTES - prefix.len() - suffix.len()));
+        json.extend(std::iter::repeat_n(
+            'a',
+            BYTES - prefix.len() - suffix.len(),
+        ));
         json.push_str(suffix);
         assert_eq!(json.len(), BYTES);
         assert!(!json.contains('\n'));
@@ -1710,6 +1728,54 @@ mod tests {
             lines_shortened: false,
         };
         assert_eq!(format_truncation_notice(&untouched), None);
+    }
+
+    fn byte_notice(shown: u64, total: u64) -> Option<String> {
+        format_truncation_notice(&Truncation {
+            bytes_shown: shown,
+            total_bytes: total,
+            lines_shown: 1,
+            total_lines: None,
+            lines_omitted: false,
+            lines_shortened: false,
+        })
+    }
+
+    #[test]
+    fn truncation_notice_uses_exact_bytes_when_rounded_sizes_match() {
+        assert_eq!(format_byte_size(65_536), "64 KB");
+        assert_eq!(format_byte_size(65_537), "64 KB");
+        assert_eq!(
+            byte_notice(65_536, 65_537).as_deref(),
+            Some("Showing the first 65,536 of 65,537 bytes")
+        );
+
+        // 65,600 is 64.1 KB, so it does not read as 64 KB. Keep the compact form.
+        assert_eq!(format_byte_size(65_600), "64.1 KB");
+        assert_eq!(
+            byte_notice(65_536, 65_600).as_deref(),
+            Some("Showing the first 64 KB of 64.1 KB")
+        );
+
+        assert_eq!(
+            byte_notice(64 * 1024, 1_258_291).as_deref(),
+            Some("Showing the first 64 KB of 1.2 MB")
+        );
+
+        let with_lines = Truncation {
+            bytes_shown: 65_536,
+            total_bytes: 65_537,
+            lines_shown: 2_000,
+            total_lines: None,
+            lines_omitted: true,
+            lines_shortened: true,
+        };
+        assert_eq!(
+            format_truncation_notice(&with_lines).as_deref(),
+            Some(
+                "Showing the first 65,536 of 65,537 bytes (2,000 lines). Some lines were shortened."
+            )
+        );
     }
 
     #[test]
