@@ -7,11 +7,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::geometry::{
-    effective_dpi, muldiv, scale_for_dpi, PxSize, BASE_DPI, LOGICAL_PREVIEW_HEIGHT,
+    effective_dpi, muldiv, scale_for_dpi, PxRect, PxSize, BASE_DPI, LOGICAL_PREVIEW_HEIGHT,
     LOGICAL_PREVIEW_WIDTH,
 };
 use crate::image_preview::{format_image_details, DecodedImage};
-use crate::preview::{format_compact_size, format_grouped, preview_text, Preview, PreviewError};
+use crate::preview::{
+    format_compact_size, format_grouped, message_with_quick_info, preview_text, Preview,
+    PreviewError,
+};
 
 /// Logical height of the header strip at 96 DPI.
 pub const LOGICAL_HEADER_HEIGHT: i32 = 52;
@@ -28,8 +31,11 @@ pub const MIN_LOGICAL_WIDTH: i32 = 320;
 /// Smallest outer height the user can drag to, in logical pixels.
 pub const MIN_LOGICAL_HEIGHT: i32 = 200;
 /// Outer size of a message window before the user resizes, in logical pixels.
+///
+/// Tall enough for an unsupported-file sentence plus the Type, Size, and
+/// Modified lines. Empty-file windows use the same default.
 pub const MESSAGE_LOGICAL_WIDTH: i32 = 480;
-pub const MESSAGE_LOGICAL_HEIGHT: i32 = 240;
+pub const MESSAGE_LOGICAL_HEIGHT: i32 = 320;
 
 /// Outer window size in logical (96 DPI) pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,12 +163,16 @@ pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
 
 pub fn chrome_for_error(path: &Path, error: &PreviewError) -> Presented {
     let name = path_label(path);
+    let mut message = error.user_message(&name);
+    if let Some(info) = error.quick_info() {
+        message = message_with_quick_info(&message, info);
+    }
     Presented::Message {
         header: HeaderText {
             name: name.clone(),
             details: error.header_status(),
         },
-        message: error.user_message(&name),
+        message,
     }
 }
 
@@ -285,6 +295,60 @@ impl SizeMemory {
 impl Default for SizeMemory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Client-area rectangle of the × button.
+///
+/// `None` when the button has no pixels. The origin is the client origin,
+/// so this is the rect to invalidate — not an outer-window [`hit_test`] point.
+pub fn close_button_bounds(
+    client_width: i32,
+    header_height: i32,
+    close_width: i32,
+) -> Option<PxRect> {
+    if client_width <= 0 || header_height <= 0 || close_width <= 0 {
+        return None;
+    }
+    let width = close_width.min(client_width);
+    Some(PxRect {
+        left: client_width.saturating_sub(width),
+        top: 0,
+        right: client_width,
+        bottom: header_height,
+    })
+}
+
+/// True when `(x, y)`, in outer-window pixels, is on the × button.
+pub fn pointer_over_close(layout: ChromeLayout, x: i32, y: i32) -> bool {
+    hit_test(layout, x, y) == HitZone::Close
+}
+
+/// What a left double-click in `zone` should do.
+///
+/// The body opens the file. The header, the × button, and the resize edges
+/// do not. A triple-click is a later button-down, not a second one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoubleClickAction {
+    /// Close the preview and open the file with the shell's default action.
+    Open,
+    /// Leave the preview alone.
+    Ignore,
+}
+
+pub fn double_click_action(zone: HitZone) -> DoubleClickAction {
+    match zone {
+        HitZone::Client => DoubleClickAction::Open,
+        HitZone::Caption
+        | HitZone::Close
+        | HitZone::Left
+        | HitZone::Right
+        | HitZone::Top
+        | HitZone::Bottom
+        | HitZone::TopLeft
+        | HitZone::TopRight
+        | HitZone::BottomLeft
+        | HitZone::BottomRight => DoubleClickAction::Ignore,
     }
 }
 
@@ -544,6 +608,48 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_message_lists_quick_info_under_the_sentence() {
+        use crate::preview::{DeniedKind, QuickInfo};
+
+        let presented = chrome_for_error(
+            Path::new("archive.zip"),
+            &PreviewError::denied(DeniedKind::Binary).with_quick_info(QuickInfo {
+                type_name: Some("Compressed (zipped) Folder".to_string()),
+                size_bytes: Some(1_234_567),
+                modified: Some("12 November 2026 15:04".to_string()),
+            }),
+        );
+        assert_eq!(presented.header().details, "Not supported");
+        assert_eq!(
+            presented.message(),
+            Some(
+                "archive.zip can't be previewed — this file type isn't supported yet\r\n\r\nType: Compressed (zipped) Folder\r\nSize: 1.2 MB (1,234,567 bytes)\r\nModified: 12 November 2026 15:04"
+            )
+        );
+
+        let text = chrome_for_error(
+            Path::new("notes.md"),
+            &PreviewError::binary().with_quick_info(QuickInfo {
+                type_name: None,
+                size_bytes: Some(512),
+                modified: None,
+            }),
+        );
+        assert_eq!(text.header().details, "Not text");
+        assert_eq!(
+            text.message(),
+            Some("notes.md doesn't look like text\r\n\r\nSize: 512 B (512 bytes)")
+        );
+
+        // Access denied is an error, not an unsupported type. No quick info.
+        let denied = chrome_for_error(
+            Path::new("secret.txt"),
+            &PreviewError::Io(std::io::Error::from_raw_os_error(5)),
+        );
+        assert_eq!(denied.message(), Some("Access to secret.txt was denied"));
+    }
+
+    #[test]
     fn hit_test_regions() {
         let layout = sample_layout();
         // Client width is 784. Close starts at 784 - 44 = 740 in client coords,
@@ -599,7 +705,7 @@ mod tests {
             mem.opening_logical(WindowKind::Message),
             LogicalSize {
                 width: 480,
-                height: 240
+                height: 320
             }
         );
         assert_eq!(
@@ -620,7 +726,7 @@ mod tests {
             mem.opening_physical(WindowKind::Message, 120),
             PxSize {
                 width: 600,
-                height: 300
+                height: 400
             }
         );
         assert_eq!(
@@ -722,5 +828,82 @@ mod tests {
         assert_eq!(scaled_header_font(120), 20);
         assert_eq!(scaled_detail_font(120), 16);
         assert_eq!(scaled_header_pad(96), LOGICAL_HEADER_PAD_X);
+    }
+
+    #[test]
+    fn pointer_over_close_is_only_the_button() {
+        let layout = sample_layout();
+        // Same points as `hit_test_regions`: close starts at window x = 748.
+        assert!(pointer_over_close(layout, 748, 30));
+        assert!(pointer_over_close(layout, 780, 60));
+        assert!(!pointer_over_close(layout, 747, 30));
+        assert!(!pointer_over_close(layout, 100, 30));
+        assert!(!pointer_over_close(layout, 400, 300));
+        assert!(!pointer_over_close(layout, 100, 8 + 56));
+        // The frame wins, including the strip beside the ×.
+        assert!(!pointer_over_close(layout, 793, 30));
+        assert!(!pointer_over_close(layout, 3, 30));
+        assert!(!pointer_over_close(layout, 100, 4));
+        assert!(!pointer_over_close(
+            ChromeLayout {
+                width: 0,
+                height: 10,
+                ..layout
+            },
+            0,
+            0
+        ));
+    }
+
+    #[test]
+    fn close_button_bounds_follow_the_client_edge() {
+        assert_eq!(
+            close_button_bounds(784, 56, 44),
+            Some(PxRect {
+                left: 740,
+                top: 0,
+                right: 784,
+                bottom: 56,
+            })
+        );
+        assert_eq!(
+            close_button_bounds(20, 56, 44),
+            Some(PxRect {
+                left: 0,
+                top: 0,
+                right: 20,
+                bottom: 56,
+            })
+        );
+        assert_eq!(close_button_bounds(0, 56, 44), None);
+        assert_eq!(close_button_bounds(100, 0, 44), None);
+        assert_eq!(close_button_bounds(100, 56, 0), None);
+        assert_eq!(close_button_bounds(-1, 56, 44), None);
+    }
+
+    #[test]
+    fn double_click_opens_only_the_body() {
+        assert_eq!(
+            double_click_action(HitZone::Client),
+            DoubleClickAction::Open
+        );
+        for zone in [
+            HitZone::Caption,
+            HitZone::Close,
+            HitZone::Left,
+            HitZone::Right,
+            HitZone::Top,
+            HitZone::Bottom,
+            HitZone::TopLeft,
+            HitZone::TopRight,
+            HitZone::BottomLeft,
+            HitZone::BottomRight,
+        ] {
+            assert_eq!(
+                double_click_action(zone),
+                DoubleClickAction::Ignore,
+                "{zone:?}"
+            );
+        }
     }
 }

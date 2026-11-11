@@ -30,12 +30,82 @@ pub enum DirectoryCount {
 /// so an exact cap and "cap+" stay distinct.
 pub const DIRECTORY_COUNT_CAP: u64 = 10_000;
 
+/// Cheap facts for a file that cannot be previewed.
+///
+/// Nothing here is file contents. A missing field is left out of
+/// [`format_quick_info`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QuickInfo {
+    /// Shell type name, or an extension fallback such as `ZIP file`.
+    pub type_name: Option<String>,
+    pub size_bytes: Option<u64>,
+    /// Local date and time, already formatted for display.
+    pub modified: Option<String>,
+}
+
+/// `Size: 1.2 MB (1,234,567 bytes)`. The compact size and the exact byte
+/// count both come from the existing formatters.
+pub fn format_size_line(bytes: u64) -> String {
+    let exact = if bytes == 1 {
+        "1 byte".to_string()
+    } else {
+        format!("{} bytes", format_grouped(bytes))
+    };
+    format!("{} ({exact})", format_compact_size(bytes))
+}
+
+/// Type, size, and modified lines. Empty when every field is missing.
+///
+/// Lines are separated with CRLF so `DrawTextW` breaks them.
+pub fn format_quick_info(info: &QuickInfo) -> String {
+    let mut lines = Vec::new();
+    if let Some(type_name) = trimmed(info.type_name.as_deref()) {
+        lines.push(format!("Type: {type_name}"));
+    }
+    if let Some(bytes) = info.size_bytes {
+        lines.push(format!("Size: {}", format_size_line(bytes)));
+    }
+    if let Some(modified) = trimmed(info.modified.as_deref()) {
+        lines.push(format!("Modified: {modified}"));
+    }
+    lines.join("\r\n")
+}
+
+/// `message`, then a blank line and [`format_quick_info`], when that has lines.
+pub fn message_with_quick_info(message: &str, info: &QuickInfo) -> String {
+    let extra = format_quick_info(info);
+    if extra.is_empty() {
+        message.to_string()
+    } else {
+        format!("{message}\r\n\r\n{extra}")
+    }
+}
+
+/// `ZIP file` from `zip` or `.zip`. An empty extension is `None`.
+pub fn fallback_type_name(extension: &str) -> Option<String> {
+    let ext = extension.trim().trim_start_matches('.');
+    if ext.is_empty() {
+        None
+    } else {
+        Some(format!("{} file", ext.to_ascii_uppercase()))
+    }
+}
+
+fn trimmed(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|text| !text.is_empty())
+}
+
 #[derive(Debug)]
 pub enum PreviewError {
     /// Content sniff failed (NUL or invalid UTF-8 in the sniff window).
-    Binary,
+    Binary {
+        info: QuickInfo,
+    },
     /// Extension is on the deny-list. The kind says which family it is.
-    Denied(DeniedKind),
+    Denied {
+        kind: DeniedKind,
+        info: QuickInfo,
+    },
     /// A directory. `count` is omitted when the entries could not be read.
     Directory {
         count: Option<DirectoryCount>,
@@ -59,12 +129,15 @@ impl PartialEq for PreviewError {
             (PreviewError::Io(a), PreviewError::Io(b)) => {
                 a.kind() == b.kind() && a.to_string() == b.to_string()
             }
-            (PreviewError::Denied(a), PreviewError::Denied(b)) => a == b,
+            (
+                PreviewError::Denied { kind: a, info: ia },
+                PreviewError::Denied { kind: b, info: ib },
+            ) => a == b && ia == ib,
             (PreviewError::Directory { count: a }, PreviewError::Directory { count: b }) => a == b,
             (PreviewError::Shortcut { target: a }, PreviewError::Shortcut { target: b }) => a == b,
             (PreviewError::Image(a), PreviewError::Image(b)) => a == b,
-            (PreviewError::Binary, PreviewError::Binary)
-            | (PreviewError::Empty, PreviewError::Empty)
+            (PreviewError::Binary { info: a }, PreviewError::Binary { info: b }) => a == b,
+            (PreviewError::Empty, PreviewError::Empty)
             | (PreviewError::Cancelled, PreviewError::Cancelled) => true,
             _ => false,
         }
@@ -76,9 +149,15 @@ impl Eq for PreviewError {}
 impl std::fmt::Display for PreviewError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PreviewError::Binary => write!(f, "file looks binary"),
-            PreviewError::Denied(DeniedKind::Image) => write!(f, "image file"),
-            PreviewError::Denied(DeniedKind::Binary) => write!(f, "unsupported file type"),
+            PreviewError::Binary { .. } => write!(f, "file looks binary"),
+            PreviewError::Denied {
+                kind: DeniedKind::Image,
+                ..
+            } => write!(f, "image file"),
+            PreviewError::Denied {
+                kind: DeniedKind::Binary,
+                ..
+            } => write!(f, "unsupported file type"),
             PreviewError::Directory { .. } => write!(f, "is a directory"),
             PreviewError::Empty => write!(f, "empty file"),
             PreviewError::Cancelled => write!(f, "cancelled"),
@@ -97,8 +176,8 @@ impl PreviewError {
     pub fn user_message(&self, file_name: &str) -> String {
         let name = display_name(file_name);
         match self {
-            PreviewError::Binary => format!("{name} doesn't look like text"),
-            PreviewError::Denied(_) => {
+            PreviewError::Binary { .. } => format!("{name} doesn't look like text"),
+            PreviewError::Denied { .. } => {
                 format!("{name} can't be previewed — this file type isn't supported yet")
             }
             PreviewError::Directory { count } => format_directory_message(name, *count),
@@ -120,8 +199,8 @@ impl PreviewError {
     /// Short second line for the header. The centred body uses [`Self::user_message`].
     pub fn header_status(&self) -> String {
         match self {
-            PreviewError::Binary => "Not text".to_string(),
-            PreviewError::Denied(_) => "Not supported".to_string(),
+            PreviewError::Binary { .. } => "Not text".to_string(),
+            PreviewError::Denied { .. } => "Not supported".to_string(),
             PreviewError::Directory { count } => match count {
                 Some(count) => format_directory_count(*count),
                 None => "Folder".to_string(),
@@ -131,6 +210,42 @@ impl PreviewError {
             PreviewError::Shortcut { .. } => "Shortcut".to_string(),
             PreviewError::Io(err) => io_header_status(err).to_string(),
             PreviewError::Image(err) => err.header_status(),
+        }
+    }
+
+    /// Sniff failure before quick info has been filled in.
+    pub fn binary() -> Self {
+        Self::Binary {
+            info: QuickInfo::default(),
+        }
+    }
+
+    /// Deny-list failure before quick info has been filled in.
+    pub fn denied(kind: DeniedKind) -> Self {
+        Self::Denied {
+            kind,
+            info: QuickInfo::default(),
+        }
+    }
+
+    /// Type, size, and modified time for the two "can't preview this" outcomes.
+    pub fn quick_info(&self) -> Option<&QuickInfo> {
+        match self {
+            PreviewError::Binary { info } | PreviewError::Denied { info, .. } => Some(info),
+            _ => None,
+        }
+    }
+
+    pub fn wants_quick_info(&self) -> bool {
+        self.quick_info().is_some()
+    }
+
+    /// Attach gathered facts. Other outcomes keep their payload.
+    pub fn with_quick_info(self, info: QuickInfo) -> Self {
+        match self {
+            PreviewError::Binary { .. } => PreviewError::Binary { info },
+            PreviewError::Denied { kind, .. } => PreviewError::Denied { kind, info },
+            other => other,
         }
     }
 }
@@ -430,7 +545,7 @@ pub fn load_text_preview<P: AsRef<Path>>(
         return Err(PreviewError::Shortcut { target: None });
     }
     if let Some(kind) = denied_kind(path) {
-        return Err(PreviewError::Denied(kind));
+        return Err(PreviewError::denied(kind));
     }
     if cancel.is_cancelled(&gen) {
         return Err(PreviewError::Cancelled);
@@ -483,7 +598,7 @@ pub fn load_text_preview<P: AsRef<Path>>(
     } else if buffer.starts_with(&[0xFE, 0xFF]) {
         decode_utf16_prefix(&buffer[2..], false, hit_byte_cap, 2)
     } else if !passes_text_sniff(&buffer, total_bytes) {
-        return Err(PreviewError::Binary);
+        return Err(PreviewError::binary());
     } else {
         decode_utf8_prefix(&buffer, hit_byte_cap)
     };
@@ -1064,7 +1179,7 @@ mod tests {
         let p = write_file(&dir, "bin.txt", b"ok\x00binary");
         assert_eq!(
             load(&p, PreviewLimits::default()),
-            Err(PreviewError::Binary)
+            Err(PreviewError::binary())
         );
     }
 
@@ -1074,7 +1189,7 @@ mod tests {
         let p = write_file(&dir, "Makefile", b"hello\0world");
         assert_eq!(
             load(&p, PreviewLimits::default()),
-            Err(PreviewError::Binary)
+            Err(PreviewError::binary())
         );
     }
 
@@ -1084,12 +1199,12 @@ mod tests {
         let p = write_file(&dir, "lossy.txt", b"hello \xFF world");
         assert_eq!(
             load(&p, PreviewLimits::default()),
-            Err(PreviewError::Binary)
+            Err(PreviewError::binary())
         );
         let partial = write_file(&dir, "partial.txt", b"hello \xC3");
         assert_eq!(
             load(&partial, PreviewLimits::default()),
-            Err(PreviewError::Binary)
+            Err(PreviewError::binary())
         );
     }
 
@@ -1188,17 +1303,17 @@ mod tests {
         let gif = write_file(&dir, "anim.GIF", b"not really a gif\x00");
         assert_eq!(
             load(&gif, PreviewLimits::default()),
-            Err(PreviewError::Denied(DeniedKind::Image))
+            Err(PreviewError::denied(DeniedKind::Image))
         );
         let bmp = write_file(&dir, "pic.BmP", b"hello");
         assert_eq!(
             load(&bmp, PreviewLimits::default()),
-            Err(PreviewError::Denied(DeniedKind::Image))
+            Err(PreviewError::denied(DeniedKind::Image))
         );
         let webp = write_file(&dir, "pic.webp", b"hello");
         assert_eq!(
             load(&webp, PreviewLimits::default()),
-            Err(PreviewError::Denied(DeniedKind::Image))
+            Err(PreviewError::denied(DeniedKind::Image))
         );
         for name in [
             "app.EXE",
@@ -1218,7 +1333,7 @@ mod tests {
             let p = write_file(&dir, name, b"hello");
             assert_eq!(
                 load(&p, PreviewLimits::default()),
-                Err(PreviewError::Denied(DeniedKind::Binary)),
+                Err(PreviewError::denied(DeniedKind::Binary)),
                 "{name}"
             );
         }
@@ -1896,7 +2011,7 @@ mod tests {
         let gif = write_file(&dir, "anim.gif", b"");
         assert_eq!(
             load(&gif, PreviewLimits::default()),
-            Err(PreviewError::Denied(DeniedKind::Image))
+            Err(PreviewError::denied(DeniedKind::Image))
         );
     }
 
@@ -1934,17 +2049,17 @@ mod tests {
     #[test]
     fn user_message_covers_each_error_kind() {
         assert_eq!(
-            PreviewError::Binary.user_message("notes.md"),
+            PreviewError::binary().user_message("notes.md"),
             "notes.md doesn't look like text"
         );
         assert_eq!(
-            PreviewError::Binary.user_message("ノート.md"),
+            PreviewError::binary().user_message("ノート.md"),
             "ノート.md doesn't look like text"
         );
-        assert_eq!(PreviewError::Binary.to_string(), "file looks binary");
-        assert_eq!(PreviewError::Binary.header_status(), "Not text");
+        assert_eq!(PreviewError::binary().to_string(), "file looks binary");
+        assert_eq!(PreviewError::binary().header_status(), "Not text");
 
-        let image = PreviewError::Denied(DeniedKind::Image);
+        let image = PreviewError::denied(DeniedKind::Image);
         assert_eq!(
             image.user_message("photo.png"),
             "photo.png can't be previewed — this file type isn't supported yet"
@@ -1956,7 +2071,7 @@ mod tests {
         assert_eq!(image.to_string(), "image file");
         assert_eq!(image.header_status(), "Not supported");
 
-        let binary = PreviewError::Denied(DeniedKind::Binary);
+        let binary = PreviewError::denied(DeniedKind::Binary);
         assert_eq!(
             binary.user_message("archive.zip"),
             "archive.zip can't be previewed — this file type isn't supported yet"
@@ -2075,6 +2190,73 @@ mod tests {
         assert_ne!(damaged, PreviewError::Image(ImageError::Unsupported));
     }
 
+    #[test]
+    fn quick_info_formats_size_and_omits_missing_fields() {
+        assert_eq!(format_size_line(0), "0 B (0 bytes)");
+        assert_eq!(format_size_line(1), "1 B (1 byte)");
+        assert_eq!(format_size_line(1536), "1.5 KB (1,536 bytes)");
+        assert_eq!(format_size_line(1_234_567), "1.2 MB (1,234,567 bytes)");
+        assert_eq!(fallback_type_name("zip"), Some("ZIP file".to_string()));
+        assert_eq!(fallback_type_name(".Zip"), Some("ZIP file".to_string()));
+        assert_eq!(fallback_type_name("7z"), Some("7Z file".to_string()));
+        assert_eq!(fallback_type_name(""), None);
+        assert_eq!(fallback_type_name("   "), None);
+        assert_eq!(fallback_type_name("."), None);
+
+        let full = QuickInfo {
+            type_name: Some("Compressed (zipped) Folder".to_string()),
+            size_bytes: Some(1_234_567),
+            modified: Some("12 November 2026 15:04".to_string()),
+        };
+        assert_eq!(
+            format_quick_info(&full),
+            "Type: Compressed (zipped) Folder\r\nSize: 1.2 MB (1,234,567 bytes)\r\nModified: 12 November 2026 15:04"
+        );
+        assert_eq!(
+            message_with_quick_info(
+                "archive.zip can't be previewed — this file type isn't supported yet",
+                &full
+            ),
+            "archive.zip can't be previewed — this file type isn't supported yet\r\n\r\nType: Compressed (zipped) Folder\r\nSize: 1.2 MB (1,234,567 bytes)\r\nModified: 12 November 2026 15:04"
+        );
+
+        let size_only = QuickInfo {
+            type_name: None,
+            size_bytes: Some(1),
+            modified: None,
+        };
+        assert_eq!(format_quick_info(&size_only), "Size: 1 B (1 byte)");
+        let type_only = QuickInfo {
+            type_name: Some("  ZIP file  ".to_string()),
+            size_bytes: None,
+            modified: Some("   ".to_string()),
+        };
+        assert_eq!(format_quick_info(&type_only), "Type: ZIP file");
+        assert_eq!(format_quick_info(&QuickInfo::default()), "");
+        assert_eq!(
+            message_with_quick_info("notes.md doesn't look like text", &QuickInfo::default()),
+            "notes.md doesn't look like text"
+        );
+
+        let denied = PreviewError::denied(DeniedKind::Binary).with_quick_info(size_only);
+        assert!(denied.wants_quick_info());
+        assert_eq!(
+            denied.quick_info().and_then(|info| info.size_bytes),
+            Some(1)
+        );
+        let io = PreviewError::Io(std::io::Error::from_raw_os_error(5));
+        assert!(!io.wants_quick_info());
+        assert!(io.quick_info().is_none());
+        assert!(matches!(io.with_quick_info(full), PreviewError::Io(_)));
+        assert!(PreviewError::binary().wants_quick_info());
+        assert!(PreviewError::denied(DeniedKind::Image).wants_quick_info());
+        assert!(PreviewError::binary()
+            .quick_info()
+            .unwrap()
+            .size_bytes
+            .is_none());
+    }
+
     fn rgba_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
         PngEncoder::new(&mut buf)
@@ -2144,14 +2326,14 @@ mod tests {
         let binary = write_file(&dir, "pic.PNG", b"not really a png\x00");
         assert_eq!(
             load(&binary, PreviewLimits::default()),
-            Err(PreviewError::Binary)
+            Err(PreviewError::binary())
         );
 
         // Other image types stay on the deny-list, even when the bytes are a PNG.
         let disguised = write_file(&dir, "anim.gif", &png);
         assert_eq!(
             load(&disguised, PreviewLimits::default()),
-            Err(PreviewError::Denied(DeniedKind::Image))
+            Err(PreviewError::denied(DeniedKind::Image))
         );
     }
 

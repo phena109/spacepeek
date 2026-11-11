@@ -14,8 +14,9 @@ pub mod selection;
 pub mod state;
 
 pub use chrome::{
-    chrome_for_error, chrome_for_text, hit_test, min_physical_size, scaled_close_width,
-    scaled_detail_font, scaled_header_font, scaled_header_height, scaled_header_pad, ChromeLayout,
+    chrome_for_error, chrome_for_text, close_button_bounds, double_click_action, hit_test,
+    min_physical_size, pointer_over_close, scaled_close_width, scaled_detail_font,
+    scaled_header_font, scaled_header_height, scaled_header_pad, ChromeLayout, DoubleClickAction,
     HeaderText, HitZone, LogicalSize, Presented, SizeMemory, WindowKind,
 };
 pub use cli::{parse_command, Command};
@@ -35,8 +36,9 @@ pub use keys::{
     Typeahead, TypeaheadKey, NAV_RELOAD_DELAY_MS,
 };
 pub use preview::{
-    format_byte_size, format_compact_size, format_truncation_notice, load_text_preview,
-    preview_text, CancelToken, DeniedKind, Generation, Preview, PreviewError, PreviewLimits,
+    fallback_type_name, format_byte_size, format_compact_size, format_quick_info, format_size_line,
+    format_truncation_notice, load_text_preview, message_with_quick_info, preview_text,
+    CancelToken, DeniedKind, Generation, Preview, PreviewError, PreviewLimits, QuickInfo,
     Truncation, DEFAULT_MAX_BYTES, MAX_LINE_UTF16,
 };
 pub use selection::{choose_selected, nonempty_path};

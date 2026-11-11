@@ -42,34 +42,40 @@ mod win {
     };
 
     use spacepeek::{
-        choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk, decide_hook_key,
-        effective_dpi, gate_show, hit_test, hook_key_from_vk, image_dest_rect, load_text_preview,
-        min_physical_size, nav_reload_remaining, nonempty_path, parse_command, place_preview,
-        scaled_close_width, scaled_detail_font, scaled_font_height, scaled_header_font,
-        scaled_header_height, scaled_header_pad, session_phase, step, typeahead_window_ms,
-        wheel_scroll_dy, CancelToken, ChromeLayout, Command, DecodedImage, Effect, Event,
-        Generation, HitZone, HookContext, HookDecision, HookKey, KeyPhase, Modifiers, NavKey,
-        Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, RepeatFilter,
-        ScrollHold, ScrollOp, SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey,
-        Typeahead, TypeaheadKey, WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
+        choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk,
+        close_button_bounds, decide_hook_key, double_click_action, effective_dpi,
+        fallback_type_name, gate_show, hit_test, hook_key_from_vk, image_dest_rect,
+        load_text_preview, min_physical_size, nav_reload_remaining, nonempty_path, parse_command,
+        place_preview, pointer_over_close, scaled_close_width, scaled_detail_font,
+        scaled_font_height, scaled_header_font, scaled_header_height, scaled_header_pad,
+        session_phase, step, typeahead_window_ms, wheel_scroll_dy, CancelToken, ChromeLayout,
+        Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone, HookContext,
+        HookDecision, HookKey, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError,
+        PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
+        SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey,
+        WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, COLORREF, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
-        E_FAIL, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+        E_FAIL, FILETIME, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT,
+        SYSTEMTIME, WPARAM,
+    };
+    use windows::Win32::Globalization::{
+        GetDateFormatEx, GetTimeFormatEx, DATE_LONGDATE, TIME_NOSECONDS,
     };
     use windows::Win32::Graphics::Gdi::{
-        BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
-        EndPaint, ExcludeClipRect, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush,
-        GetTextFaceW, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC, SaveDC,
+        BeginPaint, ClientToScreen, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject,
+        DrawTextW, EndPaint, ExcludeClipRect, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush,
+        GetTextFaceW, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC, RoundRect, SaveDC,
         SelectObject, SetBkMode, SetBrushOrgEx, SetStretchBltMode, SetTextColor, StretchDIBits,
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET,
         DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
         DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL,
         FW_SEMIBOLD, HALFTONE, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        PAINTSTRUCT, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
+        PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
     };
-    use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
+    use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, WIN32_FIND_DATAW};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
         IServiceProvider, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
@@ -80,49 +86,53 @@ mod win {
     use windows::Win32::System::Ole::IOleWindow;
     use windows::Win32::System::SystemInformation::GetTickCount;
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
     use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
     use windows::Win32::UI::HiDpi::{
         GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, SetFocus, VIRTUAL_KEY,
-        VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+        GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, SetFocus, TrackMouseEvent,
+        TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN,
+        VK_SHIFT,
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
         FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
         IShellFolder, IShellFolderViewDual, IShellItem, IShellLinkW, IShellView, IShellWindows,
-        IWebBrowser2, SHCreateItemWithParent, SID_STopLevelBrowser, ShellLink, ShellWindows,
-        Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
-        NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SIGDN_FILESYSPATH,
-        SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT,
+        IWebBrowser2, SHCreateItemWithParent, SHGetFileInfoW, SID_STopLevelBrowser,
+        ShellExecuteExW, ShellLink, ShellWindows, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE,
+        NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW,
+        NOTIFYICON_VERSION_4, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_TYPENAME,
+        SHGFI_USEFILEATTRIBUTES, SIGDN_FILESYSPATH, SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, BringWindowToTop, CallNextHookEx, CallWindowProcW, CreatePopupMenu,
         CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
         FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
-        GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetSystemMetrics, GetWindowRect,
-        GetWindowThreadProcessId, HideCaret, IsWindow, IsWindowVisible, KillTimer, LoadCursorW,
-        LoadIconW, MessageBoxW, MoveWindow, PeekMessageW, PostMessageW, PostQuitMessage,
-        PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SendMessageW,
+        GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetParent, GetSystemMetrics,
+        GetWindowRect, GetWindowThreadProcessId, HideCaret, IsWindow, IsWindowVisible, KillTimer,
+        LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, PeekMessageW, PostMessageW,
+        PostQuitMessage, PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SendMessageW,
         SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
         SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
-        CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY,
-        EVENT_SYSTEM_FOREGROUND, GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU,
-        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+        CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
+        ES_READONLY, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON,
+        HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
         HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_UP,
         MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MF_STRING,
         MINMAXINFO, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP,
         SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
-        SW_HIDE, SW_SHOWNOACTIVATE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
-        WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CHAR,
-        WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE,
-        WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL,
-        WM_NCHITTEST, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
-        WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER,
-        WM_VSCROLL, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+        WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP,
+        WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+        WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+        WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
+        WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL,
+        WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT,
+        WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSW,
+        WNDCLASS_STYLES, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
         WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
     };
 
@@ -136,11 +146,16 @@ mod win {
     const WM_SPACEPEEK_SCROLL: u32 = WM_APP + 6;
     const WM_SPACEPEEK_WHEEL: u32 = WM_APP + 7;
     const WM_SPACEPEEK_FOREGROUND: u32 = WM_APP + 8;
+    /// Posted from the edit control so a body double-click opens after that
+    /// procedure returns. The window is gone before a triple-click can repeat it.
+    const WM_SPACEPEEK_OPEN: u32 = WM_APP + 9;
     /// `NIN_KEYSELECT` is `WM_USER + 1`. The windows crate exports `NIN_SELECT` only.
     const NIN_KEYSELECT: u32 = WM_USER + 1;
     const EM_SETLIMITTEXT: u32 = 0x00C5;
     /// `EM_LINESCROLL`. Kept local so the edit control does not need the Controls feature.
     const EM_LINESCROLL: u32 = 0x00B6;
+    /// `WM_MOUSELEAVE`. Kept local so the preview does not need the Controls feature.
+    const WM_MOUSELEAVE: u32 = 0x02A3;
     const NAV_TIMER_ID: usize = 1;
     const WATCH_TIMER_ID: usize = 2;
     /// Backup for a missed foreground event while a session is open.
@@ -188,6 +203,12 @@ mod win {
         last_nav_tick: Option<u32>,
         /// `selected_path` pumps the STA. Ignore a nested navigation read.
         nav_busy: bool,
+        /// Pointer is inside the × hit-test area. Paint uses this; only a change
+        /// invalidates, and only the button rect.
+        close_hovered: bool,
+        /// Filesystem path of the file the window is showing. Empty when hidden.
+        /// A reload keeps the previous path until the new content is installed.
+        shown_path: PathBuf,
     }
 
     static APP: AtomicPtr<RefCell<App>> = AtomicPtr::new(std::ptr::null_mut());
@@ -273,14 +294,22 @@ mod win {
             input_baseline: 0,
             last_nav_tick: None,
             nav_busy: false,
+            close_hovered: false,
+            shown_path: PathBuf::new(),
         })));
         APP.store(app, Ordering::Release);
 
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            register_class(instance, MESSAGE_CLASS)?;
-            register_class(instance, PREVIEW_CLASS)?;
+            register_class(instance, MESSAGE_CLASS, CS_HREDRAW | CS_VREDRAW)?;
+            // `CS_DBLCLKS` so an image or message body (drawn by this window,
+            // not an edit child) receives `WM_LBUTTONDBLCLK`.
+            register_class(
+                instance,
+                PREVIEW_CLASS,
+                CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
+            )?;
             let msg_hwnd = create_message_window(instance)?;
             app.borrow_mut().msg_hwnd = msg_hwnd;
             MAIN_HWND.store(msg_hwnd.0 as isize, Ordering::Release);
@@ -987,6 +1016,38 @@ mod win {
                 }
                 LRESULT(0)
             }
+            // The × is client area (`HTCLIENT`). The rest of the header is
+            // `HTCAPTION`, so leaving the button is either another client move
+            // or a non-client move. `TME_LEAVE` covers the window edge.
+            WM_MOUSEMOVE => {
+                let (x, y) = client_point_in_window(hwnd, lparam);
+                update_close_hover(hwnd, pointer_over_close(window_layout(hwnd), x, y));
+                track_client_leave(hwnd);
+                LRESULT(0)
+            }
+            WM_NCMOUSEMOVE => {
+                let (x, y) = screen_point_in_window(hwnd, lparam);
+                update_close_hover(hwnd, pointer_over_close(window_layout(hwnd), x, y));
+                LRESULT(0)
+            }
+            WM_MOUSELEAVE => {
+                update_close_hover(hwnd, false);
+                LRESULT(0)
+            }
+            // Body only. The header is non-client, and the × is `HitZone::Close`.
+            WM_LBUTTONDBLCLK => {
+                if double_click_action(hit_at_client(hwnd, lparam)) == DoubleClickAction::Open {
+                    open_current_file();
+                }
+                LRESULT(0)
+            }
+            // `CS_DBLCLKS` also turns a header double-click into this message.
+            // DefWindowProc would maximize. The header does not open the file.
+            WM_NCLBUTTONDBLCLK => LRESULT(0),
+            WM_SPACEPEEK_OPEN => {
+                open_current_file();
+                LRESULT(0)
+            }
             WM_ERASEBKGND => LRESULT(1),
             WM_PAINT => {
                 paint_preview(hwnd);
@@ -1031,6 +1092,8 @@ mod win {
                         app.preview_hwnd = HWND::default();
                         app.edit_hwnd = HWND::default();
                         app.presented = None;
+                        app.close_hovered = false;
+                        app.shown_path.clear();
                         publish_preview_hwnd(HWND::default());
                     }
                 });
@@ -1266,6 +1329,10 @@ mod win {
                 if cancel.is_cancelled(&gen) {
                     return;
                 }
+                let result = enrich_quick_info(&path, result, &cancel, gen);
+                if cancel.is_cancelled(&gen) {
+                    return;
+                }
                 post_load(HWND(hwnd_bits as *mut _), gen, result);
             });
         if spawned.is_err() {
@@ -1306,6 +1373,145 @@ mod win {
             }),
             other => other,
         }
+    }
+
+    /// Type, size, and modified time for "not supported" and "not text".
+    ///
+    /// Runs on the load thread. `metadata` and `SHGetFileInfoW` with
+    /// `SHGFI_USEFILEATTRIBUTES` do not read file contents. A cancel that lands
+    /// during the lookup drops the result instead of posting it.
+    fn enrich_quick_info(
+        path: &Path,
+        result: std::result::Result<Preview, PreviewError>,
+        cancel: &CancelToken,
+        gen: Generation,
+    ) -> std::result::Result<Preview, PreviewError> {
+        let Err(err) = result else {
+            return result;
+        };
+        if !err.wants_quick_info() {
+            return Err(err);
+        }
+        if cancel.is_cancelled(&gen) {
+            return Err(PreviewError::Cancelled);
+        }
+        let info = gather_quick_info(path, cancel, gen);
+        if cancel.is_cancelled(&gen) {
+            return Err(PreviewError::Cancelled);
+        }
+        Err(err.with_quick_info(info))
+    }
+
+    fn gather_quick_info(path: &Path, cancel: &CancelToken, gen: Generation) -> QuickInfo {
+        let mut info = QuickInfo {
+            type_name: path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(fallback_type_name),
+            ..QuickInfo::default()
+        };
+        if cancel.is_cancelled(&gen) {
+            return info;
+        }
+        if let Ok(meta) = std::fs::metadata(path) {
+            info.size_bytes = Some(meta.len());
+            if let Ok(modified) = meta.modified() {
+                info.modified = format_local_modified(modified);
+            }
+        }
+        if cancel.is_cancelled(&gen) {
+            return info;
+        }
+        if let Some(name) = shell_type_name(path) {
+            info.type_name = Some(name);
+        }
+        info
+    }
+
+    /// Windows type name from the extension. `SHGFI_USEFILEATTRIBUTES` keeps the
+    /// shell from opening the file or running a shell extension against it.
+    fn shell_type_name(path: &Path) -> Option<String> {
+        let wide = wide_path(path);
+        let mut info = SHFILEINFOW::default();
+        let flags = SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES;
+        let got = unsafe {
+            SHGetFileInfoW(
+                PCWSTR(wide.as_ptr()),
+                FILE_ATTRIBUTE_NORMAL,
+                Some(&mut info),
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                flags,
+            )
+        };
+        if got == 0 {
+            return None;
+        }
+        wide_to_text(&info.szTypeName)
+    }
+
+    fn format_local_modified(modified: std::time::SystemTime) -> Option<String> {
+        let file_time = system_time_to_filetime(modified)?;
+        let mut utc = SYSTEMTIME::default();
+        unsafe { FileTimeToSystemTime(&file_time, &mut utc).ok()? };
+        let mut local = SYSTEMTIME::default();
+        unsafe { SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()? };
+        let date = format_locale_date(&local);
+        let time = format_locale_time(&local);
+        match (date, time) {
+            (Some(date), Some(time)) => Some(format!("{date} {time}")),
+            (Some(date), None) => Some(date),
+            (None, Some(time)) => Some(time),
+            (None, None) => None,
+        }
+    }
+
+    fn format_locale_date(stamp: &SYSTEMTIME) -> Option<String> {
+        let mut buf = [0u16; 128];
+        let n = unsafe {
+            GetDateFormatEx(
+                PCWSTR::null(),
+                DATE_LONGDATE,
+                Some(stamp),
+                PCWSTR::null(),
+                Some(&mut buf),
+                PCWSTR::null(),
+            )
+        };
+        locale_text(&buf, n)
+    }
+
+    fn format_locale_time(stamp: &SYSTEMTIME) -> Option<String> {
+        let mut buf = [0u16; 128];
+        let n = unsafe {
+            GetTimeFormatEx(
+                PCWSTR::null(),
+                TIME_NOSECONDS,
+                Some(stamp),
+                PCWSTR::null(),
+                Some(&mut buf),
+            )
+        };
+        locale_text(&buf, n)
+    }
+
+    fn locale_text(buf: &[u16], written: i32) -> Option<String> {
+        let len = usize::try_from(written).ok()?.checked_sub(1)?;
+        if len == 0 {
+            return None;
+        }
+        wide_to_text(&buf[..len.min(buf.len())])
+    }
+
+    /// 100-nanosecond ticks since 1601-01-01 UTC. `None` before the Unix epoch.
+    fn system_time_to_filetime(time: std::time::SystemTime) -> Option<FILETIME> {
+        const HUNDRED_NS_TO_UNIX: u128 = 116_444_736_000_000_000;
+        let since_unix = time.duration_since(std::time::UNIX_EPOCH).ok()?;
+        let ticks = since_unix.as_nanos() / 100 + HUNDRED_NS_TO_UNIX;
+        let ticks = u64::try_from(ticks).ok()?;
+        Some(FILETIME {
+            dwLowDateTime: u32::try_from(ticks & 0xFFFF_FFFF).unwrap_or(0),
+            dwHighDateTime: u32::try_from(ticks >> 32).unwrap_or(0),
+        })
     }
 
     fn read_shortcut_target(path: &Path) -> Option<String> {
@@ -1483,6 +1689,7 @@ mod win {
             }
             set_text(hwnd, &title);
             invalidate_preview(hwnd);
+            remember_shown_path();
             true
         } else {
             if !install_body(existing, instance, &presented, fonts.edit) {
@@ -1494,8 +1701,53 @@ mod win {
             });
             publish_preview_hwnd(existing);
             invalidate_preview(existing);
+            remember_shown_path();
             true
         }
+    }
+
+    /// Path of the file whose contents are on screen. A reload that has not
+    /// finished still names the previous file.
+    fn remember_shown_path() {
+        let path = with_app(|app| match &app.state {
+            PreviewState::Showing { path, .. }
+            | PreviewState::Failed { path, .. }
+            | PreviewState::PendingShow { path, .. } => Some(path.clone()),
+            _ => None,
+        });
+        if let Some(path) = path {
+            with_app_mut(|app| app.shown_path = path);
+        }
+    }
+
+    /// Close through the state machine, then open `shown_path` with the shell
+    /// default verb. The path is taken first so a triple-click cannot open twice.
+    /// A failed open leaves the preview closed and shows no error UI.
+    fn open_current_file() {
+        let path = with_app_mut(|app| {
+            if app.shown_path.as_os_str().is_empty() {
+                None
+            } else {
+                Some(std::mem::take(&mut app.shown_path))
+            }
+        });
+        let Some(path) = path else {
+            return;
+        };
+        dispatch(Event::EscPressed);
+        shell_open(&path);
+    }
+
+    fn shell_open(path: &Path) {
+        let wide = wide_path(path);
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_FLAG_NO_UI,
+            lpFile: PCWSTR(wide.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        let _ = unsafe { ShellExecuteExW(&mut info) };
     }
 
     fn presented_from(state: &PreviewState) -> Option<Presented> {
@@ -1676,6 +1928,8 @@ mod win {
             app.preview_hwnd = HWND::default();
             app.edit_hwnd = HWND::default();
             app.presented = None;
+            app.close_hovered = false;
+            app.shown_path.clear();
             publish_preview_hwnd(HWND::default());
         });
         EDIT_PROC.store(0, Ordering::Release);
@@ -1750,9 +2004,23 @@ mod win {
         // Client clicks would focus the edit and show a caret. Scrollbar clicks
         // are non-client and still reach the original procedure.
         match msg {
-            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP
-            | WM_RBUTTONDBLCLK | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MBUTTONDBLCLK | WM_KEYDOWN
-            | WM_KEYUP | WM_CHAR | WM_SYSKEYDOWN | WM_SYSKEYUP => LRESULT(0),
+            // The edit covers only the body. A double-click opens the file
+            // instead of selecting a word. Posted so this procedure returns
+            // before the preview window is destroyed. The original procedure
+            // is not called, so the word-select does not run.
+            WM_LBUTTONDBLCLK => {
+                if double_click_action(HitZone::Client) == DoubleClickAction::Open {
+                    if let Ok(parent) = GetParent(hwnd) {
+                        if !parent.0.is_null() {
+                            let _ = PostMessageW(parent, WM_SPACEPEEK_OPEN, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_RBUTTONDBLCLK
+            | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MBUTTONDBLCLK | WM_KEYDOWN | WM_KEYUP
+            | WM_CHAR | WM_SYSKEYDOWN | WM_SYSKEYUP => LRESULT(0),
             WM_SETFOCUS => {
                 let result = call_edit_proc(hwnd, msg, wparam, lparam);
                 let _ = HideCaret(hwnd);
@@ -1907,18 +2175,83 @@ mod win {
     }
 
     fn hit_at_screen(hwnd: HWND, lparam: LPARAM) -> HitZone {
-        let (x, y) = lparam_xy(lparam.0 as usize);
-        let mut window = RECT::default();
-        if unsafe { GetWindowRect(hwnd, &mut window).is_err() } {
-            return HitZone::Client;
-        }
-        hit_test(window_layout(hwnd), x - window.left, y - window.top)
+        let (x, y) = screen_point_in_window(hwnd, lparam);
+        hit_test(window_layout(hwnd), x, y)
     }
 
     fn hit_at_client(hwnd: HWND, lparam: LPARAM) -> HitZone {
+        let (x, y) = client_point_in_window(hwnd, lparam);
+        hit_test(window_layout(hwnd), x, y)
+    }
+
+    /// `WM_NCHITTEST` / `WM_NCMOUSEMOVE` points are screen pixels.
+    fn screen_point_in_window(hwnd: HWND, lparam: LPARAM) -> (i32, i32) {
+        let (x, y) = lparam_xy(lparam.0 as usize);
+        let mut window = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut window).is_err() } {
+            return (0, 0);
+        }
+        (x - window.left, y - window.top)
+    }
+
+    /// Client mouse messages are relative to the client origin. [`hit_test`]
+    /// and [`pointer_over_close`] want outer-window pixels.
+    fn client_point_in_window(hwnd: HWND, lparam: LPARAM) -> (i32, i32) {
         let (x, y) = lparam_xy(lparam.0 as usize);
         let layout = window_layout(hwnd);
-        hit_test(layout, x + layout.frame_left, y + layout.frame_top)
+        (x + layout.frame_left, y + layout.frame_top)
+    }
+
+    fn update_close_hover(hwnd: HWND, hovered: bool) {
+        let changed = with_app_mut(|app| {
+            if app.close_hovered == hovered {
+                false
+            } else {
+                app.close_hovered = hovered;
+                true
+            }
+        });
+        if changed {
+            invalidate_close_button(hwnd);
+        }
+    }
+
+    fn track_client_leave(hwnd: HWND) {
+        let mut event = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        let _ = unsafe { TrackMouseEvent(&mut event) };
+    }
+
+    fn invalidate_close_button(hwnd: HWND) {
+        let Some(rect) = close_button_client_rect(hwnd) else {
+            return;
+        };
+        unsafe {
+            let _ = InvalidateRect(hwnd, Some(&rect), false);
+        }
+    }
+
+    fn close_button_client_rect(hwnd: HWND) -> Option<RECT> {
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(hwnd, &mut client).is_err() } {
+            return None;
+        }
+        let width = client.right.saturating_sub(client.left);
+        let height = client.bottom.saturating_sub(client.top);
+        let dpi = dpi_for_anchor(hwnd);
+        let header = scaled_header_height(dpi).clamp(0, height);
+        let close = scaled_close_width(dpi);
+        let bounds = close_button_bounds(width, header, close)?;
+        Some(RECT {
+            left: bounds.left,
+            top: bounds.top,
+            right: bounds.right,
+            bottom: bounds.bottom,
+        })
     }
 
     fn window_layout(hwnd: HWND) -> ChromeLayout {
@@ -2057,6 +2390,7 @@ mod win {
         image: Option<std::sync::Arc<DecodedImage>>,
         header_font: HFONT,
         detail_font: HFONT,
+        close_hovered: bool,
     }
 
     fn paint_preview(hwnd: HWND) {
@@ -2071,6 +2405,7 @@ mod win {
                 },
                 header_font: app.header_font,
                 detail_font: app.detail_font,
+                close_hovered: app.close_hovered,
             })
         });
         let mut ps = PAINTSTRUCT::default();
@@ -2121,6 +2456,18 @@ mod win {
             fill_rect(dc, &body, rgb(255, 255, 255));
         }
         let text_right = (width - close_w).max(pad);
+        if snap.close_hovered {
+            paint_close_hover(
+                dc,
+                RECT {
+                    left: width - close_w,
+                    top: 0,
+                    right: width,
+                    bottom: header_h,
+                },
+                dpi,
+            );
+        }
         let mid = header_h / 2;
         let single = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX;
         draw_text(
@@ -2338,6 +2685,57 @@ mod win {
             if !previous.is_invalid() {
                 let _ = SelectObject(dc, previous);
             }
+        }
+    }
+
+    /// Light grey pill behind the ×. Darker than the header (`243`) and not
+    /// the Windows red close button.
+    fn paint_close_hover(dc: HDC, button: RECT, dpi: u32) {
+        let inset = spacepeek::geometry::scale_for_dpi(4, dpi).max(1);
+        let rect = RECT {
+            left: button.left.saturating_add(inset),
+            top: button.top.saturating_add(inset),
+            right: button.right.saturating_sub(inset),
+            bottom: button.bottom.saturating_sub(inset),
+        };
+        let radius = spacepeek::geometry::scale_for_dpi(6, dpi).max(1);
+        fill_round_rect(dc, &rect, radius.saturating_mul(2), rgb(220, 220, 220));
+    }
+
+    fn fill_round_rect(dc: HDC, rect: &RECT, ellipse: i32, color: COLORREF) {
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return;
+        }
+        let ellipse = ellipse.max(1);
+        unsafe {
+            let brush = CreateSolidBrush(color);
+            if brush.is_invalid() {
+                return;
+            }
+            let pen = CreatePen(PS_SOLID, 1, color);
+            if pen.is_invalid() {
+                let _ = DeleteObject(brush);
+                return;
+            }
+            let old_brush = SelectObject(dc, brush);
+            let old_pen = SelectObject(dc, pen);
+            let _ = RoundRect(
+                dc,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                ellipse,
+                ellipse,
+            );
+            if !old_brush.is_invalid() {
+                let _ = SelectObject(dc, old_brush);
+            }
+            if !old_pen.is_invalid() {
+                let _ = SelectObject(dc, old_pen);
+            }
+            let _ = DeleteObject(brush);
+            let _ = DeleteObject(pen);
         }
     }
 
@@ -2652,13 +3050,17 @@ mod win {
         path_from_wide(bstr.as_wide())
     }
 
-    fn register_class(instance: HINSTANCE, name: &str) -> windows::core::Result<()> {
+    fn register_class(
+        instance: HINSTANCE,
+        name: &str,
+        style: WNDCLASS_STYLES,
+    ) -> windows::core::Result<()> {
         let wide = utf16(name);
         unsafe {
             let cursor = LoadCursorW(HINSTANCE::default(), IDC_ARROW)?;
             let brush = GetSysColorBrush(COLOR_WINDOW);
             let class = WNDCLASSW {
-                style: CS_HREDRAW | CS_VREDRAW,
+                style,
                 lpfnWndProc: Some(wndproc),
                 cbClsExtra: 0,
                 cbWndExtra: 0,
