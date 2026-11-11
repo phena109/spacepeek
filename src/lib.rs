@@ -14,9 +14,10 @@ pub mod selection;
 pub mod state;
 
 pub use chrome::{
-    chrome_for_error, chrome_for_text, hit_test, min_physical_size, scaled_close_width,
-    scaled_detail_font, scaled_header_font, scaled_header_height, scaled_header_pad, ChromeLayout,
-    HeaderText, HitZone, LogicalSize, Presented, SizeMemory, WindowKind,
+    chrome_for_error, chrome_for_text, close_button_bounds, hit_test, min_physical_size,
+    pointer_over_close, scaled_close_width, scaled_detail_font, scaled_header_font,
+    scaled_header_height, scaled_header_pad, ChromeLayout, HeaderText, HitZone, LogicalSize,
+    Presented, SizeMemory, WindowKind,
 };
 pub use cli::{parse_command, Command};
 pub use geometry::{

@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::geometry::{
-    effective_dpi, muldiv, scale_for_dpi, PxSize, BASE_DPI, LOGICAL_PREVIEW_HEIGHT,
+    effective_dpi, muldiv, scale_for_dpi, PxRect, PxSize, BASE_DPI, LOGICAL_PREVIEW_HEIGHT,
     LOGICAL_PREVIEW_WIDTH,
 };
 use crate::image_preview::{format_image_details, DecodedImage};
@@ -286,6 +286,32 @@ impl Default for SizeMemory {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Client-area rectangle of the × button.
+///
+/// `None` when the button has no pixels. The origin is the client origin,
+/// so this is the rect to invalidate — not an outer-window [`hit_test`] point.
+pub fn close_button_bounds(
+    client_width: i32,
+    header_height: i32,
+    close_width: i32,
+) -> Option<PxRect> {
+    if client_width <= 0 || header_height <= 0 || close_width <= 0 {
+        return None;
+    }
+    let width = close_width.min(client_width);
+    Some(PxRect {
+        left: client_width.saturating_sub(width),
+        top: 0,
+        right: client_width,
+        bottom: header_height,
+    })
+}
+
+/// True when `(x, y)`, in outer-window pixels, is on the × button.
+pub fn pointer_over_close(layout: ChromeLayout, x: i32, y: i32) -> bool {
+    hit_test(layout, x, y) == HitZone::Close
 }
 
 /// Where a point in outer-window coordinates lands.
@@ -722,5 +748,56 @@ mod tests {
         assert_eq!(scaled_header_font(120), 20);
         assert_eq!(scaled_detail_font(120), 16);
         assert_eq!(scaled_header_pad(96), LOGICAL_HEADER_PAD_X);
+    }
+
+    #[test]
+    fn pointer_over_close_is_only_the_button() {
+        let layout = sample_layout();
+        // Same points as `hit_test_regions`: close starts at window x = 748.
+        assert!(pointer_over_close(layout, 748, 30));
+        assert!(pointer_over_close(layout, 780, 60));
+        assert!(!pointer_over_close(layout, 747, 30));
+        assert!(!pointer_over_close(layout, 100, 30));
+        assert!(!pointer_over_close(layout, 400, 300));
+        assert!(!pointer_over_close(layout, 100, 8 + 56));
+        // The frame wins, including the strip beside the ×.
+        assert!(!pointer_over_close(layout, 793, 30));
+        assert!(!pointer_over_close(layout, 3, 30));
+        assert!(!pointer_over_close(layout, 100, 4));
+        assert!(!pointer_over_close(
+            ChromeLayout {
+                width: 0,
+                height: 10,
+                ..layout
+            },
+            0,
+            0
+        ));
+    }
+
+    #[test]
+    fn close_button_bounds_follow_the_client_edge() {
+        assert_eq!(
+            close_button_bounds(784, 56, 44),
+            Some(PxRect {
+                left: 740,
+                top: 0,
+                right: 784,
+                bottom: 56,
+            })
+        );
+        assert_eq!(
+            close_button_bounds(20, 56, 44),
+            Some(PxRect {
+                left: 0,
+                top: 0,
+                right: 20,
+                bottom: 56,
+            })
+        );
+        assert_eq!(close_button_bounds(0, 56, 44), None);
+        assert_eq!(close_button_bounds(100, 0, 44), None);
+        assert_eq!(close_button_bounds(100, 56, 0), None);
+        assert_eq!(close_button_bounds(-1, 56, 44), None);
     }
 }

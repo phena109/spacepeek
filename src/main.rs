@@ -42,16 +42,17 @@ mod win {
     };
 
     use spacepeek::{
-        choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk, decide_hook_key,
-        effective_dpi, gate_show, hit_test, hook_key_from_vk, image_dest_rect, load_text_preview,
-        min_physical_size, nav_reload_remaining, nonempty_path, parse_command, place_preview,
-        scaled_close_width, scaled_detail_font, scaled_font_height, scaled_header_font,
-        scaled_header_height, scaled_header_pad, session_phase, step, typeahead_window_ms,
-        wheel_scroll_dy, CancelToken, ChromeLayout, Command, DecodedImage, Effect, Event,
-        Generation, HitZone, HookContext, HookDecision, HookKey, KeyPhase, Modifiers, NavKey,
-        Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, RepeatFilter,
-        ScrollHold, ScrollOp, SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey,
-        Typeahead, TypeaheadKey, WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
+        choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk,
+        close_button_bounds, decide_hook_key, effective_dpi, gate_show, hit_test, hook_key_from_vk,
+        image_dest_rect, load_text_preview, min_physical_size, nav_reload_remaining, nonempty_path,
+        parse_command, place_preview, pointer_over_close, scaled_close_width, scaled_detail_font,
+        scaled_font_height, scaled_header_font, scaled_header_height, scaled_header_pad,
+        session_phase, step, typeahead_window_ms, wheel_scroll_dy, CancelToken, ChromeLayout,
+        Command, DecodedImage, Effect, Event, Generation, HitZone, HookContext, HookDecision,
+        HookKey, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits,
+        PreviewState, PxRect, RepeatFilter, ScrollHold, ScrollOp, SessionPhase, ShowGate,
+        ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind,
+        NAV_RELOAD_DELAY_MS, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -59,15 +60,15 @@ mod win {
         E_FAIL, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
-        BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
-        EndPaint, ExcludeClipRect, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush,
-        GetTextFaceW, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC, SaveDC,
+        BeginPaint, ClientToScreen, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject,
+        DrawTextW, EndPaint, ExcludeClipRect, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush,
+        GetTextFaceW, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC, RoundRect, SaveDC,
         SelectObject, SetBkMode, SetBrushOrgEx, SetStretchBltMode, SetTextColor, StretchDIBits,
         BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET,
         DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
         DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL,
         FW_SEMIBOLD, HALFTONE, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        PAINTSTRUCT, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
+        PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
     };
     use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
     use windows::Win32::System::Com::{
@@ -86,8 +87,9 @@ mod win {
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, SetFocus, VIRTUAL_KEY,
-        VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+        GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, SetFocus, TrackMouseEvent,
+        TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN,
+        VK_SHIFT,
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
@@ -119,11 +121,12 @@ mod win {
         WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CHAR,
         WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE,
         WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEWHEEL,
-        WM_NCHITTEST, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
-        WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER,
-        WM_VSCROLL, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
+        WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+        WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCMOUSEMOVE, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK,
+        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE,
+        WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -141,6 +144,8 @@ mod win {
     const EM_SETLIMITTEXT: u32 = 0x00C5;
     /// `EM_LINESCROLL`. Kept local so the edit control does not need the Controls feature.
     const EM_LINESCROLL: u32 = 0x00B6;
+    /// `WM_MOUSELEAVE`. Kept local so the preview does not need the Controls feature.
+    const WM_MOUSELEAVE: u32 = 0x02A3;
     const NAV_TIMER_ID: usize = 1;
     const WATCH_TIMER_ID: usize = 2;
     /// Backup for a missed foreground event while a session is open.
@@ -188,6 +193,9 @@ mod win {
         last_nav_tick: Option<u32>,
         /// `selected_path` pumps the STA. Ignore a nested navigation read.
         nav_busy: bool,
+        /// Pointer is inside the × hit-test area. Paint uses this; only a change
+        /// invalidates, and only the button rect.
+        close_hovered: bool,
     }
 
     static APP: AtomicPtr<RefCell<App>> = AtomicPtr::new(std::ptr::null_mut());
@@ -273,6 +281,7 @@ mod win {
             input_baseline: 0,
             last_nav_tick: None,
             nav_busy: false,
+            close_hovered: false,
         })));
         APP.store(app, Ordering::Release);
 
@@ -987,6 +996,24 @@ mod win {
                 }
                 LRESULT(0)
             }
+            // The × is client area (`HTCLIENT`). The rest of the header is
+            // `HTCAPTION`, so leaving the button is either another client move
+            // or a non-client move. `TME_LEAVE` covers the window edge.
+            WM_MOUSEMOVE => {
+                let (x, y) = client_point_in_window(hwnd, lparam);
+                update_close_hover(hwnd, pointer_over_close(window_layout(hwnd), x, y));
+                track_client_leave(hwnd);
+                LRESULT(0)
+            }
+            WM_NCMOUSEMOVE => {
+                let (x, y) = screen_point_in_window(hwnd, lparam);
+                update_close_hover(hwnd, pointer_over_close(window_layout(hwnd), x, y));
+                LRESULT(0)
+            }
+            WM_MOUSELEAVE => {
+                update_close_hover(hwnd, false);
+                LRESULT(0)
+            }
             WM_ERASEBKGND => LRESULT(1),
             WM_PAINT => {
                 paint_preview(hwnd);
@@ -1031,6 +1058,7 @@ mod win {
                         app.preview_hwnd = HWND::default();
                         app.edit_hwnd = HWND::default();
                         app.presented = None;
+                        app.close_hovered = false;
                         publish_preview_hwnd(HWND::default());
                     }
                 });
@@ -1676,6 +1704,7 @@ mod win {
             app.preview_hwnd = HWND::default();
             app.edit_hwnd = HWND::default();
             app.presented = None;
+            app.close_hovered = false;
             publish_preview_hwnd(HWND::default());
         });
         EDIT_PROC.store(0, Ordering::Release);
@@ -1907,18 +1936,83 @@ mod win {
     }
 
     fn hit_at_screen(hwnd: HWND, lparam: LPARAM) -> HitZone {
-        let (x, y) = lparam_xy(lparam.0 as usize);
-        let mut window = RECT::default();
-        if unsafe { GetWindowRect(hwnd, &mut window).is_err() } {
-            return HitZone::Client;
-        }
-        hit_test(window_layout(hwnd), x - window.left, y - window.top)
+        let (x, y) = screen_point_in_window(hwnd, lparam);
+        hit_test(window_layout(hwnd), x, y)
     }
 
     fn hit_at_client(hwnd: HWND, lparam: LPARAM) -> HitZone {
+        let (x, y) = client_point_in_window(hwnd, lparam);
+        hit_test(window_layout(hwnd), x, y)
+    }
+
+    /// `WM_NCHITTEST` / `WM_NCMOUSEMOVE` points are screen pixels.
+    fn screen_point_in_window(hwnd: HWND, lparam: LPARAM) -> (i32, i32) {
+        let (x, y) = lparam_xy(lparam.0 as usize);
+        let mut window = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut window).is_err() } {
+            return (0, 0);
+        }
+        (x - window.left, y - window.top)
+    }
+
+    /// Client mouse messages are relative to the client origin. [`hit_test`]
+    /// and [`pointer_over_close`] want outer-window pixels.
+    fn client_point_in_window(hwnd: HWND, lparam: LPARAM) -> (i32, i32) {
         let (x, y) = lparam_xy(lparam.0 as usize);
         let layout = window_layout(hwnd);
-        hit_test(layout, x + layout.frame_left, y + layout.frame_top)
+        (x + layout.frame_left, y + layout.frame_top)
+    }
+
+    fn update_close_hover(hwnd: HWND, hovered: bool) {
+        let changed = with_app_mut(|app| {
+            if app.close_hovered == hovered {
+                false
+            } else {
+                app.close_hovered = hovered;
+                true
+            }
+        });
+        if changed {
+            invalidate_close_button(hwnd);
+        }
+    }
+
+    fn track_client_leave(hwnd: HWND) {
+        let mut event = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        let _ = unsafe { TrackMouseEvent(&mut event) };
+    }
+
+    fn invalidate_close_button(hwnd: HWND) {
+        let Some(rect) = close_button_client_rect(hwnd) else {
+            return;
+        };
+        unsafe {
+            let _ = InvalidateRect(hwnd, Some(&rect), false);
+        }
+    }
+
+    fn close_button_client_rect(hwnd: HWND) -> Option<RECT> {
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(hwnd, &mut client).is_err() } {
+            return None;
+        }
+        let width = client.right.saturating_sub(client.left);
+        let height = client.bottom.saturating_sub(client.top);
+        let dpi = dpi_for_anchor(hwnd);
+        let header = scaled_header_height(dpi).clamp(0, height);
+        let close = scaled_close_width(dpi);
+        let bounds = close_button_bounds(width, header, close)?;
+        Some(RECT {
+            left: bounds.left,
+            top: bounds.top,
+            right: bounds.right,
+            bottom: bounds.bottom,
+        })
     }
 
     fn window_layout(hwnd: HWND) -> ChromeLayout {
@@ -2057,6 +2151,7 @@ mod win {
         image: Option<std::sync::Arc<DecodedImage>>,
         header_font: HFONT,
         detail_font: HFONT,
+        close_hovered: bool,
     }
 
     fn paint_preview(hwnd: HWND) {
@@ -2071,6 +2166,7 @@ mod win {
                 },
                 header_font: app.header_font,
                 detail_font: app.detail_font,
+                close_hovered: app.close_hovered,
             })
         });
         let mut ps = PAINTSTRUCT::default();
@@ -2121,6 +2217,18 @@ mod win {
             fill_rect(dc, &body, rgb(255, 255, 255));
         }
         let text_right = (width - close_w).max(pad);
+        if snap.close_hovered {
+            paint_close_hover(
+                dc,
+                RECT {
+                    left: width - close_w,
+                    top: 0,
+                    right: width,
+                    bottom: header_h,
+                },
+                dpi,
+            );
+        }
         let mid = header_h / 2;
         let single = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX;
         draw_text(
@@ -2338,6 +2446,57 @@ mod win {
             if !previous.is_invalid() {
                 let _ = SelectObject(dc, previous);
             }
+        }
+    }
+
+    /// Light grey pill behind the ×. Darker than the header (`243`) and not
+    /// the Windows red close button.
+    fn paint_close_hover(dc: HDC, button: RECT, dpi: u32) {
+        let inset = spacepeek::geometry::scale_for_dpi(4, dpi).max(1);
+        let rect = RECT {
+            left: button.left.saturating_add(inset),
+            top: button.top.saturating_add(inset),
+            right: button.right.saturating_sub(inset),
+            bottom: button.bottom.saturating_sub(inset),
+        };
+        let radius = spacepeek::geometry::scale_for_dpi(6, dpi).max(1);
+        fill_round_rect(dc, &rect, radius.saturating_mul(2), rgb(220, 220, 220));
+    }
+
+    fn fill_round_rect(dc: HDC, rect: &RECT, ellipse: i32, color: COLORREF) {
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return;
+        }
+        let ellipse = ellipse.max(1);
+        unsafe {
+            let brush = CreateSolidBrush(color);
+            if brush.is_invalid() {
+                return;
+            }
+            let pen = CreatePen(PS_SOLID, 1, color);
+            if pen.is_invalid() {
+                let _ = DeleteObject(brush);
+                return;
+            }
+            let old_brush = SelectObject(dc, brush);
+            let old_pen = SelectObject(dc, pen);
+            let _ = RoundRect(
+                dc,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                ellipse,
+                ellipse,
+            );
+            if !old_brush.is_invalid() {
+                let _ = SelectObject(dc, old_brush);
+            }
+            if !old_pen.is_invalid() {
+                let _ = SelectObject(dc, old_pen);
+            }
+            let _ = DeleteObject(brush);
+            let _ = DeleteObject(pen);
         }
     }
 

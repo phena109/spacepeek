@@ -4,13 +4,13 @@ Space-bar file preview for Windows Explorer. Select a file, press Space, and a s
 
 Text is drawn in a monospace font (Cascadia Mono, then Consolas) with word wrap off and a horizontal scrollbar, so columns and indentation stay aligned. Each line sent to the preview is capped at 2,000 characters. The preview loads at most the first 64 KiB. When that is not the whole file, or when lines were shortened, a notice at the top of the text says what is shown (for example `Showing the first 64 KB of 1.2 MB`). The header repeats that state in short form, such as `12 KB · 2,000 lines (truncated)`.
 
-A slim header shows the file name and that details line. Drag the header to move the window. Drag the edges to resize it. The last size you set is reused for the next preview until Spacepeek exits. The size is stored in logical pixels and scaled for the monitor's DPI. The smallest size is 320×200 logical pixels. Error and empty-file windows start smaller (480×240 logical) until you resize.
+A slim header shows the file name and that details line. Drag the header to move the window. Drag the edges to resize it. The last size you set is reused for the next preview until Spacepeek exits. The size is stored in logical pixels and scaled for the monitor's DPI. The smallest size is 320×200 logical pixels. Error and empty-file windows start smaller (480×240 logical) until you resize. The × button picks up a light grey background while the pointer is over it.
 
 ## Status
 
 First runnable vertical slice.
 
-The preview core (bounded reads, character-boundary truncation, binary sniffing, a deny-list of known binary and image extensions, cancellation, state machine, keyboard rules, header text, hit testing, remembered window size, and the sentences shown for errors and empty files) is implemented and unit-tested. The Windows runtime is wired: single-instance mutex, low-level keyboard hook, Explorer selection lookup, and one non-activating `SpacepeekPreview` window. Every UI transition goes through `state::step`.
+The preview core (bounded reads, character-boundary truncation, binary sniffing, a deny-list of known binary and image extensions, cancellation, state machine, keyboard rules, header text, hit testing, close-button hover, remembered window size, and the sentences shown for errors and empty files) is implemented and unit-tested. The Windows runtime is wired: single-instance mutex, low-level keyboard hook, Explorer selection lookup, and one non-activating `SpacepeekPreview` window. Every UI transition goes through `state::step`.
 
 Compile-checked for the Windows targets below on a Linux host. **Never executed on Windows.** No timings are claimed.
 
@@ -47,7 +47,7 @@ On Linux and macOS the binary prints `Spacepeek runs on Windows only` and exits 
 
 1. Build and start `spacepeek.exe`.
 2. Open File Explorer and select a text file. The extension does not decide this: `.txt`, source code, `Makefile`, `Dockerfile`, `LICENSE`, and `.gitignore` all preview when the bytes look like text.
-3. Press Space. A preview window should open over that Explorer window with the file name in the header and the file text in a monospace font. Explorer keeps the keyboard focus, and the preview text has no caret. Drag the header to move the window, drag an edge to resize it, or click × to close it. A long file shows a truncation notice at the top of the text and `(truncated)` in the header. Clicking or dragging the header should not leave a caret in the preview or take the keyboard away from Explorer for good.
+3. Press Space. A preview window should open over that Explorer window with the file name in the header and the file text in a monospace font. Explorer keeps the keyboard focus, and the preview text has no caret. Drag the header to move the window, drag an edge to resize it, or click × to close it. Moving the pointer over × turns that button a light grey; moving it away clears the grey. A long file shows a truncation notice at the top of the text and `(truncated)` in the header. Clicking or dragging the header should not leave a caret in the preview or take the keyboard away from Explorer for good.
 4. Press Space or Esc. The window closes. Explorer still has the focus. Press Space again. The preview opens without clicking the file list first.
 5. Press F2 to rename, then type a space. The space is inserted into the rename edit.
 6. Click the address bar and press Space. The space is typed there.
