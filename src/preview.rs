@@ -130,12 +130,8 @@ impl PartialEq for PreviewError {
                 a.kind() == b.kind() && a.to_string() == b.to_string()
             }
             (
-                PreviewError::Denied {
-                    kind: a, info: ia, ..
-                },
-                PreviewError::Denied {
-                    kind: b, info: ib, ..
-                },
+                PreviewError::Denied { kind: a, info: ia },
+                PreviewError::Denied { kind: b, info: ib },
             ) => a == b && ia == ib,
             (PreviewError::Directory { count: a }, PreviewError::Directory { count: b }) => a == b,
             (PreviewError::Shortcut { target: a }, PreviewError::Shortcut { target: b }) => a == b,
@@ -1835,17 +1831,17 @@ mod tests {
     #[test]
     fn user_message_covers_each_error_kind() {
         assert_eq!(
-            PreviewError::Binary.user_message("notes.md"),
+            PreviewError::binary().user_message("notes.md"),
             "notes.md doesn't look like text"
         );
         assert_eq!(
-            PreviewError::Binary.user_message("ノート.md"),
+            PreviewError::binary().user_message("ノート.md"),
             "ノート.md doesn't look like text"
         );
-        assert_eq!(PreviewError::Binary.to_string(), "file looks binary");
-        assert_eq!(PreviewError::Binary.header_status(), "Not text");
+        assert_eq!(PreviewError::binary().to_string(), "file looks binary");
+        assert_eq!(PreviewError::binary().header_status(), "Not text");
 
-        let image = PreviewError::Denied(DeniedKind::Image);
+        let image = PreviewError::denied(DeniedKind::Image);
         assert_eq!(
             image.user_message("photo.png"),
             "photo.png can't be previewed — this file type isn't supported yet"
@@ -1857,7 +1853,7 @@ mod tests {
         assert_eq!(image.to_string(), "image file");
         assert_eq!(image.header_status(), "Not supported");
 
-        let binary = PreviewError::Denied(DeniedKind::Binary);
+        let binary = PreviewError::denied(DeniedKind::Binary);
         assert_eq!(
             binary.user_message("archive.zip"),
             "archive.zip can't be previewed — this file type isn't supported yet"
@@ -1974,6 +1970,76 @@ mod tests {
         assert_eq!(damaged.header_status(), ImageError::Corrupt.header_status());
         assert_eq!(damaged.to_string(), "corrupt image");
         assert_ne!(damaged, PreviewError::Image(ImageError::Unsupported));
+    }
+
+    #[test]
+    fn quick_info_formats_size_and_omits_missing_fields() {
+        assert_eq!(format_size_line(0), "0 B (0 bytes)");
+        assert_eq!(format_size_line(1), "1 B (1 byte)");
+        assert_eq!(format_size_line(1536), "1.5 KB (1,536 bytes)");
+        assert_eq!(
+            format_size_line(1_234_567),
+            "1.2 MB (1,234,567 bytes)"
+        );
+        assert_eq!(fallback_type_name("zip"), Some("ZIP file".to_string()));
+        assert_eq!(fallback_type_name(".Zip"), Some("ZIP file".to_string()));
+        assert_eq!(fallback_type_name("7z"), Some("7Z file".to_string()));
+        assert_eq!(fallback_type_name(""), None);
+        assert_eq!(fallback_type_name("   "), None);
+        assert_eq!(fallback_type_name("."), None);
+
+        let full = QuickInfo {
+            type_name: Some("Compressed (zipped) Folder".to_string()),
+            size_bytes: Some(1_234_567),
+            modified: Some("12 November 2026 15:04".to_string()),
+        };
+        assert_eq!(
+            format_quick_info(&full),
+            "Type: Compressed (zipped) Folder\r\nSize: 1.2 MB (1,234,567 bytes)\r\nModified: 12 November 2026 15:04"
+        );
+        assert_eq!(
+            message_with_quick_info(
+                "archive.zip can't be previewed — this file type isn't supported yet",
+                &full
+            ),
+            "archive.zip can't be previewed — this file type isn't supported yet\r\n\r\nType: Compressed (zipped) Folder\r\nSize: 1.2 MB (1,234,567 bytes)\r\nModified: 12 November 2026 15:04"
+        );
+
+        let size_only = QuickInfo {
+            type_name: None,
+            size_bytes: Some(1),
+            modified: None,
+        };
+        assert_eq!(format_quick_info(&size_only), "Size: 1 B (1 byte)");
+        let type_only = QuickInfo {
+            type_name: Some("  ZIP file  ".to_string()),
+            size_bytes: None,
+            modified: Some("   ".to_string()),
+        };
+        assert_eq!(format_quick_info(&type_only), "Type: ZIP file");
+        assert_eq!(format_quick_info(&QuickInfo::default()), "");
+        assert_eq!(
+            message_with_quick_info("notes.md doesn't look like text", &QuickInfo::default()),
+            "notes.md doesn't look like text"
+        );
+
+        let denied = PreviewError::denied(DeniedKind::Binary).with_quick_info(size_only);
+        assert!(denied.wants_quick_info());
+        assert_eq!(
+            denied.quick_info().and_then(|info| info.size_bytes),
+            Some(1)
+        );
+        let io = PreviewError::Io(std::io::Error::from_raw_os_error(5));
+        assert!(!io.wants_quick_info());
+        assert!(io.quick_info().is_none());
+        assert!(matches!(io.with_quick_info(full), PreviewError::Io(_)));
+        assert!(PreviewError::binary().wants_quick_info());
+        assert!(PreviewError::denied(DeniedKind::Image).wants_quick_info());
+        assert!(PreviewError::binary()
+            .quick_info()
+            .unwrap()
+            .size_bytes
+            .is_none());
     }
 
     fn rgba_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {

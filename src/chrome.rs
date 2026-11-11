@@ -11,7 +11,10 @@ use crate::geometry::{
     LOGICAL_PREVIEW_WIDTH,
 };
 use crate::image_preview::{format_image_details, DecodedImage};
-use crate::preview::{format_compact_size, format_grouped, preview_text, Preview, PreviewError};
+use crate::preview::{
+    format_compact_size, format_grouped, message_with_quick_info, preview_text, Preview,
+    PreviewError,
+};
 
 /// Logical height of the header strip at 96 DPI.
 pub const LOGICAL_HEADER_HEIGHT: i32 = 52;
@@ -28,8 +31,11 @@ pub const MIN_LOGICAL_WIDTH: i32 = 320;
 /// Smallest outer height the user can drag to, in logical pixels.
 pub const MIN_LOGICAL_HEIGHT: i32 = 200;
 /// Outer size of a message window before the user resizes, in logical pixels.
+///
+/// Tall enough for an unsupported-file sentence plus the Type, Size, and
+/// Modified lines. Empty-file windows use the same default.
 pub const MESSAGE_LOGICAL_WIDTH: i32 = 480;
-pub const MESSAGE_LOGICAL_HEIGHT: i32 = 240;
+pub const MESSAGE_LOGICAL_HEIGHT: i32 = 320;
 
 /// Outer window size in logical (96 DPI) pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,12 +163,16 @@ pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
 
 pub fn chrome_for_error(path: &Path, error: &PreviewError) -> Presented {
     let name = path_label(path);
+    let mut message = error.user_message(&name);
+    if let Some(info) = error.quick_info() {
+        message = message_with_quick_info(&message, info);
+    }
     Presented::Message {
         header: HeaderText {
             name: name.clone(),
             details: error.header_status(),
         },
-        message: error.user_message(&name),
+        message,
     }
 }
 
@@ -598,6 +608,51 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_message_lists_quick_info_under_the_sentence() {
+        use crate::preview::{DeniedKind, QuickInfo};
+
+        let presented = chrome_for_error(
+            Path::new("archive.zip"),
+            &PreviewError::denied(DeniedKind::Binary).with_quick_info(QuickInfo {
+                type_name: Some("Compressed (zipped) Folder".to_string()),
+                size_bytes: Some(1_234_567),
+                modified: Some("12 November 2026 15:04".to_string()),
+            }),
+        );
+        assert_eq!(presented.header().details, "Not supported");
+        assert_eq!(
+            presented.message(),
+            Some(
+                "archive.zip can't be previewed — this file type isn't supported yet\r\n\r\nType: Compressed (zipped) Folder\r\nSize: 1.2 MB (1,234,567 bytes)\r\nModified: 12 November 2026 15:04"
+            )
+        );
+
+        let text = chrome_for_error(
+            Path::new("notes.md"),
+            &PreviewError::binary().with_quick_info(QuickInfo {
+                type_name: None,
+                size_bytes: Some(512),
+                modified: None,
+            }),
+        );
+        assert_eq!(text.header().details, "Not text");
+        assert_eq!(
+            text.message(),
+            Some("notes.md doesn't look like text\r\n\r\nSize: 512 B (512 bytes)")
+        );
+
+        // Access denied is an error, not an unsupported type. No quick info.
+        let denied = chrome_for_error(
+            Path::new("secret.txt"),
+            &PreviewError::Io(std::io::Error::from_raw_os_error(5)),
+        );
+        assert_eq!(
+            denied.message(),
+            Some("Access to secret.txt was denied")
+        );
+    }
+
+    #[test]
     fn hit_test_regions() {
         let layout = sample_layout();
         // Client width is 784. Close starts at 784 - 44 = 740 in client coords,
@@ -653,7 +708,7 @@ mod tests {
             mem.opening_logical(WindowKind::Message),
             LogicalSize {
                 width: 480,
-                height: 240
+                height: 320
             }
         );
         assert_eq!(
@@ -674,7 +729,7 @@ mod tests {
             mem.opening_physical(WindowKind::Message, 120),
             PxSize {
                 width: 600,
-                height: 300
+                height: 400
             }
         );
         assert_eq!(

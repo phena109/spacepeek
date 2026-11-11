@@ -43,6 +43,7 @@ mod win {
 
     use spacepeek::{
         choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk,
+        fallback_type_name,
         close_button_bounds, decide_hook_key, double_click_action, effective_dpi, gate_show,
         hit_test, hook_key_from_vk, image_dest_rect, load_text_preview, min_physical_size,
         nav_reload_remaining, nonempty_path, parse_command, place_preview, pointer_over_close,
@@ -51,13 +52,15 @@ mod win {
         wheel_scroll_dy, CancelToken, ChromeLayout, Command, DecodedImage, DoubleClickAction,
         Effect, Event, Generation, HitZone, HookContext, HookDecision, HookKey, KeyPhase,
         Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect,
+        QuickInfo,
         RepeatFilter, ScrollHold, ScrollOp, SessionPhase, ShowGate, ShowOutcome, SizeMemory,
         TrackedKey, Typeahead, TypeaheadKey, WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, COLORREF, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
-        E_FAIL, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+        E_FAIL, FILETIME, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME,
+        WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, ClientToScreen, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject,
@@ -70,7 +73,11 @@ mod win {
         FW_SEMIBOLD, HALFTONE, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
     };
-    use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
+    use windows::Win32::Globalization::{
+        GetDateFormatEx, GetTimeFormatEx, DATE_LONGDATE, TIME_NOSECONDS,
+    };
+    use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, WIN32_FIND_DATAW};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IPersistFile,
         IServiceProvider, CLSCTX_ALL, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READ,
@@ -95,7 +102,8 @@ mod win {
     use windows::Win32::UI::Shell::{
         FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
         IShellFolder, IShellFolderViewDual, IShellItem, IShellLinkW, IShellView, IShellWindows,
-        IWebBrowser2, SHCreateItemWithParent, SID_STopLevelBrowser, ShellExecuteExW, ShellLink,
+        IWebBrowser2, SHCreateItemWithParent, SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES,
+        SHGetFileInfoW, SID_STopLevelBrowser, ShellExecuteExW, ShellLink,
         ShellWindows, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD,
         NIM_DELETE, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
         SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, SIGDN_FILESYSPATH, SLGP_RAWPATH, SVGIO_SELECTION,
@@ -1323,6 +1331,10 @@ mod win {
                 if cancel.is_cancelled(&gen) {
                     return;
                 }
+                let result = enrich_quick_info(&path, result, &cancel, gen);
+                if cancel.is_cancelled(&gen) {
+                    return;
+                }
                 post_load(HWND(hwnd_bits as *mut _), gen, result);
             });
         if spawned.is_err() {
@@ -1363,6 +1375,145 @@ mod win {
             }),
             other => other,
         }
+    }
+
+    /// Type, size, and modified time for "not supported" and "not text".
+    ///
+    /// Runs on the load thread. `metadata` and `SHGetFileInfoW` with
+    /// `SHGFI_USEFILEATTRIBUTES` do not read file contents. A cancel that lands
+    /// during the lookup drops the result instead of posting it.
+    fn enrich_quick_info(
+        path: &Path,
+        result: std::result::Result<Preview, PreviewError>,
+        cancel: &CancelToken,
+        gen: Generation,
+    ) -> std::result::Result<Preview, PreviewError> {
+        let Err(err) = result else {
+            return result;
+        };
+        if !err.wants_quick_info() {
+            return Err(err);
+        }
+        if cancel.is_cancelled(&gen) {
+            return Err(PreviewError::Cancelled);
+        }
+        let info = gather_quick_info(path, cancel, gen);
+        if cancel.is_cancelled(&gen) {
+            return Err(PreviewError::Cancelled);
+        }
+        Err(err.with_quick_info(info))
+    }
+
+    fn gather_quick_info(path: &Path, cancel: &CancelToken, gen: Generation) -> QuickInfo {
+        let mut info = QuickInfo {
+            type_name: path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(fallback_type_name),
+            ..QuickInfo::default()
+        };
+        if cancel.is_cancelled(&gen) {
+            return info;
+        }
+        if let Ok(meta) = std::fs::metadata(path) {
+            info.size_bytes = Some(meta.len());
+            if let Ok(modified) = meta.modified() {
+                info.modified = format_local_modified(modified);
+            }
+        }
+        if cancel.is_cancelled(&gen) {
+            return info;
+        }
+        if let Some(name) = shell_type_name(path) {
+            info.type_name = Some(name);
+        }
+        info
+    }
+
+    /// Windows type name from the extension. `SHGFI_USEFILEATTRIBUTES` keeps the
+    /// shell from opening the file or running a shell extension against it.
+    fn shell_type_name(path: &Path) -> Option<String> {
+        let wide = wide_path(path);
+        let mut info = SHFILEINFOW::default();
+        let flags = SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES;
+        let got = unsafe {
+            SHGetFileInfoW(
+                PCWSTR(wide.as_ptr()),
+                FILE_ATTRIBUTE_NORMAL,
+                Some(&mut info),
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                flags,
+            )
+        };
+        if got == 0 {
+            return None;
+        }
+        wide_to_text(&info.szTypeName)
+    }
+
+    fn format_local_modified(modified: std::time::SystemTime) -> Option<String> {
+        let file_time = system_time_to_filetime(modified)?;
+        let mut utc = SYSTEMTIME::default();
+        unsafe { FileTimeToSystemTime(&file_time, &mut utc).ok()? };
+        let mut local = SYSTEMTIME::default();
+        unsafe { SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()? };
+        let date = format_locale_date(&local);
+        let time = format_locale_time(&local);
+        match (date, time) {
+            (Some(date), Some(time)) => Some(format!("{date} {time}")),
+            (Some(date), None) => Some(date),
+            (None, Some(time)) => Some(time),
+            (None, None) => None,
+        }
+    }
+
+    fn format_locale_date(stamp: &SYSTEMTIME) -> Option<String> {
+        let mut buf = [0u16; 128];
+        let n = unsafe {
+            GetDateFormatEx(
+                PCWSTR::null(),
+                DATE_LONGDATE,
+                Some(stamp),
+                PCWSTR::null(),
+                Some(&mut buf),
+                PCWSTR::null(),
+            )
+        };
+        locale_text(&buf, n)
+    }
+
+    fn format_locale_time(stamp: &SYSTEMTIME) -> Option<String> {
+        let mut buf = [0u16; 128];
+        let n = unsafe {
+            GetTimeFormatEx(
+                PCWSTR::null(),
+                TIME_NOSECONDS,
+                Some(stamp),
+                PCWSTR::null(),
+                Some(&mut buf),
+            )
+        };
+        locale_text(&buf, n)
+    }
+
+    fn locale_text(buf: &[u16], written: i32) -> Option<String> {
+        if written <= 1 {
+            return None;
+        }
+        let len = (written as usize).saturating_sub(1).min(buf.len());
+        wide_to_text(&buf[..len])
+    }
+
+    /// 100-nanosecond ticks since 1601-01-01 UTC. `None` before the Unix epoch.
+    fn system_time_to_filetime(time: std::time::SystemTime) -> Option<FILETIME> {
+        const HUNDRED_NS_TO_UNIX: u128 = 116_444_736_000_000_000;
+        let since_unix = time.duration_since(std::time::UNIX_EPOCH).ok()?;
+        let ticks = since_unix.as_nanos() / 100 + HUNDRED_NS_TO_UNIX;
+        let ticks = u64::try_from(ticks).ok()?;
+        Some(FILETIME {
+            dwLowDateTime: ticks as u32,
+            dwHighDateTime: (ticks >> 32) as u32,
+        })
     }
 
     fn read_shortcut_target(path: &Path) -> Option<String> {

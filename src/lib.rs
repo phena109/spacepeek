@@ -36,8 +36,9 @@ pub use keys::{
     Typeahead, TypeaheadKey, NAV_RELOAD_DELAY_MS,
 };
 pub use preview::{
-    format_byte_size, format_compact_size, format_truncation_notice, load_text_preview,
-    preview_text, CancelToken, DeniedKind, Generation, Preview, PreviewError, PreviewLimits,
+    fallback_type_name, format_byte_size, format_compact_size, format_quick_info, format_size_line,
+    format_truncation_notice, load_text_preview, message_with_quick_info, preview_text,
+    CancelToken, DeniedKind, Generation, Preview, PreviewError, PreviewLimits, QuickInfo,
     Truncation, DEFAULT_MAX_BYTES, MAX_LINE_CHARS,
 };
 pub use selection::{choose_selected, nonempty_path};
