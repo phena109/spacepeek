@@ -470,7 +470,7 @@ mod tests {
         let state = PreviewState::Failed {
             gen: Generation::new(1),
             path: path(),
-            error: PreviewError::Binary,
+            error: PreviewError::binary(),
         };
         let (state, effects) = step(state, Event::EscPressed, &cancel);
         assert_eq!(state, PreviewState::Hidden);
@@ -525,7 +525,7 @@ mod tests {
         let state = PreviewState::Failed {
             gen: Generation::new(1),
             path: path(),
-            error: PreviewError::Binary,
+            error: PreviewError::binary(),
         };
         let (state, effects) = step(state, Event::FocusLost, &cancel);
         assert_eq!(state, PreviewState::Hidden);
@@ -643,7 +643,7 @@ mod tests {
         let cancel = CancelToken::new();
         let (pending, _) = step(
             loading(false),
-            Event::LoadFinished(Generation::new(1), Err(PreviewError::Binary)),
+            Event::LoadFinished(Generation::new(1), Err(PreviewError::binary())),
             &cancel,
         );
         let (state, effects) = step(pending, Event::FocusLost, &cancel);
@@ -834,7 +834,7 @@ mod tests {
         let state = PreviewState::Failed {
             gen: Generation::new(1),
             path: path(),
-            error: PreviewError::Binary,
+            error: PreviewError::binary(),
         };
         let (state, effects) = step(state, Event::SpacePressed(path()), &cancel);
         assert_eq!(state, PreviewState::Hidden);
@@ -868,7 +868,7 @@ mod tests {
             session_phase(&PreviewState::PendingShow {
                 gen: Generation::new(1),
                 path: path(),
-                outcome: ShowOutcome::Failed(PreviewError::Binary),
+                outcome: ShowOutcome::Failed(PreviewError::binary()),
             }),
             SessionPhase::Pending
         );
