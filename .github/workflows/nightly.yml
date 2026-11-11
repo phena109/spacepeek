@@ -1,0 +1,197 @@
+name: Nightly
+
+on:
+  schedule:
+    # 15:00 UTC = 02:00 Sydney during daylight saving (AEDT, UTC+11), 01:00 in winter (AEST).
+    # The local hour drifts by one hour when Australia/Sydney enters or leaves daylight saving.
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if main has not changed since the last nightly"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.decide.outputs.sha }}
+      short: ${{ steps.decide.outputs.short }}
+      version: ${{ steps.decide.outputs.version }}
+      date: ${{ steps.decide.outputs.date }}
+      build: ${{ steps.decide.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - id: decide
+        env:
+          GH_REPO: ${{ github.repository }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          set -euo pipefail
+          REMOTE="https://github.com/${GH_REPO}"
+
+          SHA=$(git ls-remote "${REMOTE}" refs/heads/main | awk '{ print $1 }')
+          if [ -z "${SHA}" ]; then
+            echo "Could not resolve refs/heads/main" >&2
+            exit 1
+          fi
+          SHORT="${SHA:0:7}"
+
+          TAG_OUT=$(git ls-remote "${REMOTE}" refs/tags/nightly 'refs/tags/nightly^{}' || true)
+          TAG_SHA=""
+          if [ -n "${TAG_OUT}" ]; then
+            PEELED=$(printf '%s\n' "${TAG_OUT}" | awk '$2 ~ /\^\{\}$/ { print $1; exit }')
+            if [ -n "${PEELED}" ]; then
+              TAG_SHA="${PEELED}"
+            else
+              TAG_SHA=$(printf '%s\n' "${TAG_OUT}" | awk '{ print $1; exit }')
+            fi
+          fi
+
+          PKG_VERSION=$(awk '
+            /^\[package\]/ { in_pkg = 1; next }
+            /^\[/ { in_pkg = 0 }
+            in_pkg && $1 == "version" {
+              val = $3
+              gsub(/"/, "", val)
+              print val
+              exit
+            }
+          ' Cargo.toml)
+          if [ -z "${PKG_VERSION}" ]; then
+            echo "Could not read [package] version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          DATE=$(TZ=Australia/Sydney date +%Y%m%d)
+          VERSION="${PKG_VERSION}-nightly.${DATE}+${SHORT}"
+
+          BUILD=false
+          if [ "${FORCE}" = "true" ] || [ "${TAG_SHA}" != "${SHA}" ]; then
+            BUILD=true
+          fi
+
+          {
+            echo "sha=${SHA}"
+            echo "short=${SHORT}"
+            echo "version=${VERSION}"
+            echo "date=${DATE}"
+            echo "build=${BUILD}"
+          } >> "${GITHUB_OUTPUT}"
+
+          if [ "${BUILD}" = "true" ]; then
+            echo "Building nightly ${VERSION} from main ${SHORT}" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "Skipped: main ${SHORT} already published as nightly" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+  build:
+    name: Build
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          SPACEPEEK_BUILD_VERSION: ${{ needs.check.outputs.version }}
+        run: cargo build --release --locked --target "${TARGET}"
+
+      - name: Name artifact
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: cp "target/${TARGET}/release/spacepeek.exe" "spacepeek-${VERSION}-${ARCH}.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ matrix.arch }}
+          path: spacepeek-*-${{ matrix.arch }}.exe
+          retention-days: 3
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum spacepeek-*.exe > SHA256SUMS.txt
+
+      - name: Publish nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ needs.check.outputs.sha }}
+          SHORT: ${{ needs.check.outputs.short }}
+          VERSION: ${{ needs.check.outputs.version }}
+          DATE: ${{ needs.check.outputs.date }}
+        run: |
+          set -euo pipefail
+          DATE_ISO="${DATE:0:4}-${DATE:4:2}-${DATE:6:2}"
+          cat > notes.md <<EOF
+          Untested automated build of \`main\`.
+
+          - Commit: [\`${SHORT}\`](https://github.com/${GH_REPO}/commit/${SHA})
+          - Build date (Australia/Sydney): ${DATE_ISO}
+          - Version: \`${VERSION}\`
+
+          Verify the downloads against \`SHA256SUMS.txt\`.
+          EOF
+
+          gh release delete nightly --cleanup-tag --yes || true
+          gh api -X DELETE "repos/${GH_REPO}/git/refs/tags/nightly" || true
+          sleep 5
+          gh release create nightly dist/* --target "${SHA}" --prerelease --title "${VERSION}" --notes-file notes.md
