@@ -314,6 +314,34 @@ pub fn pointer_over_close(layout: ChromeLayout, x: i32, y: i32) -> bool {
     hit_test(layout, x, y) == HitZone::Close
 }
 
+/// What a left double-click in `zone` should do.
+///
+/// The body opens the file. The header, the × button, and the resize edges
+/// do not. A triple-click is a later button-down, not a second one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoubleClickAction {
+    /// Close the preview and open the file with the shell's default action.
+    Open,
+    /// Leave the preview alone.
+    Ignore,
+}
+
+pub fn double_click_action(zone: HitZone) -> DoubleClickAction {
+    match zone {
+        HitZone::Client => DoubleClickAction::Open,
+        HitZone::Caption
+        | HitZone::Close
+        | HitZone::Left
+        | HitZone::Right
+        | HitZone::Top
+        | HitZone::Bottom
+        | HitZone::TopLeft
+        | HitZone::TopRight
+        | HitZone::BottomLeft
+        | HitZone::BottomRight => DoubleClickAction::Ignore,
+    }
+}
+
 /// Where a point in outer-window coordinates lands.
 ///
 /// Edges are the non-client frame. The header and the × button sit in the
@@ -799,5 +827,24 @@ mod tests {
         assert_eq!(close_button_bounds(100, 0, 44), None);
         assert_eq!(close_button_bounds(100, 56, 0), None);
         assert_eq!(close_button_bounds(-1, 56, 44), None);
+    }
+
+    #[test]
+    fn double_click_opens_only_the_body() {
+        assert_eq!(double_click_action(HitZone::Client), DoubleClickAction::Open);
+        for zone in [
+            HitZone::Caption,
+            HitZone::Close,
+            HitZone::Left,
+            HitZone::Right,
+            HitZone::Top,
+            HitZone::Bottom,
+            HitZone::TopLeft,
+            HitZone::TopRight,
+            HitZone::BottomLeft,
+            HitZone::BottomRight,
+        ] {
+            assert_eq!(double_click_action(zone), DoubleClickAction::Ignore, "{zone:?}");
+        }
     }
 }
