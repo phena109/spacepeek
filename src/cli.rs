@@ -7,6 +7,8 @@ pub enum Command {
     Quit,
     /// `--help`, `-h`, or `/?`.
     Help,
+    /// `--version` or `-V`.
+    Version,
     /// An argument this build does not understand.
     Unknown,
 }
@@ -14,8 +16,8 @@ pub enum Command {
 /// Parse process arguments. The first item is the program name and is ignored.
 ///
 /// `--quit` is the only way to ask a running instance to exit from the command
-/// line. Anything else with an argument is [`Command::Unknown`], so a typo
-/// cannot start a second previewer.
+/// line. `--version` / `-V` prints the build version. Anything else with an
+/// argument is [`Command::Unknown`], so a typo cannot start a second previewer.
 pub fn parse_command<I, S>(args: I) -> Command
 where
     I: IntoIterator<Item = S>,
@@ -37,6 +39,8 @@ where
         || flag.eq_ignore_ascii_case("/?")
     {
         Command::Help
+    } else if flag.eq_ignore_ascii_case("--version") || flag.eq_ignore_ascii_case("-V") {
+        Command::Version
     } else {
         Command::Unknown
     }
@@ -70,5 +74,17 @@ mod tests {
             Command::Unknown
         );
         assert_eq!(parse_command(["spacepeek", "-quit"]), Command::Unknown);
+    }
+
+    #[test]
+    fn version_flag() {
+        assert_eq!(parse_command(["spacepeek", "--version"]), Command::Version);
+        assert_eq!(parse_command(["spacepeek", "--VERSION"]), Command::Version);
+        assert_eq!(parse_command(["spacepeek", "-V"]), Command::Version);
+        assert_eq!(parse_command(["spacepeek", "-v"]), Command::Version);
+        assert_eq!(
+            parse_command(["spacepeek", "--version", "now"]),
+            Command::Unknown
+        );
     }
 }
