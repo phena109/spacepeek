@@ -119,7 +119,7 @@ pub enum PreviewError {
     Shortcut {
         target: Option<String>,
     },
-    /// PNG or JPEG that could not be shown. The inner error is the sentence.
+    /// An image that could not be shown. The inner error is the sentence.
     Image(ImageError),
 }
 
@@ -369,7 +369,7 @@ pub struct Preview {
     pub truncation: Option<Truncation>,
     /// File size in bytes, including a leading BOM. The header uses this.
     pub total_bytes: u64,
-    /// PNG or JPEG pixels. `None` for a text preview.
+    /// Decoded image pixels. `None` for a text preview.
     pub image: Option<Arc<DecodedImage>>,
 }
 
@@ -420,12 +420,8 @@ impl PreviewLimits {
 }
 
 /// Known non-text extensions refused before the byte sniff.
-/// PNG and JPEG are identified by magic bytes instead of this list.
+/// PNG, JPEG, BMP, GIF, ICO, and WebP are identified by magic bytes instead.
 const DENIED_EXTENSIONS: &[(&str, DeniedKind)] = &[
-    ("gif", DeniedKind::Image),
-    ("bmp", DeniedKind::Image),
-    ("webp", DeniedKind::Image),
-    ("ico", DeniedKind::Image),
     ("exe", DeniedKind::Binary),
     ("dll", DeniedKind::Binary),
     ("sys", DeniedKind::Binary),
@@ -635,8 +631,12 @@ pub fn load_text_preview<P: AsRef<Path>>(
     })
 }
 
-/// How many leading bytes [`sniff_image`] needs. PNG's signature is 8 bytes.
-const IMAGE_HEADER_BYTES: usize = 8;
+/// How many leading bytes [`sniff_image`] needs.
+///
+/// WebP's signature is 12 bytes (`RIFF` at 0, `WEBP` at 8). A BMP check also
+/// reads the 14-byte file header and the 4-byte DIB header size, so the prefix
+/// is 18 bytes. A shorter file is sniffed from however many bytes were read.
+const IMAGE_HEADER_BYTES: usize = 18;
 
 fn read_prefix(file: &mut File, buf: &mut [u8]) -> Result<usize, PreviewError> {
     let mut filled = 0;
@@ -1081,8 +1081,10 @@ fn decode_utf16_prefix(
 mod tests {
     use super::*;
     use crate::image_preview::ImageError;
+    use image::codecs::bmp::BmpEncoder;
     use image::codecs::jpeg::JpegEncoder;
     use image::codecs::png::PngEncoder;
+    use image::codecs::webp::WebPEncoder;
     use image::{ExtendedColorType, ImageEncoder};
     use std::fs;
     use std::path::PathBuf;
@@ -1300,21 +1302,6 @@ mod tests {
     #[test]
     fn denied_extensions_use_their_own_kind() {
         let dir = tempfile::tempdir().unwrap();
-        let gif = write_file(&dir, "anim.GIF", b"not really a gif\x00");
-        assert_eq!(
-            load(&gif, PreviewLimits::default()),
-            Err(PreviewError::denied(DeniedKind::Image))
-        );
-        let bmp = write_file(&dir, "pic.BmP", b"hello");
-        assert_eq!(
-            load(&bmp, PreviewLimits::default()),
-            Err(PreviewError::denied(DeniedKind::Image))
-        );
-        let webp = write_file(&dir, "pic.webp", b"hello");
-        assert_eq!(
-            load(&webp, PreviewLimits::default()),
-            Err(PreviewError::denied(DeniedKind::Image))
-        );
         for name in [
             "app.EXE",
             "lib.Dll",
@@ -1341,7 +1328,11 @@ mod tests {
 
     #[test]
     fn denied_kind_matches_case_insensitively() {
-        assert_eq!(denied_kind(Path::new("A.GIF")), Some(DeniedKind::Image));
+        assert_eq!(denied_kind(Path::new("A.GIF")), None);
+        assert_eq!(denied_kind(Path::new("pic.bmp")), None);
+        assert_eq!(denied_kind(Path::new("pic.BmP")), None);
+        assert_eq!(denied_kind(Path::new("pic.webp")), None);
+        assert_eq!(denied_kind(Path::new("pic.ICO")), None);
         assert_eq!(denied_kind(Path::new("A.PnG")), None);
         assert_eq!(denied_kind(Path::new("photo.jpg")), None);
         assert_eq!(denied_kind(Path::new("photo.JPEG")), None);
@@ -2001,18 +1992,15 @@ mod tests {
         assert_eq!(err.to_string(), "empty file");
         assert_ne!(err.to_string(), err.user_message("empty.txt"));
 
-        // PNG is no longer refused by extension, so an empty file is empty.
-        let png = write_file(&dir, "photo.png", b"");
-        assert_eq!(
-            load(&png, PreviewLimits::default()),
-            Err(PreviewError::Empty)
-        );
-        // A still-denied image extension is refused before the empty check.
-        let gif = write_file(&dir, "anim.gif", b"");
-        assert_eq!(
-            load(&gif, PreviewLimits::default()),
-            Err(PreviewError::denied(DeniedKind::Image))
-        );
+        // Image extensions are not refused, so an empty file is empty.
+        for name in ["photo.png", "anim.gif", "pic.bmp", "pic.webp", "pic.ico"] {
+            let path = write_file(&dir, name, b"");
+            assert_eq!(
+                load(&path, PreviewLimits::default()),
+                Err(PreviewError::Empty),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -2329,12 +2317,68 @@ mod tests {
             Err(PreviewError::binary())
         );
 
-        // Other image types stay on the deny-list, even when the bytes are a PNG.
+        // The extension is not a deny-list. PNG bytes in a `.gif` are a PNG.
         let disguised = write_file(&dir, "anim.gif", &png);
+        let preview = load(&disguised, PreviewLimits::default()).unwrap();
         assert_eq!(
-            load(&disguised, PreviewLimits::default()),
-            Err(PreviewError::denied(DeniedKind::Image))
+            preview.image.as_ref().map(|img| img.format),
+            Some(crate::image_preview::ImageFormat::Png)
         );
+    }
+
+    fn rgb_bmp(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        BmpEncoder::new(&mut buf)
+            .encode(rgb, width, height, ExtendedColorType::Rgb8)
+            .unwrap();
+        buf
+    }
+
+    fn rgba_webp(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        WebPEncoder::new_lossless(&mut buf)
+            .encode(rgba, width, height, ExtendedColorType::Rgba8)
+            .unwrap();
+        buf
+    }
+
+    #[test]
+    fn bmp_gif_ico_and_webp_follow_magic_bytes_not_the_extension() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // No matching magic: text stays text. A NUL is binary, not a denied image.
+        let gif_text = write_file(&dir, "notes.gif", b"hello\nworld");
+        let preview = load(&gif_text, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert_eq!(preview.content, "hello\r\nworld");
+
+        for name in ["pic.BmP", "pic.webp", "pic.ICO"] {
+            let path = write_file(&dir, name, b"hello");
+            let preview = load(&path, PreviewLimits::default()).unwrap();
+            assert!(preview.image.is_none(), "{name}");
+            assert_eq!(preview.content, "hello", "{name}");
+        }
+
+        let binary = write_file(&dir, "anim.GIF", b"not really a gif\x00");
+        assert_eq!(
+            load(&binary, PreviewLimits::default()),
+            Err(PreviewError::binary())
+        );
+
+        let webp = rgba_webp(1, 1, &[10, 20, 30, 255]);
+        let as_text = write_file(&dir, "foo.txt", &webp);
+        let preview = load(&as_text, PreviewLimits::default()).unwrap();
+        let image = preview.image.expect("webp bytes are an image");
+        assert_eq!(image.format, crate::image_preview::ImageFormat::WebP);
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(image.bgra, vec![30, 20, 10, 255]);
+
+        let bmp = rgb_bmp(1, 1, &[1, 2, 3]);
+        let as_gif = write_file(&dir, "anim.gif", &bmp);
+        let preview = load(&as_gif, PreviewLimits::default()).unwrap();
+        let image = preview.image.expect("bmp bytes are an image");
+        assert_eq!(image.format, crate::image_preview::ImageFormat::Bmp);
+        assert_eq!(image.bgra, vec![3, 2, 1, 255]);
     }
 
     #[test]
@@ -2365,6 +2409,17 @@ mod tests {
         limits.image.max_file_bytes = png.len() as u64;
         let preview = load(&path, limits).unwrap();
         assert!(preview.image.is_some());
+
+        let bmp = rgb_bmp(2, 2, &[4, 5, 6].repeat(4));
+        let path = write_file(&dir, "big.bmp", &bmp);
+        let mut limits = PreviewLimits::default();
+        limits.image.max_file_bytes = bmp.len() as u64 - 1;
+        assert_eq!(
+            load(&path, limits).unwrap_err(),
+            PreviewError::Image(ImageError::FileTooLarge {
+                bytes: bmp.len() as u64
+            })
+        );
 
         // The image cap does not apply to text, which keeps its own byte budget.
         let mut limits = PreviewLimits::new(64, 10);

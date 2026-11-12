@@ -51,7 +51,7 @@ pub enum WindowKind {
     Content,
     /// Centred error, folder, shortcut, or empty-file message.
     Message,
-    /// PNG or JPEG bitmap. Opens at the same size as [`Self::Content`].
+    /// Decoded bitmap. Opens at the same size as [`Self::Content`].
     Image,
 }
 

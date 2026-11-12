@@ -1,9 +1,12 @@
-//! PNG and JPEG preview that does not touch Win32.
+//! Still-image preview that does not touch Win32.
 //!
 //! Magic bytes decide the format. The extension is ignored, so a `.txt` that
-//! is a PNG decodes and a `.png` that is text does not. Limits are applied
+//! is a PNG decodes and a `.png` that is text does not. GIF and WebP contribute
+//! the first frame only; nothing here loops an animation. An ICO with several
+//! sizes contributes the largest frame that fits the limits. Limits are applied
 //! before pixel buffers are allocated.
 
+use std::cmp::Ordering;
 use std::io::Cursor;
 
 use crate::geometry::{effective_dpi, PxRect, BASE_DPI};
@@ -14,13 +17,28 @@ use crate::preview::{format_compact_size, format_grouped};
 pub enum ImageFormat {
     Png,
     Jpeg,
+    Bmp,
+    Gif,
+    Ico,
+    WebP,
 }
 
 const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 const JPEG_MAGIC: [u8; 3] = [0xFF, 0xD8, 0xFF];
+/// `BITMAPFILEHEADER` is 14 bytes. The following u32 is the DIB header size.
+const BMP_SNIFF_LEN: usize = 18;
+const BMP_FILE_HEADER_LEN: u32 = 14;
+/// DIB header sizes [`image`]'s BMP decoder accepts: CORE, INFO, V2, V3, V4, V5.
+/// The 64-byte OS/2 `BITMAPCOREHEADER2` is not one of them.
+const BMP_DIB_HEADER_SIZES: [u32; 6] = [12, 40, 52, 56, 108, 124];
 
-/// `Some` when `header` starts with a PNG or JPEG signature.
+/// `Some` when `header` starts with a supported image signature.
 ///
+/// PNG, JPEG, GIF (`GIF87a` or `GIF89a`), WebP (`RIFF` at 0 and `WEBP` at 8),
+/// ICO (`00 00 01 00` and a non-zero image count), and BMP. A BMP has to look
+/// like a `BITMAPFILEHEADER`: the two reserved fields are zero and the DIB
+/// header size is one the decoder accepts, so a file that merely starts with
+/// the letters "BM" does not match. CUR (`00 00 02 00`) is not treated as ICO.
 /// Short buffers and anything else are `None`. Bytes after the signature are
 /// ignored, so a longer file still matches.
 pub fn sniff_image(header: &[u8]) -> Option<ImageFormat> {
@@ -28,9 +46,51 @@ pub fn sniff_image(header: &[u8]) -> Option<ImageFormat> {
         Some(ImageFormat::Png)
     } else if header.starts_with(&JPEG_MAGIC) {
         Some(ImageFormat::Jpeg)
+    } else if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        Some(ImageFormat::Gif)
+    } else if sniff_webp(header) {
+        Some(ImageFormat::WebP)
+    } else if sniff_bmp(header) {
+        Some(ImageFormat::Bmp)
+    } else if sniff_ico(header) {
+        Some(ImageFormat::Ico)
     } else {
         None
     }
+}
+
+fn sniff_webp(header: &[u8]) -> bool {
+    header.len() >= 12 && header.starts_with(b"RIFF") && &header[8..12] == b"WEBP"
+}
+
+fn sniff_bmp(header: &[u8]) -> bool {
+    if header.len() < BMP_SNIFF_LEN || !header.starts_with(b"BM") {
+        return false;
+    }
+    // The spec requires the reserved bytes to be zero. The decoder ignores
+    // them; requiring zero here is what drops ordinary text that starts "BM".
+    if header[6..10] != [0, 0, 0, 0] {
+        return false;
+    }
+    let off_bits = u32::from_le_bytes([header[10], header[11], header[12], header[13]]);
+    let dib_size = u32::from_le_bytes([header[14], header[15], header[16], header[17]]);
+    if !BMP_DIB_HEADER_SIZES.contains(&dib_size) {
+        return false;
+    }
+    // Pixels start at or after the file header and the DIB header. A palette
+    // only pushes the offset further out.
+    off_bits >= BMP_FILE_HEADER_LEN.saturating_add(dib_size)
+}
+
+fn sniff_ico(header: &[u8]) -> bool {
+    // ICONDIR: reserved 0, type 1, count > 0. Type 2 is a CUR file. Cursors
+    // are not previewed; the hotspot is not a bitmap we show.
+    header.len() >= 6
+        && header[0] == 0
+        && header[1] == 0
+        && header[2] == 1
+        && header[3] == 0
+        && u16::from_le_bytes([header[4], header[5]]) > 0
 }
 
 /// Caps for one image preview. The defaults are the product limits.
@@ -83,7 +143,7 @@ pub enum ImageError {
     TooLarge { width: u32, height: u32 },
     /// The file is larger than [`ImageLimits::max_file_bytes`].
     FileTooLarge { bytes: u64 },
-    /// The bytes are not a decodable PNG or JPEG.
+    /// The bytes are not a decodable image of the sniffed format.
     Corrupt,
     /// The decoder recognised the container but not this encoding.
     Unsupported,
@@ -118,7 +178,7 @@ impl ImageError {
                 format_compact_size(*bytes)
             ),
             ImageError::Corrupt | ImageError::Unsupported => {
-                "This image file looks damaged or isn't a supported PNG or JPEG.".to_string()
+                "This image file looks damaged or isn't a supported image.".to_string()
             }
         }
     }
@@ -250,12 +310,24 @@ fn mul_div_u64(a: u64, b: u64, d: u64) -> u64 {
 
 /// Decode `bytes` as `format`, or reject it before pixel work when the header
 /// claims a size outside `limits`.
+///
+/// GIF and WebP go through the still-image decoder, which yields one frame
+/// (the first) and does not walk the rest of an animation. An ICO is reduced
+/// to a single frame before that decoder runs; see [`ico_single_image`].
 pub fn decode_image(
     bytes: &[u8],
     format: ImageFormat,
     limits: &ImageLimits,
 ) -> Result<DecodedImage, ImageError> {
-    let (width, height) = probe_dimensions(bytes, format)?;
+    let chosen_ico;
+    let bytes = if format == ImageFormat::Ico {
+        chosen_ico = ico_single_image(bytes, limits)?;
+        chosen_ico.as_slice()
+    } else {
+        bytes
+    };
+
+    let (width, height) = probe_dimensions(bytes, format, limits)?;
     if width == 0 || height == 0 {
         return Err(ImageError::Corrupt);
     }
@@ -324,6 +396,10 @@ fn image_format(format: ImageFormat) -> image::ImageFormat {
     match format {
         ImageFormat::Png => image::ImageFormat::Png,
         ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+        ImageFormat::Bmp => image::ImageFormat::Bmp,
+        ImageFormat::Gif => image::ImageFormat::Gif,
+        ImageFormat::Ico => image::ImageFormat::Ico,
+        ImageFormat::WebP => image::ImageFormat::WebP,
     }
 }
 
@@ -337,11 +413,24 @@ fn decoder_limits(limits: &ImageLimits) -> image::Limits {
 
 /// Read the size without expanding pixels.
 ///
-/// [`image::ImageReader::into_dimensions`] is the normal path. A PNG whose
-/// `IHDR` is the whole file never gets that far: the PNG decoder only reports
-/// a size after it has seen the start of `IDAT`. The chunk is then read here
-/// so an oversized claim is still [`ImageError::TooLarge`] and is not decoded.
-fn probe_dimensions(bytes: &[u8], format: ImageFormat) -> Result<(u32, u32), ImageError> {
+/// A container header that is already outside `limits` is returned immediately,
+/// so the decoder is not asked to size a buffer it will not be allowed to fill.
+/// Otherwise [`image::ImageReader::into_dimensions`] is the normal path. A PNG
+/// whose `IHDR` is the whole file never gets a size from the decoder: the PNG
+/// decoder only reports one after it has seen the start of `IDAT`. The same
+/// fallback covers a BMP, GIF, or WebP header the decoder rejects. The chunk
+/// is then read here so an oversized claim is still [`ImageError::TooLarge`]
+/// and is not decoded.
+fn probe_dimensions(
+    bytes: &[u8],
+    format: ImageFormat,
+    limits: &ImageLimits,
+) -> Result<(u32, u32), ImageError> {
+    if let Some((width, height)) = container_dimensions(bytes, format) {
+        if width == 0 || height == 0 || exceeds_geometry(width, height, limits) {
+            return Ok((width, height));
+        }
+    }
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image_format(format));
     reader.no_limits();
     match reader.into_dimensions() {
@@ -359,7 +448,261 @@ fn container_dimensions(bytes: &[u8], format: ImageFormat) -> Option<(u32, u32)>
         // JPEG sizes come from ImageReader. A truncated file has no reliable
         // size once that header parse has already failed.
         ImageFormat::Jpeg => None,
+        ImageFormat::Bmp => bmp_file_dimensions(bytes),
+        ImageFormat::Gif => gif_screen_dimensions(bytes),
+        ImageFormat::WebP => webp_canvas_dimensions(bytes),
+        // ICO sizes are chosen in [`ico_single_image`] before this runs. The
+        // directory byte is not the PNG's real size, so it is not a fallback.
+        ImageFormat::Ico => None,
     }
+}
+
+fn bmp_file_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < BMP_SNIFF_LEN || !bytes.starts_with(b"BM") {
+        return None;
+    }
+    let dib_size = u32::from_le_bytes(bytes.get(14..18)?.try_into().ok()?);
+    if dib_size == 12 {
+        // BITMAPCOREHEADER stores width and height as u16.
+        let width = u16::from_le_bytes(bytes.get(18..20)?.try_into().ok()?);
+        let height = u16::from_le_bytes(bytes.get(20..22)?.try_into().ok()?);
+        return Some((u32::from(width), u32::from(height)));
+    }
+    if !BMP_DIB_HEADER_SIZES.contains(&dib_size) {
+        return None;
+    }
+    let width = i32::from_le_bytes(bytes.get(18..22)?.try_into().ok()?);
+    let height = i32::from_le_bytes(bytes.get(22..26)?.try_into().ok()?);
+    if width < 0 {
+        return None;
+    }
+    // A negative height is a top-down DIB. `i32::MIN` has no positive twin.
+    let height = if height == i32::MIN {
+        return None;
+    } else {
+        height.unsigned_abs()
+    };
+    Some((u32::try_from(width).ok()?, height))
+}
+
+fn gif_screen_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let rest = bytes
+        .strip_prefix(b"GIF87a")
+        .or_else(|| bytes.strip_prefix(b"GIF89a"))?;
+    let width = u16::from_le_bytes(rest.get(..2)?.try_into().ok()?);
+    let height = u16::from_le_bytes(rest.get(2..4)?.try_into().ok()?);
+    Some((u32::from(width), u32::from(height)))
+}
+
+/// Canvas size from a `VP8X` or `VP8L` chunk. Lossy `VP8 ` is left to the decoder.
+fn webp_canvas_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if !sniff_webp(bytes) {
+        return None;
+    }
+    let mut offset = 12;
+    while let Some(header) = bytes.get(offset..offset + 8) {
+        let tag = &header[..4];
+        let size = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+        let data = offset + 8;
+        if tag == b"VP8X" {
+            let canvas = bytes.get(data..data + 10)?;
+            let width =
+                u32::from(canvas[4]) | (u32::from(canvas[5]) << 8) | (u32::from(canvas[6]) << 16);
+            let height =
+                u32::from(canvas[7]) | (u32::from(canvas[8]) << 8) | (u32::from(canvas[9]) << 16);
+            return Some((width.saturating_add(1), height.saturating_add(1)));
+        }
+        if tag == b"VP8L" {
+            let payload = bytes.get(data..data + 5)?;
+            if payload[0] != 0x2F {
+                return None;
+            }
+            // 14-bit width-1, then 14-bit height-1, little-endian bit pack.
+            let bits = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+            let width = (bits & 0x3FFF) + 1;
+            let height = ((bits >> 14) & 0x3FFF) + 1;
+            return Some((width, height));
+        }
+        let padded = size.checked_add(size & 1)?;
+        offset = data.checked_add(padded)?;
+    }
+    None
+}
+
+const ICO_DIR_LEN: usize = 6;
+const ICO_ENTRY_LEN: usize = 16;
+
+struct IcoEntry {
+    width: u32,
+    height: u32,
+    bits_per_pixel: u16,
+    /// Directory order. Equal frames keep the earlier one.
+    index: usize,
+    raw: [u8; ICO_ENTRY_LEN],
+    image_offset: u32,
+    image_length: u32,
+}
+
+/// One ICO image, chosen and repacked so the decoder cannot pick a different one.
+///
+/// Several sizes are common. The frame kept is the one with the most pixels
+/// that still fits [`ImageLimits`] (each side, and the pixel count). An equal
+/// area keeps the higher bit depth, then the earlier directory entry. A PNG
+/// payload's real size comes from its `IHDR`: the directory stores 0 for a
+/// side of 256, and a PNG may be larger than that. A BMP payload uses the
+/// directory size, which is at most 256. When nothing fits, the error names
+/// the smallest frame. CUR (`type == 2`) is rejected.
+///
+/// The `image` crate's own picker prefers bit depth over area and does not
+/// know these limits, so the chosen entry is rewritten as a one-image ICO
+/// before that decoder runs. Only that frame's compressed bytes are copied.
+/// The pixel buffer is allocated later, after the usual limit check.
+fn ico_single_image(bytes: &[u8], limits: &ImageLimits) -> Result<Vec<u8>, ImageError> {
+    let entries = ico_entries(bytes)?;
+    let chosen = choose_ico_entry(&entries, limits)?;
+    let payload = ico_payload(bytes, chosen).ok_or(ImageError::Corrupt)?;
+    let mut raw = chosen.raw;
+    let length = u32::try_from(payload.len()).map_err(|_| ImageError::Corrupt)?;
+    raw[8..12].copy_from_slice(&length.to_le_bytes());
+    // ICONDIR (6) + one ICONDIRENTRY (16).
+    raw[12..16].copy_from_slice(&22u32.to_le_bytes());
+
+    let mut out = Vec::with_capacity(ICO_DIR_LEN + ICO_ENTRY_LEN + payload.len());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&raw);
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+
+fn ico_entries(bytes: &[u8]) -> Result<Vec<IcoEntry>, ImageError> {
+    if bytes.len() < ICO_DIR_LEN || !sniff_ico(bytes) {
+        return Err(ImageError::Corrupt);
+    }
+    let count = usize::from(u16::from_le_bytes([bytes[4], bytes[5]]));
+    let dir_bytes = count
+        .checked_mul(ICO_ENTRY_LEN)
+        .ok_or(ImageError::Corrupt)?;
+    let dir_end = ICO_DIR_LEN
+        .checked_add(dir_bytes)
+        .ok_or(ImageError::Corrupt)?;
+    if bytes.len() < dir_end {
+        return Err(ImageError::Corrupt);
+    }
+    let mut entries = Vec::new();
+    for index in 0..count {
+        let start = ICO_DIR_LEN + index * ICO_ENTRY_LEN;
+        let mut raw = [0u8; ICO_ENTRY_LEN];
+        raw.copy_from_slice(&bytes[start..start + ICO_ENTRY_LEN]);
+        let bits_per_pixel = u16::from_le_bytes([raw[6], raw[7]]);
+        let image_length = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]);
+        let image_offset = u32::from_le_bytes([raw[12], raw[13], raw[14], raw[15]]);
+        let Some((width, height)) = ico_frame_size(bytes, &raw, image_offset, image_length) else {
+            continue;
+        };
+        entries.push(IcoEntry {
+            width,
+            height,
+            bits_per_pixel,
+            index,
+            raw,
+            image_offset,
+            image_length,
+        });
+    }
+    Ok(entries)
+}
+
+fn ico_payload<'a>(bytes: &'a [u8], entry: &IcoEntry) -> Option<&'a [u8]> {
+    let start = usize::try_from(entry.image_offset).ok()?;
+    let len = usize::try_from(entry.image_length).ok()?;
+    let end = start.checked_add(len)?;
+    bytes.get(start..end)
+}
+
+/// PNG entries use `IHDR`. Anything else uses the directory, where 0 means 256.
+fn ico_frame_size(bytes: &[u8], raw: &[u8], offset: u32, length: u32) -> Option<(u32, u32)> {
+    let start = usize::try_from(offset).ok()?;
+    let len = usize::try_from(length).ok()?;
+    if len == 0 {
+        return None;
+    }
+    let end = start.checked_add(len)?;
+    let payload = bytes.get(start..end)?;
+    if let Some((width, height)) = png_ihdr_dimensions(payload) {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        return Some((width, height));
+    }
+    let width = match raw[0] {
+        0 => 256,
+        n => u32::from(n),
+    };
+    let height = match raw[1] {
+        0 => 256,
+        n => u32::from(n),
+    };
+    Some((width, height))
+}
+
+fn choose_ico_entry<'a>(
+    entries: &'a [IcoEntry],
+    limits: &ImageLimits,
+) -> Result<&'a IcoEntry, ImageError> {
+    let mut best_fit: Option<&IcoEntry> = None;
+    let mut smallest: Option<&IcoEntry> = None;
+    for entry in entries {
+        smallest = Some(match smallest {
+            Some(prev) if ico_is_smaller(entry, prev) => entry,
+            Some(prev) => prev,
+            None => entry,
+        });
+        if exceeds_geometry(entry.width, entry.height, limits) {
+            continue;
+        }
+        best_fit = Some(match best_fit {
+            Some(prev) if ico_is_preferred(entry, prev) => entry,
+            Some(prev) => prev,
+            None => entry,
+        });
+    }
+    if let Some(best) = best_fit {
+        return Ok(best);
+    }
+    match smallest {
+        Some(entry) => Err(ImageError::TooLarge {
+            width: entry.width,
+            height: entry.height,
+        }),
+        None => Err(ImageError::Corrupt),
+    }
+}
+
+/// Larger area wins. Ties prefer a higher bit depth, then the earlier entry.
+fn ico_is_preferred(candidate: &IcoEntry, current: &IcoEntry) -> bool {
+    match ico_area(candidate).cmp(&ico_area(current)) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => match candidate.bits_per_pixel.cmp(&current.bits_per_pixel) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => candidate.index < current.index,
+        },
+    }
+}
+
+fn ico_is_smaller(candidate: &IcoEntry, current: &IcoEntry) -> bool {
+    match ico_area(candidate).cmp(&ico_area(current)) {
+        Ordering::Less => true,
+        Ordering::Greater => false,
+        Ordering::Equal => candidate.index < current.index,
+    }
+}
+
+fn ico_area(entry: &IcoEntry) -> u64 {
+    u64::from(entry.width) * u64::from(entry.height)
 }
 
 fn png_ihdr_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -423,6 +766,10 @@ pub fn format_image_details(total_bytes: u64, img: &DecodedImage) -> String {
     let kind = match img.format {
         ImageFormat::Png => "PNG",
         ImageFormat::Jpeg => "JPEG",
+        ImageFormat::Bmp => "BMP",
+        ImageFormat::Gif => "GIF",
+        ImageFormat::Ico => "ICO",
+        ImageFormat::WebP => "WebP",
     };
     format!(
         "{} · {} × {} · {kind}",
@@ -435,9 +782,13 @@ pub fn format_image_details(total_bytes: u64, img: &DecodedImage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::codecs::bmp::BmpEncoder;
+    use image::codecs::gif::GifEncoder;
+    use image::codecs::ico::{IcoEncoder, IcoFrame};
     use image::codecs::jpeg::JpegEncoder;
     use image::codecs::png::PngEncoder;
-    use image::{ExtendedColorType, ImageEncoder};
+    use image::codecs::webp::WebPEncoder;
+    use image::{Delay, ExtendedColorType, Frame, ImageEncoder, RgbaImage};
 
     fn limits() -> ImageLimits {
         ImageLimits::default()
@@ -791,7 +1142,7 @@ mod tests {
         );
         assert_eq!(file.header_status(), "Too large");
 
-        let damaged = "This image file looks damaged or isn't a supported PNG or JPEG.";
+        let damaged = "This image file looks damaged or isn't a supported image.";
         assert_eq!(ImageError::Corrupt.user_message(), damaged);
         assert_eq!(ImageError::Unsupported.user_message(), damaged);
         assert_eq!(ImageError::Corrupt.header_status(), "Damaged");
@@ -823,6 +1174,22 @@ mod tests {
         };
         assert_eq!(format_image_details(512, &png), "512 B · 8 × 8 · PNG");
         assert_eq!(format_image_details(0, &png), "0 B · 8 × 8 · PNG");
+
+        for (format, label) in [
+            (ImageFormat::Bmp, "BMP"),
+            (ImageFormat::Gif, "GIF"),
+            (ImageFormat::Ico, "ICO"),
+            (ImageFormat::WebP, "WebP"),
+        ] {
+            let image = DecodedImage {
+                format,
+                ..png.clone()
+            };
+            assert_eq!(
+                format_image_details(10, &image),
+                format!("10 B · 8 × 8 · {label}")
+            );
+        }
     }
 
     fn body(left: i32, top: i32, right: i32, bottom: i32) -> PxRect {
@@ -967,5 +1334,387 @@ mod tests {
         assert_eq!(placed.bottom, -1);
         assert_eq!(placed.width(), i32::MAX);
         assert_eq!(placed.height(), i32::MAX);
+    }
+
+    fn rgb_bmp(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        BmpEncoder::new(&mut buf)
+            .encode(rgb, width, height, ExtendedColorType::Rgb8)
+            .unwrap();
+        buf
+    }
+
+    fn rgba_webp(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        WebPEncoder::new_lossless(&mut buf)
+            .encode(rgba, width, height, ExtendedColorType::Rgba8)
+            .unwrap();
+        buf
+    }
+
+    fn ico_pngs(frames: &[(u32, u32, &[u8])]) -> Vec<u8> {
+        let encoded: Vec<_> = frames
+            .iter()
+            .map(|(width, height, pixels)| {
+                IcoFrame::as_png(pixels, *width, *height, ExtendedColorType::Rgba8).unwrap()
+            })
+            .collect();
+        let mut buf = Vec::new();
+        IcoEncoder::new(&mut buf).encode_images(&encoded).unwrap();
+        buf
+    }
+
+    /// `BITMAPINFOHEADER` and no pixels. Width and height are the claimed size.
+    fn crafted_bmp(width: i32, height: i32) -> Vec<u8> {
+        let dib_size: u32 = 40;
+        let off_bits = BMP_FILE_HEADER_LEN + dib_size;
+        let mut data = Vec::with_capacity(54);
+        data.extend_from_slice(b"BM");
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&off_bits.to_le_bytes());
+        data.extend_from_slice(&dib_size.to_le_bytes());
+        data.extend_from_slice(&width.to_le_bytes());
+        data.extend_from_slice(&height.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&24u16.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 20]);
+        data
+    }
+
+    fn crafted_gif(width: u16, height: u16) -> Vec<u8> {
+        let mut data = b"GIF89a".to_vec();
+        data.extend_from_slice(&width.to_le_bytes());
+        data.extend_from_slice(&height.to_le_bytes());
+        // Packed field, background, aspect. No global colour table.
+        data.extend_from_slice(&[0x00, 0x00, 0x00]);
+        data
+    }
+
+    /// `VP8X` canvas and no frame. Width and height are the claimed size.
+    fn crafted_webp(width: u32, height: u32) -> Vec<u8> {
+        let w = width - 1;
+        let h = height - 1;
+        let mut chunk = Vec::with_capacity(18);
+        chunk.extend_from_slice(b"VP8X");
+        chunk.extend_from_slice(&10u32.to_le_bytes());
+        chunk.push(0);
+        chunk.extend_from_slice(&[0, 0, 0]);
+        chunk.push((w & 0xFF) as u8);
+        chunk.push(((w >> 8) & 0xFF) as u8);
+        chunk.push(((w >> 16) & 0xFF) as u8);
+        chunk.push((h & 0xFF) as u8);
+        chunk.push(((h >> 8) & 0xFF) as u8);
+        chunk.push(((h >> 16) & 0xFF) as u8);
+        let mut data = Vec::with_capacity(12 + chunk.len());
+        data.extend_from_slice(b"RIFF");
+        let size = u32::try_from(4 + chunk.len()).unwrap();
+        data.extend_from_slice(&size.to_le_bytes());
+        data.extend_from_slice(b"WEBP");
+        data.extend_from_slice(&chunk);
+        data
+    }
+
+    fn animated_gif(first: [u8; 4], second: [u8; 4]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut encoder = GifEncoder::new_with_speed(&mut buf, 30);
+            encoder
+                .encode_frames([
+                    Frame::from_parts(
+                        RgbaImage::from_pixel(2, 2, image::Rgba(first)),
+                        0,
+                        0,
+                        Delay::from_numer_denom_ms(50, 1),
+                    ),
+                    Frame::from_parts(
+                        RgbaImage::from_pixel(2, 2, image::Rgba(second)),
+                        0,
+                        0,
+                        Delay::from_numer_denom_ms(50, 1),
+                    ),
+                ])
+                .unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn sniff_matches_bmp_gif_ico_and_webp_and_rejects_lookalikes() {
+        assert_eq!(sniff_image(b"GIF87a"), Some(ImageFormat::Gif));
+        assert_eq!(sniff_image(b"GIF89a"), Some(ImageFormat::Gif));
+        assert_eq!(sniff_image(b"GIF89a extra"), Some(ImageFormat::Gif));
+        assert_eq!(sniff_image(b"GIF89"), None);
+        assert_eq!(sniff_image(b"GIF89b"), None);
+        assert_eq!(sniff_image(b"GIF87"), None);
+        assert_eq!(sniff_image(b"gif89a"), None);
+
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&12u32.to_le_bytes());
+        webp.extend_from_slice(b"WEBP");
+        assert_eq!(sniff_image(&webp), Some(ImageFormat::WebP));
+        webp.push(0);
+        assert_eq!(sniff_image(&webp), Some(ImageFormat::WebP));
+        assert_eq!(sniff_image(b"RIFF"), None);
+        assert_eq!(sniff_image(b"RIFF\0\0\0\0WEB"), None);
+        let mut wave = b"RIFF".to_vec();
+        wave.extend_from_slice(&4u32.to_le_bytes());
+        wave.extend_from_slice(b"WAVE");
+        assert_eq!(sniff_image(&wave), None);
+        let mut buried = b"xx".to_vec();
+        buried.extend_from_slice(b"RIFF\0\0\0\0WEBP");
+        assert_eq!(sniff_image(&buried), None);
+
+        assert_eq!(
+            sniff_image(&[0x00, 0x00, 0x01, 0x00, 0x01, 0x00]),
+            Some(ImageFormat::Ico)
+        );
+        assert_eq!(
+            sniff_image(&[0x00, 0x00, 0x01, 0x00, 0x02, 0x00, 0xFF]),
+            Some(ImageFormat::Ico)
+        );
+        // Count 0 is an empty directory, not an image.
+        assert_eq!(sniff_image(&[0x00, 0x00, 0x01, 0x00, 0x00, 0x00]), None);
+        assert_eq!(sniff_image(&[0x00, 0x00, 0x01, 0x00]), None);
+        assert_eq!(sniff_image(&[0x00, 0x00, 0x01]), None);
+        // CUR is not ICO.
+        assert_eq!(sniff_image(&[0x00, 0x00, 0x02, 0x00, 0x01, 0x00]), None);
+
+        assert_eq!(sniff_image(b"BM"), None);
+        assert_eq!(sniff_image(b"BMhello world, this is text"), None);
+        let bmp = crafted_bmp(2, 2);
+        assert_eq!(sniff_image(&bmp), Some(ImageFormat::Bmp));
+        assert_eq!(sniff_image(&bmp[..17]), None);
+        let mut reserved = bmp.clone();
+        reserved[6] = 1;
+        assert_eq!(sniff_image(&reserved), None);
+        let mut dib = bmp.clone();
+        dib[14] = 39;
+        assert_eq!(sniff_image(&dib), None);
+        let mut early = bmp.clone();
+        early[10..14].copy_from_slice(&14u32.to_le_bytes());
+        assert_eq!(sniff_image(&early), None);
+    }
+
+    #[test]
+    fn bmp_pixels_are_exact_bgra() {
+        let bmp = rgb_bmp(2, 2, &[10, 20, 30, 10, 20, 30, 10, 20, 30, 10, 20, 30]);
+        assert_eq!(sniff_image(&bmp), Some(ImageFormat::Bmp));
+        let decoded = decode_image(&bmp, ImageFormat::Bmp, &limits()).unwrap();
+        assert_eq!(decoded.format, ImageFormat::Bmp);
+        assert_eq!((decoded.width, decoded.height), (2, 2));
+        assert_eq!((decoded.source_width, decoded.source_height), (2, 2));
+        assert_eq!(decoded.bgra, [30, 20, 10, 255].repeat(4));
+    }
+
+    #[test]
+    fn gif_animation_keeps_only_the_first_frame() {
+        let gif = animated_gif([255, 0, 0, 255], [0, 0, 255, 255]);
+        assert_eq!(sniff_image(&gif), Some(ImageFormat::Gif));
+        // Two image separators: the file really has a second frame.
+        assert!(gif.iter().filter(|byte| **byte == 0x2C).count() >= 2);
+        let decoded = decode_image(&gif, ImageFormat::Gif, &limits()).unwrap();
+        assert_eq!(decoded.format, ImageFormat::Gif);
+        assert_eq!((decoded.source_width, decoded.source_height), (2, 2));
+        assert_eq!((decoded.width, decoded.height), (2, 2));
+        assert_eq!(decoded.bgra.len(), 2 * 2 * 4);
+        assert!(
+            decoded
+                .bgra
+                .chunks_exact(4)
+                .all(|px| px[2] > 200 && px[2] > px[0] && px[2] > px[1]),
+            "first frame should stay red, got {:?}",
+            decoded.bgra
+        );
+    }
+
+    #[test]
+    fn webp_pixels_are_exact_bgra() {
+        let webp = rgba_webp(2, 1, &[0, 0, 255, 255, 0, 0, 255, 128]);
+        assert_eq!(sniff_image(&webp), Some(ImageFormat::WebP));
+        let decoded = decode_image(&webp, ImageFormat::WebP, &limits()).unwrap();
+        assert_eq!(decoded.format, ImageFormat::WebP);
+        assert_eq!((decoded.source_width, decoded.source_height), (2, 1));
+        assert_eq!((decoded.width, decoded.height), (2, 1));
+        // Opaque blue, then blue at alpha 128 over white. Same mix as the PNG path.
+        assert_eq!(decoded.bgra, vec![255, 0, 0, 255, 255, 127, 127, 255]);
+    }
+
+    #[test]
+    fn ico_keeps_the_largest_frame_that_fits() {
+        let red = [255u8, 0, 0, 255].repeat(4);
+        let blue = [0u8, 0, 255, 255];
+        let large_first = ico_pngs(&[(2, 2, &red), (1, 1, &blue)]);
+        let small_first = ico_pngs(&[(1, 1, &blue), (2, 2, &red)]);
+        assert_eq!(sniff_image(&large_first), Some(ImageFormat::Ico));
+        assert_eq!(sniff_image(&small_first), Some(ImageFormat::Ico));
+        for bytes in [&large_first, &small_first] {
+            let decoded = decode_image(bytes, ImageFormat::Ico, &limits()).unwrap();
+            assert_eq!(decoded.format, ImageFormat::Ico);
+            assert_eq!((decoded.source_width, decoded.source_height), (2, 2));
+            assert_eq!((decoded.width, decoded.height), (2, 2));
+            // Red, written BGRA. The 1×1 blue frame was not the one selected.
+            assert_eq!(decoded.bgra, [0, 0, 255, 255].repeat(4));
+        }
+
+        let by_side = ImageLimits {
+            max_dimension: 1,
+            ..ImageLimits::default()
+        };
+        let decoded = decode_image(&large_first, ImageFormat::Ico, &by_side).unwrap();
+        assert_eq!((decoded.source_width, decoded.source_height), (1, 1));
+        assert_eq!(decoded.bgra, vec![255, 0, 0, 255]);
+
+        let by_pixels = ImageLimits {
+            max_pixels: 1,
+            ..ImageLimits::default()
+        };
+        let decoded = decode_image(&small_first, ImageFormat::Ico, &by_pixels).unwrap();
+        assert_eq!((decoded.width, decoded.height), (1, 1));
+        assert_eq!(decoded.bgra, vec![255, 0, 0, 255]);
+
+        let none = ImageLimits {
+            max_pixels: 0,
+            ..ImageLimits::default()
+        };
+        assert_eq!(
+            decode_image(&large_first, ImageFormat::Ico, &none).unwrap_err(),
+            ImageError::TooLarge {
+                width: 1,
+                height: 1
+            }
+        );
+        assert_eq!(
+            decode_image(&[0, 0, 1, 0, 0, 0], ImageFormat::Ico, &limits()).unwrap_err(),
+            ImageError::Corrupt
+        );
+        assert_eq!(
+            decode_image(&[0, 0, 2, 0, 1, 0], ImageFormat::Ico, &limits()).unwrap_err(),
+            ImageError::Corrupt
+        );
+    }
+
+    #[test]
+    fn oversized_bmp_gif_and_webp_headers_are_too_large() {
+        assert_eq!(
+            decode_image(&crafted_bmp(40_000, 2), ImageFormat::Bmp, &limits()).unwrap_err(),
+            ImageError::TooLarge {
+                width: 40_000,
+                height: 2
+            }
+        );
+        assert_eq!(
+            decode_image(&crafted_bmp(20_000, 20_000), ImageFormat::Bmp, &limits()).unwrap_err(),
+            ImageError::TooLarge {
+                width: 20_000,
+                height: 20_000
+            }
+        );
+        assert_eq!(
+            decode_image(&crafted_gif(40_000, 1), ImageFormat::Gif, &limits()).unwrap_err(),
+            ImageError::TooLarge {
+                width: 40_000,
+                height: 1
+            }
+        );
+        assert_eq!(
+            decode_image(&crafted_gif(10_001, 10_000), ImageFormat::Gif, &limits()).unwrap_err(),
+            ImageError::TooLarge {
+                width: 10_001,
+                height: 10_000
+            }
+        );
+        let wide = crafted_webp(40_000, 2);
+        assert_eq!(webp_canvas_dimensions(&wide), Some((40_000, 2)));
+        assert_eq!(
+            decode_image(&wide, ImageFormat::WebP, &limits()).unwrap_err(),
+            ImageError::TooLarge {
+                width: 40_000,
+                height: 2
+            }
+        );
+        assert_eq!(
+            decode_image(&crafted_webp(10_001, 10_000), ImageFormat::WebP, &limits()).unwrap_err(),
+            ImageError::TooLarge {
+                width: 10_001,
+                height: 10_000
+            }
+        );
+    }
+
+    #[test]
+    fn bmp_geometry_and_alloc_limits_apply_before_pixels_are_stored() {
+        let bmp = rgb_bmp(2, 2, &[9, 8, 7, 9, 8, 7, 9, 8, 7, 9, 8, 7]);
+        let too_many = ImageLimits {
+            max_pixels: 3,
+            ..ImageLimits::default()
+        };
+        assert_eq!(
+            decode_image(&bmp, ImageFormat::Bmp, &too_many).unwrap_err(),
+            ImageError::TooLarge {
+                width: 2,
+                height: 2
+            }
+        );
+        let too_wide = ImageLimits {
+            max_dimension: 1,
+            ..ImageLimits::default()
+        };
+        assert_eq!(
+            decode_image(&bmp, ImageFormat::Bmp, &too_wide).unwrap_err(),
+            ImageError::TooLarge {
+                width: 2,
+                height: 2
+            }
+        );
+        let exact = ImageLimits {
+            max_pixels: 4,
+            max_dimension: 2,
+            ..ImageLimits::default()
+        };
+        let decoded = decode_image(&bmp, ImageFormat::Bmp, &exact).unwrap();
+        assert_eq!((decoded.width, decoded.height), (2, 2));
+
+        let bigger = rgb_bmp(16, 16, &vec![40u8; 16 * 16 * 3]);
+        let tight = ImageLimits {
+            max_alloc_bytes: 32,
+            ..ImageLimits::default()
+        };
+        assert_eq!(
+            decode_image(&bigger, ImageFormat::Bmp, &tight).unwrap_err(),
+            ImageError::TooLarge {
+                width: 16,
+                height: 16
+            }
+        );
+    }
+
+    #[test]
+    fn header_only_bmp_and_gif_inside_the_limits_are_corrupt() {
+        assert_eq!(
+            decode_image(&crafted_bmp(1, 1), ImageFormat::Bmp, &limits()).unwrap_err(),
+            ImageError::Corrupt
+        );
+        assert_eq!(
+            decode_image(&crafted_bmp(0, 4), ImageFormat::Bmp, &limits()).unwrap_err(),
+            ImageError::Corrupt
+        );
+        assert_eq!(
+            decode_image(&crafted_gif(1, 1), ImageFormat::Gif, &limits()).unwrap_err(),
+            ImageError::Corrupt
+        );
+        assert_eq!(
+            decode_image(&crafted_gif(0, 4), ImageFormat::Gif, &limits()).unwrap_err(),
+            ImageError::Corrupt
+        );
+        assert_eq!(
+            decode_image(b"this is not an image", ImageFormat::Bmp, &limits()).unwrap_err(),
+            ImageError::Corrupt
+        );
+        assert_eq!(
+            decode_image(b"this is not an image", ImageFormat::WebP, &limits()).unwrap_err(),
+            ImageError::Corrupt
+        );
     }
 }
