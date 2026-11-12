@@ -45,15 +45,16 @@ mod win {
         choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk,
         close_button_bounds, decide_hook_key, double_click_action, effective_dpi,
         fallback_type_name, gate_show, hit_test, hook_key_from_vk, image_dest_rect,
-        load_text_preview, min_physical_size, nav_reload_remaining, nonempty_path, parse_command,
-        place_preview, pointer_over_close, scaled_close_width, scaled_detail_font,
-        scaled_font_height, scaled_header_font, scaled_header_height, scaled_header_pad,
-        session_phase, step, typeahead_window_ms, wheel_scroll_dy, CancelToken, ChromeLayout,
-        Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone, HookContext,
-        HookDecision, HookKey, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError,
-        PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
-        SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey,
-        WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
+        is_selection_pointer_message, load_text_preview, min_physical_size, nav_reload_remaining,
+        nonempty_path, parse_command, place_preview, pointer_over_close, scaled_close_width,
+        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
+        scaled_header_pad, session_phase, should_reload_after_pointer,
+        should_reload_after_shell_event, step, typeahead_window_ms, wheel_scroll_dy, CancelToken,
+        ChromeLayout, Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone,
+        HookContext, HookDecision, HookKey, KeyPhase, Modifiers, NavKey, Presented, Preview,
+        PreviewError, PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter, ScrollHold,
+        ScrollOp, SelectionTarget, SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey,
+        Typeahead, TypeaheadKey, WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -117,23 +118,25 @@ mod win {
         PostQuitMessage, PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SendMessageW,
         SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
         SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
-        CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
-        ES_READONLY, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON,
-        HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+        WindowFromPoint, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL,
+        ES_MULTILINE, ES_READONLY, EVENT_OBJECT_SELECTION, EVENT_OBJECT_SELECTIONWITHIN,
+        EVENT_SYSTEM_FOREGROUND, GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU,
+        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
         HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_UP,
         MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MF_STRING,
         MINMAXINFO, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP,
         SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
         SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-        WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP,
-        WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-        WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-        WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
-        WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL,
-        WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT,
-        WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSW,
-        WNDCLASS_STYLES, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
+        WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT,
+        WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
+        WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP,
+        WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
+        WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
+        WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK,
+        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSW, WNDCLASS_STYLES, WS_CHILD, WS_CLIPCHILDREN,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME,
+        WS_VISIBLE, WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -227,6 +230,12 @@ mod win {
     /// Previous edit-control window procedure. Zero when the edit is gone.
     static EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
     static FOREGROUND_HOOK: AtomicIsize = AtomicIsize::new(0);
+    /// Selection WinEvent hook. Zero when no preview session is open.
+    static SELECTION_HOOK: AtomicIsize = AtomicIsize::new(0);
+    /// Explorer thread the selection hook is scoped to. Zero when unhooked.
+    static SELECTION_HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
+    /// Explorer thread for which `SetWinEventHook` already failed. Zero when unset.
+    static SELECTION_HOOK_FAILED: AtomicU32 = AtomicU32::new(0);
     // Hook-thread only. The low-level hook runs on `spacepeek-hook`.
     thread_local! {
         static REPEATS: RefCell<RepeatFilter> = const { RefCell::new(RepeatFilter::new()) };
@@ -323,6 +332,7 @@ mod win {
                 Ok(hook) => hook,
                 Err(err) => {
                     remove_foreground_hook();
+                    remove_selection_hook();
                     remove_tray_icon(msg_hwnd);
                     let _ = DestroyWindow(msg_hwnd);
                     CoUninitialize();
@@ -340,6 +350,7 @@ mod win {
             }
             stop_hook_thread(hook);
             remove_foreground_hook();
+            remove_selection_hook();
             CoUninitialize();
         }
 
@@ -670,16 +681,26 @@ mod win {
         if code < 0 {
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
-        if wparam.0 as u32 != WM_MOUSEWHEEL {
+        let message = wparam.0 as u32;
+        if message == WM_MOUSEWHEEL {
+            let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            if !point_in_preview(ms.pt) {
+                return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+            }
+            let delta = i32::from((ms.mouseData >> 16) as i16);
+            if delta != 0 && post_app_param(WM_SPACEPEEK_WHEEL, delta as u32 as usize) {
+                return LRESULT(1);
+            }
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
-        let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-        if !point_in_preview(ms.pt) {
-            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
-        }
-        let delta = i32::from((ms.mouseData >> 16) as i16);
-        if delta != 0 && post_app_param(WM_SPACEPEEK_WHEEL, delta as u32 as usize) {
-            return LRESULT(1);
+        // A button release only asks the UI thread to re-read Explorer after
+        // the click has been applied. The hook thread must not call
+        // `selected_path`, and the click is never swallowed.
+        if is_selection_pointer_message(message) && !current_phase().is_hidden() {
+            let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            if should_reload_after_pointer(true, message, pointer_target(ms.pt)) {
+                let _ = post_app(WM_SPACEPEEK_NAV);
+            }
         }
         CallNextHookEx(HHOOK::default(), code, wparam, lparam)
     }
@@ -743,16 +764,17 @@ mod win {
 
     fn sync_watch_timer() {
         let hwnd = main_hwnd();
-        if hwnd.0.is_null() {
-            return;
-        }
-        unsafe {
-            if current_phase().is_hidden() {
-                let _ = KillTimer(hwnd, WATCH_TIMER_ID);
-            } else {
-                let _ = SetTimer(hwnd, WATCH_TIMER_ID, WATCH_INTERVAL_MS, None);
+        if !hwnd.0.is_null() {
+            unsafe {
+                if current_phase().is_hidden() {
+                    let _ = KillTimer(hwnd, WATCH_TIMER_ID);
+                } else {
+                    let _ = SetTimer(hwnd, WATCH_TIMER_ID, WATCH_INTERVAL_MS, None);
+                }
             }
         }
+        // Same lifetime as the watch timer: only while a session is open.
+        sync_selection_hook();
     }
 
     fn origin_is_foreground() -> bool {
@@ -831,6 +853,49 @@ mod win {
         }
     }
 
+    fn hooked_preview() -> HWND {
+        HWND(PREVIEW_HWND.load(Ordering::Acquire) as *mut _)
+    }
+
+    fn hooked_origin() -> HWND {
+        HWND(ORIGIN_EXPLORER.load(Ordering::Acquire) as *mut _)
+    }
+
+    /// Preview is tested first. The preview sits above Explorer, so a point on
+    /// its header, × button, or body is the preview even when that point is
+    /// also inside the Explorer rectangle.
+    fn pointer_target(pt: POINT) -> SelectionTarget {
+        classify_hwnd(unsafe { WindowFromPoint(pt) })
+    }
+
+    fn classify_hwnd(hwnd: HWND) -> SelectionTarget {
+        if same_root(hwnd, hooked_preview()) {
+            SelectionTarget::Preview
+        } else if same_root(hwnd, hooked_origin()) {
+            SelectionTarget::Origin
+        } else {
+            SelectionTarget::Elsewhere
+        }
+    }
+
+    fn same_root(hwnd: HWND, root: HWND) -> bool {
+        if hwnd.0.is_null() || root.0.is_null() {
+            return false;
+        }
+        unsafe {
+            if !IsWindow(hwnd).as_bool() || !IsWindow(root).as_bool() {
+                return false;
+            }
+        }
+        if hwnd == root {
+            return true;
+        }
+        unsafe {
+            let ancestor = GetAncestor(hwnd, GA_ROOT);
+            !ancestor.0.is_null() && ancestor == root
+        }
+    }
+
     fn install_foreground_hook() {
         unsafe {
             let hook = SetWinEventHook(
@@ -856,6 +921,110 @@ mod win {
         }
         unsafe {
             let _ = UnhookWinEvent(HWINEVENTHOOK(bits as *mut _));
+        }
+    }
+
+    /// Selection changes in the origin Explorer, only while a preview session
+    /// is open.
+    ///
+    /// `EVENT_OBJECT_SELECTION` through `EVENT_OBJECT_SELECTIONWITHIN` are
+    /// delivered out of context on this UI thread, scoped to the origin
+    /// window's thread. The callback posts the same debounced reload the arrow
+    /// keys use. It does not call `selected_path` (that COM call pumps this
+    /// STA) and it does not activate the preview.
+    ///
+    /// A shell connection point (`DShellFolderViewEvents`) is also event-driven,
+    /// but Explorer replaces that view object on navigation, and the sink runs
+    /// on Explorer's call stack. This hook stays valid for the whole session.
+    /// A mouse-button release inside the origin window posts the same reload,
+    /// because some Explorer views do not raise a selection event for a click.
+    /// The click itself is not the new path: `reload_selection` reads it after
+    /// `NAV_RELOAD_DELAY_MS`, which is a delay, not a measured latency. One
+    /// click can produce the release and several selection events; the shared
+    /// timer collapses them into one read. Nothing is installed while idle.
+    fn sync_selection_hook() {
+        if current_phase().is_hidden() {
+            remove_selection_hook();
+            return;
+        }
+        let explorer = hooked_origin();
+        if explorer.0.is_null() || unsafe { !IsWindow(explorer).as_bool() } {
+            remove_selection_hook();
+            return;
+        }
+        let mut pid = 0u32;
+        let thread = unsafe { GetWindowThreadProcessId(explorer, Some(&mut pid)) };
+        if thread == 0 {
+            remove_selection_hook();
+            return;
+        }
+        if SELECTION_HOOK.load(Ordering::Acquire) != 0
+            && SELECTION_HOOK_THREAD.load(Ordering::Acquire) == thread
+        {
+            return;
+        }
+        if SELECTION_HOOK_FAILED.load(Ordering::Acquire) == thread {
+            return;
+        }
+        remove_selection_hook();
+        unsafe {
+            let flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
+            let mut hook = SetWinEventHook(
+                EVENT_OBJECT_SELECTION,
+                EVENT_OBJECT_SELECTIONWITHIN,
+                HMODULE(std::ptr::null_mut()),
+                Some(selection_event),
+                pid,
+                thread,
+                flags,
+            );
+            // A process id that does not match the thread makes the call fail.
+            // Thread-only still limits delivery to that Explorer window.
+            if hook.0.is_null() && pid != 0 {
+                hook = SetWinEventHook(
+                    EVENT_OBJECT_SELECTION,
+                    EVENT_OBJECT_SELECTIONWITHIN,
+                    HMODULE(std::ptr::null_mut()),
+                    Some(selection_event),
+                    0,
+                    thread,
+                    flags,
+                );
+            }
+            if hook.0.is_null() {
+                SELECTION_HOOK_FAILED.store(thread, Ordering::Release);
+                debug_log("Spacepeek: selection hook was not installed\n");
+                return;
+            }
+            SELECTION_HOOK.store(hook.0 as isize, Ordering::Release);
+            SELECTION_HOOK_THREAD.store(thread, Ordering::Release);
+        }
+    }
+
+    fn remove_selection_hook() {
+        SELECTION_HOOK_THREAD.store(0, Ordering::Release);
+        SELECTION_HOOK_FAILED.store(0, Ordering::Release);
+        let bits = SELECTION_HOOK.swap(0, Ordering::AcqRel);
+        if bits == 0 {
+            return;
+        }
+        unsafe {
+            let _ = UnhookWinEvent(HWINEVENTHOOK(bits as *mut _));
+        }
+    }
+
+    unsafe extern "system" fn selection_event(
+        _hook: HWINEVENTHOOK,
+        event: u32,
+        hwnd: HWND,
+        _id_object: i32,
+        _id_child: i32,
+        _thread: u32,
+        _time: u32,
+    ) {
+        if should_reload_after_shell_event(!current_phase().is_hidden(), event, classify_hwnd(hwnd))
+        {
+            let _ = post_app(WM_SPACEPEEK_NAV);
         }
     }
 
@@ -1148,6 +1317,9 @@ mod win {
     }
 
     fn on_nav_request() {
+        // Arrow keys, selection WinEvents, and mouse-button releases in the
+        // origin Explorer all land here. The delay gives Explorer time to
+        // apply the change and collapses a burst into one read.
         if current_phase().is_hidden() {
             return;
         }

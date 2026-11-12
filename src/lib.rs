@@ -41,7 +41,10 @@ pub use preview::{
     CancelToken, DeniedKind, Generation, Preview, PreviewError, PreviewLimits, QuickInfo,
     Truncation, DEFAULT_MAX_BYTES, MAX_LINE_UTF16,
 };
-pub use selection::{choose_selected, nonempty_path};
+pub use selection::{
+    choose_selected, is_selection_pointer_message, nonempty_path, should_reload_after_pointer,
+    should_reload_after_shell_event, SelectionTarget,
+};
 pub use state::{
     gate_show, session_phase, step, Effect, Event, PreviewState, ShowGate, ShowOutcome,
 };
