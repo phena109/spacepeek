@@ -42,19 +42,21 @@ mod win {
     };
 
     use spacepeek::{
-        choose_selected, chrome_for_error, chrome_for_text, classify_typeahead_vk,
-        close_button_bounds, decide_hook_key, double_click_action, effective_dpi,
-        fallback_type_name, gate_show, hit_test, hook_key_from_vk, image_dest_rect,
+        apply_image_command, choose_selected, chrome_for_error, chrome_for_text,
+        classify_typeahead_vk, close_button_bounds, decide_hook_key, double_click_action,
+        effective_dpi, fallback_type_name, gate_show, hit_test, hook_key_from_vk, image_view_rect,
         is_selection_pointer_message, load_text_preview, min_physical_size, nav_reload_remaining,
-        nonempty_path, parse_command, place_preview, pointer_over_close, scaled_close_width,
-        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
-        scaled_header_pad, session_phase, should_reload_after_pointer,
-        should_reload_after_shell_event, step, typeahead_window_ms, wheel_scroll_dy, CancelToken,
-        ChromeLayout, Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone,
-        HookContext, HookDecision, HookKey, KeyPhase, Modifiers, NavKey, Presented, Preview,
-        PreviewError, PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter, ScrollHold,
-        ScrollOp, SelectionTarget, SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey,
-        Typeahead, TypeaheadKey, WindowKind, NAV_RELOAD_DELAY_MS, VERSION,
+        nonempty_path, pack_screen_point, parse_command, place_preview, pointer_over_close,
+        reconcile_image_view, reset_for_new_image, scaled_close_width, scaled_detail_font,
+        scaled_font_height, scaled_header_font, scaled_header_height, scaled_header_pad,
+        session_phase, should_reload_after_pointer, should_reload_after_shell_event, step,
+        typeahead_for_decision, typeahead_window_ms, unpack_screen_point, wheel_scroll_dy,
+        wheel_zoom_command, CancelToken, ChromeLayout, Command, DecodedImage, DoubleClickAction,
+        Effect, Event, Generation, HitZone, HookContext, HookDecision, HookKey, ImageCommand,
+        ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError,
+        PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
+        SelectionTarget, SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey, Typeahead,
+        TypeaheadKey, WindowKind, ZoomHold, ZoomKey, ZoomOp, NAV_RELOAD_DELAY_MS, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -68,13 +70,14 @@ mod win {
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, ClientToScreen, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject,
         DrawTextW, EndPaint, ExcludeClipRect, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush,
-        GetTextFaceW, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC, RoundRect, SaveDC,
-        SelectObject, SetBkMode, SetBrushOrgEx, SetStretchBltMode, SetTextColor, StretchDIBits,
-        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET,
-        DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
-        DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL,
-        FW_SEMIBOLD, HALFTONE, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        PAINTSTRUCT, PS_SOLID, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
+        GetTextFaceW, IntersectClipRect, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC,
+        RoundRect, SaveDC, ScreenToClient, SelectObject, SetBkMode, SetBrushOrgEx,
+        SetStretchBltMode, SetTextColor, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT,
+        DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+        DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL, FW_SEMIBOLD, HALFTONE, HDC,
+        HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_SOLID, SRCCOPY,
+        TRANSPARENT, VARIABLE_PITCH,
     };
     use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, WIN32_FIND_DATAW};
     use windows::Win32::System::Com::{
@@ -94,9 +97,9 @@ mod win {
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, SetFocus, TrackMouseEvent,
-        TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN,
-        VK_SHIFT,
+        GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, ReleaseCapture, SetCapture,
+        SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE,
+        VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
     };
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
@@ -152,6 +155,10 @@ mod win {
     /// Posted from the edit control so a body double-click opens after that
     /// procedure returns. The window is gone before a triple-click can repeat it.
     const WM_SPACEPEEK_OPEN: u32 = WM_APP + 9;
+    /// `wparam` is a [`ZoomOp`] code. One keyboard step.
+    const WM_SPACEPEEK_ZOOM: u32 = WM_APP + 10;
+    /// `WM_CAPTURECHANGED`. Kept local so the preview does not need extra features.
+    const WM_CAPTURECHANGED: u32 = 0x0215;
     /// `NIN_KEYSELECT` is `WM_USER + 1`. The windows crate exports `NIN_SELECT` only.
     const NIN_KEYSELECT: u32 = WM_USER + 1;
     const EM_SETLIMITTEXT: u32 = 0x00C5;
@@ -212,6 +219,40 @@ mod win {
         /// Filesystem path of the file the window is showing. Empty when hidden.
         /// A reload keeps the previous path until the new content is installed.
         shown_path: PathBuf,
+        /// Fit, zoom, and pan for the current image. Reset when the file changes.
+        image_view: ImageView,
+        /// Left-drag on a zoomed image. Idle unless that drag is in progress.
+        pan_drag: PanDrag,
+        /// The gesture that just ended moved the picture, so the following
+        /// double-click must not also open the file.
+        suppress_dblclk: bool,
+    }
+
+    /// Pointer position at mouse-down and the pan at that moment.
+    ///
+    /// Header drags never reach this: the header is `HTCAPTION`. A press on ×
+    /// does not start it. At fit, the body does not start it either.
+    struct PanDrag {
+        origin_x: i32,
+        origin_y: i32,
+        origin_pan_x: i32,
+        origin_pan_y: i32,
+        tracking: bool,
+        /// The pointer left the mouse-down point, so this gesture is a drag.
+        moved: bool,
+    }
+
+    impl PanDrag {
+        const fn idle() -> Self {
+            Self {
+                origin_x: 0,
+                origin_y: 0,
+                origin_pan_x: 0,
+                origin_pan_y: 0,
+                tracking: false,
+                moved: false,
+            }
+        }
     }
 
     static APP: AtomicPtr<RefCell<App>> = AtomicPtr::new(std::ptr::null_mut());
@@ -223,6 +264,8 @@ mod win {
     static PREVIEW_HWND: AtomicIsize = AtomicIsize::new(0);
     /// [`SessionPhase`] as a byte. The hook thread reads it.
     static PHASE: AtomicU8 = AtomicU8::new(0);
+    /// The preview currently showing is an image. The hook thread reads it.
+    static IMAGE_VISIBLE: AtomicBool = AtomicBool::new(false);
     /// Explorer that owns the current session. Zero when nothing is open.
     static ORIGIN_EXPLORER: AtomicIsize = AtomicIsize::new(0);
     /// Bumped when Space or Esc is posted to the UI thread.
@@ -241,6 +284,7 @@ mod win {
         static REPEATS: RefCell<RepeatFilter> = const { RefCell::new(RepeatFilter::new()) };
         static TYPEAHEAD: RefCell<Typeahead> = const { RefCell::new(Typeahead::new(1_000)) };
         static SCROLLS: RefCell<ScrollHold> = const { RefCell::new(ScrollHold::new()) };
+        static ZOOMS: RefCell<ZoomHold> = const { RefCell::new(ZoomHold::new()) };
     }
 
     struct HookThread {
@@ -305,6 +349,9 @@ mod win {
             nav_busy: false,
             close_hovered: false,
             shown_path: PathBuf::new(),
+            image_view: ImageView::fit(),
+            pan_drag: PanDrag::idle(),
+            suppress_dblclk: false,
         })));
         APP.store(app, Ordering::Release);
 
@@ -547,6 +594,7 @@ mod win {
                 phase,
                 kb.time,
             ),
+            HookKey::Zoom(zoom) => handle_zoom(code, wparam, lparam, zoom, vk, phase, kb.time),
         }
     }
 
@@ -677,6 +725,46 @@ mod win {
         }
     }
 
+    fn handle_zoom(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        zoom: ZoomKey,
+        vk: u16,
+        phase: KeyPhase,
+        tick: u32,
+    ) -> LRESULT {
+        let ctx = hook_context(tick);
+        let decision = decide_hook_key(&ctx, HookKey::Zoom(zoom));
+        // Intercepted zoom keys are [`TypeaheadKey::Ignored`], so they do not
+        // arm type-ahead. A key we pass through is classified as usual.
+        if phase == KeyPhase::Down {
+            note_typeahead_kind(typeahead_for_decision(vk, ctx.modifiers, decision), tick);
+        }
+        let take = matches!(decision, HookDecision::Zoom(_));
+        let repeat = ZOOMS.with(|slot| slot.borrow_mut().observe(zoom, phase, take));
+        if repeat.act {
+            let op = match decision {
+                HookDecision::Zoom(op) => op.code(),
+                _ => 0,
+            };
+            if op == 0 || !post_app_param(WM_SPACEPEEK_ZOOM, usize::from(op)) {
+                ZOOMS.with(|slot| slot.borrow_mut().release(zoom));
+                if phase == KeyPhase::Down {
+                    note_typeahead_kind(
+                        typeahead_for_decision(vk, ctx.modifiers, HookDecision::Pass),
+                        tick,
+                    );
+                }
+                return call_next(code, wparam, lparam);
+            }
+        }
+        if repeat.swallow {
+            return LRESULT(1);
+        }
+        call_next(code, wparam, lparam)
+    }
+
     unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         if code < 0 {
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
@@ -688,7 +776,11 @@ mod win {
                 return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
             }
             let delta = i32::from((ms.mouseData >> 16) as i16);
-            if delta != 0 && post_app_param(WM_SPACEPEEK_WHEEL, delta as u32 as usize) {
+            // The screen point is the zoom anchor. Text scrolling ignores it.
+            let packed = pack_screen_point(ms.pt.x, ms.pt.y);
+            if delta != 0
+                && post_app_message(WM_SPACEPEEK_WHEEL, delta as u32 as usize, packed as isize)
+            {
                 return LRESULT(1);
             }
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
@@ -725,12 +817,16 @@ mod win {
             origin_is_foreground: origin_is_foreground(),
             modifiers,
             typeahead_active,
+            image_visible: IMAGE_VISIBLE.load(Ordering::Acquire),
         }
     }
 
     fn note_typeahead(vk: u16, tick: u32) {
         let modifiers = read_modifiers();
-        let kind = classify_typeahead_vk(vk, modifiers);
+        note_typeahead_kind(classify_typeahead_vk(vk, modifiers), tick);
+    }
+
+    fn note_typeahead_kind(kind: TypeaheadKey, tick: u32) {
         if kind == TypeaheadKey::Ignored {
             return;
         }
@@ -811,16 +907,25 @@ mod win {
         PREVIEW_HWND.store(hwnd.0 as isize, Ordering::Release);
     }
 
+    fn publish_image_visible(presented: Option<&Presented>) {
+        let on = matches!(presented, Some(Presented::Image { .. }));
+        IMAGE_VISIBLE.store(on, Ordering::Release);
+    }
+
     fn post_app(msg: u32) -> bool {
         post_app_param(msg, 0)
     }
 
     fn post_app_param(msg: u32, wparam: usize) -> bool {
+        post_app_message(msg, wparam, 0)
+    }
+
+    fn post_app_message(msg: u32, wparam: usize, lparam: isize) -> bool {
         let hwnd = main_hwnd();
         if hwnd.0.is_null() {
             return false;
         }
-        unsafe { PostMessageW(hwnd, msg, WPARAM(wparam), LPARAM(0)).is_ok() }
+        unsafe { PostMessageW(hwnd, msg, WPARAM(wparam), LPARAM(lparam)).is_ok() }
     }
 
     fn read_modifiers() -> Modifiers {
@@ -1129,7 +1234,13 @@ mod win {
                 LRESULT(0)
             }
             WM_SPACEPEEK_WHEEL => {
-                scroll_wheel(wparam.0 as u32 as i32);
+                on_preview_wheel(wparam.0 as u32 as i32, unpack_screen_point(lparam.0 as i64));
+                LRESULT(0)
+            }
+            WM_SPACEPEEK_ZOOM => {
+                if let Some(op) = ZoomOp::from_code(wparam.0 as u8) {
+                    zoom_from_key(op);
+                }
                 LRESULT(0)
             }
             WM_SPACEPEEK_FOREGROUND => {
@@ -1180,6 +1291,9 @@ mod win {
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
+                // End a pan before the close check. Releasing on × still closes.
+                // A press that started on × never started a pan.
+                end_image_pan();
                 if hit_at_client(hwnd, lparam) == HitZone::Close {
                     dispatch(Event::EscPressed);
                 }
@@ -1192,6 +1306,41 @@ mod win {
                 let (x, y) = client_point_in_window(hwnd, lparam);
                 update_close_hover(hwnd, pointer_over_close(window_layout(hwnd), x, y));
                 track_client_leave(hwnd);
+                drag_image_pan(hwnd, lparam);
+                LRESULT(0)
+            }
+            // Left-drag versus window chrome:
+            // - Header is `HTCAPTION`, so it never arrives here. It drags the window.
+            // - Close (`HitZone::Close`): do not pan. Button-up still closes.
+            // - Body, zoomed past fit: capture and pan the image.
+            // - Body, at fit (or not an image): do nothing. No window move, no pan.
+            // A double-click that does not move still opens the file. A pan that
+            // moved is a drag: the following double-click does not also open.
+            // Returning 0 keeps `DefWindowProc` from treating the body press as a drag.
+            WM_LBUTTONDOWN => {
+                // A fresh press is not the second half of a double-click.
+                with_app_mut(|app| app.suppress_dblclk = false);
+                if hit_at_client(hwnd, lparam) == HitZone::Client {
+                    begin_image_pan(hwnd, lparam);
+                }
+                LRESULT(0)
+            }
+            WM_CAPTURECHANGED => {
+                // Another grab took the pointer. Drop the gesture. `end_image_pan`
+                // clears tracking before `ReleaseCapture`, so this does not run twice.
+                // A drag that already moved is not an open if the button-up is lost.
+                let tracking = with_app_mut(|app| {
+                    let was = app.pan_drag.tracking;
+                    if app.pan_drag.moved {
+                        app.suppress_dblclk = true;
+                    }
+                    app.pan_drag = PanDrag::idle();
+                    was
+                });
+                if tracking {
+                    let explorer = with_app(|app| app.explorer_hwnd);
+                    restore_explorer_focus(explorer);
+                }
                 LRESULT(0)
             }
             WM_NCMOUSEMOVE => {
@@ -1204,8 +1353,17 @@ mod win {
                 LRESULT(0)
             }
             // Body only. The header is non-client, and the × is `HitZone::Close`.
+            // A drag that already panned is not an open. A click that did not
+            // move still double-clicks through to the file.
             WM_LBUTTONDBLCLK => {
-                if double_click_action(hit_at_client(hwnd, lparam)) == DoubleClickAction::Open {
+                let suppress = with_app_mut(|app| {
+                    let suppress = app.suppress_dblclk;
+                    app.suppress_dblclk = false;
+                    suppress
+                });
+                if !suppress
+                    && double_click_action(hit_at_client(hwnd, lparam)) == DoubleClickAction::Open
+                {
                     open_current_file();
                 }
                 LRESULT(0)
@@ -1224,6 +1382,7 @@ mod win {
             }
             WM_SIZE => {
                 resize_edit(hwnd);
+                reconcile_shown_image(hwnd);
                 invalidate_preview(hwnd);
                 LRESULT(0)
             }
@@ -1263,7 +1422,11 @@ mod win {
                         app.presented = None;
                         app.close_hovered = false;
                         app.shown_path.clear();
+                        app.image_view = reset_for_new_image(app.image_view);
+                        app.pan_drag = PanDrag::idle();
+                        app.suppress_dblclk = false;
                         publish_preview_hwnd(HWND::default());
+                        publish_image_visible(None);
                     }
                 });
                 LRESULT(0)
@@ -1843,7 +2006,11 @@ mod win {
                 app.preview_hwnd = hwnd;
                 app.edit_hwnd = HWND::default();
                 app.presented = Some(paint_presented(&presented));
+                app.image_view = reset_for_new_image(app.image_view);
+                app.pan_drag = PanDrag::idle();
+                app.suppress_dblclk = false;
                 publish_preview_hwnd(hwnd);
+                publish_image_visible(app.presented.as_ref());
             });
             if !install_body(hwnd, instance, &presented, fonts.edit) {
                 unsafe {
@@ -1854,7 +2021,10 @@ mod win {
                         app.preview_hwnd = HWND::default();
                         app.edit_hwnd = HWND::default();
                         app.presented = None;
+                        app.image_view = reset_for_new_image(app.image_view);
+                        app.suppress_dblclk = false;
                         publish_preview_hwnd(HWND::default());
+                        publish_image_visible(None);
                     }
                 });
                 return false;
@@ -1868,8 +2038,13 @@ mod win {
                 return false;
             }
             set_text(existing, &title);
+            // A new load starts at fit. The previous file's zoom does not carry over.
+            end_image_pan();
             with_app_mut(|app| {
                 app.presented = Some(paint_presented(&presented));
+                app.image_view = reset_for_new_image(app.image_view);
+                app.suppress_dblclk = false;
+                publish_image_visible(app.presented.as_ref());
             });
             publish_preview_hwnd(existing);
             invalidate_preview(existing);
@@ -2080,8 +2255,14 @@ mod win {
     }
 
     fn hide_preview(restore_focus: bool) {
+        end_image_pan();
         let (preview, explorer) = with_app(|app| (app.preview_hwnd, app.explorer_hwnd));
-        with_app_mut(|app| app.last_nav_tick = None);
+        with_app_mut(|app| {
+            app.last_nav_tick = None;
+            app.image_view = reset_for_new_image(app.image_view);
+            app.suppress_dblclk = false;
+            publish_image_visible(None);
+        });
         let hwnd = main_hwnd();
         unsafe {
             let _ = KillTimer(hwnd, NAV_TIMER_ID);
@@ -2102,7 +2283,11 @@ mod win {
             app.presented = None;
             app.close_hovered = false;
             app.shown_path.clear();
+            app.image_view = reset_for_new_image(app.image_view);
+            app.pan_drag = PanDrag::idle();
+            app.suppress_dblclk = false;
             publish_preview_hwnd(HWND::default());
+            publish_image_visible(None);
         });
         EDIT_PROC.store(0, Ordering::Release);
         if restore_focus {
@@ -2134,6 +2319,206 @@ mod win {
             let _ = SendMessageW(edit, WM_VSCROLL, WPARAM(command.0 as usize), LPARAM(0));
         }
         suppress_caret(edit);
+    }
+
+    fn on_preview_wheel(delta: i32, screen: (i32, i32)) {
+        if image_is_showing() {
+            if let Some(command) = wheel_zoom_command(delta) {
+                apply_view_command(command, Some(screen));
+            }
+        } else {
+            scroll_wheel(delta);
+        }
+    }
+
+    fn zoom_from_key(op: ZoomOp) {
+        let command = match op {
+            ZoomOp::In => ImageCommand::ZoomIn { steps: 1 },
+            ZoomOp::Out => ImageCommand::ZoomOut { steps: 1 },
+            ZoomOp::Fit => ImageCommand::Fit,
+            ZoomOp::Actual => ImageCommand::Actual,
+        };
+        apply_view_command(command, Some(cursor_pos()));
+    }
+
+    fn image_is_showing() -> bool {
+        with_app(|app| matches!(app.presented, Some(Presented::Image { .. })))
+    }
+
+    /// `screen` is the pointer in screen pixels. Inside the body it is the zoom
+    /// anchor; over the header, or off the window, zoom uses the body centre.
+    fn apply_view_command(command: ImageCommand, screen: Option<(i32, i32)>) {
+        let hwnd = with_app(|app| app.preview_hwnd);
+        let Some(frame) = image_frame(hwnd) else {
+            return;
+        };
+        let cursor = screen.and_then(|(x, y)| screen_to_client_xy(hwnd, x, y));
+        let changed = with_app_mut(|app| {
+            if !matches!(app.presented, Some(Presented::Image { .. })) {
+                return false;
+            }
+            let next = apply_image_command(app.image_view, frame, command, cursor);
+            if next == app.image_view {
+                return false;
+            }
+            app.image_view = next;
+            true
+        });
+        if changed {
+            invalidate_preview(hwnd);
+        }
+    }
+
+    fn image_frame(hwnd: HWND) -> Option<ImageFrame> {
+        let body = preview_body_rect(hwnd)?;
+        let dpi = dpi_for_anchor(hwnd);
+        let (image_w, image_h, source_w, source_h) =
+            with_app(|app| match app.presented.as_ref() {
+                Some(Presented::Image { image, .. }) => Some((
+                    image.width,
+                    image.height,
+                    image.source_width,
+                    image.source_height,
+                )),
+                _ => None,
+            })?;
+        Some(ImageFrame {
+            body,
+            image_w,
+            image_h,
+            source_w,
+            source_h,
+            dpi,
+        })
+    }
+
+    fn preview_body_rect(hwnd: HWND) -> Option<PxRect> {
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(hwnd, &mut client).is_err() } {
+            return None;
+        }
+        let width = client.right.saturating_sub(client.left);
+        let height = client.bottom.saturating_sub(client.top);
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        Some(client_body(width, height, dpi_for_anchor(hwnd)))
+    }
+
+    fn client_body(width: i32, height: i32, dpi: u32) -> PxRect {
+        let header_h = scaled_header_height(dpi).clamp(0, height);
+        PxRect {
+            left: 0,
+            top: header_h,
+            right: width,
+            bottom: height,
+        }
+    }
+
+    fn screen_to_client_xy(hwnd: HWND, x: i32, y: i32) -> Option<(i32, i32)> {
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut pt = POINT { x, y };
+        if unsafe { ScreenToClient(hwnd, &mut pt).as_bool() } {
+            Some((pt.x, pt.y))
+        } else {
+            None
+        }
+    }
+
+    fn begin_image_pan(hwnd: HWND, lparam: LPARAM) {
+        let (x, y) = lparam_xy(lparam.0 as usize);
+        let started = with_app_mut(|app| {
+            if !matches!(app.presented, Some(Presented::Image { .. })) || !app.image_view.can_pan()
+            {
+                return false;
+            }
+            let (pan_x, pan_y) = app.image_view.pan();
+            app.pan_drag = PanDrag {
+                origin_x: x,
+                origin_y: y,
+                origin_pan_x: pan_x,
+                origin_pan_y: pan_y,
+                tracking: true,
+                moved: false,
+            };
+            true
+        });
+        if started {
+            unsafe {
+                let _ = SetCapture(hwnd);
+            }
+        }
+    }
+
+    fn drag_image_pan(hwnd: HWND, lparam: LPARAM) {
+        let tracking = with_app(|app| app.pan_drag.tracking);
+        if !tracking {
+            return;
+        }
+        let (x, y) = lparam_xy(lparam.0 as usize);
+        let Some(frame) = image_frame(hwnd) else {
+            return;
+        };
+        let changed = with_app_mut(|app| {
+            if !app.pan_drag.tracking {
+                return false;
+            }
+            if x != app.pan_drag.origin_x || y != app.pan_drag.origin_y {
+                app.pan_drag.moved = true;
+            }
+            let next = apply_image_command(
+                app.image_view,
+                frame,
+                ImageCommand::Pan {
+                    origin_pan: (app.pan_drag.origin_pan_x, app.pan_drag.origin_pan_y),
+                    delta: (
+                        x.saturating_sub(app.pan_drag.origin_x),
+                        y.saturating_sub(app.pan_drag.origin_y),
+                    ),
+                },
+                None,
+            );
+            if next == app.image_view {
+                return false;
+            }
+            app.image_view = next;
+            true
+        });
+        if changed {
+            invalidate_preview(hwnd);
+        }
+    }
+
+    fn end_image_pan() {
+        let tracking = with_app_mut(|app| {
+            let was = app.pan_drag.tracking;
+            if app.pan_drag.moved {
+                app.suppress_dblclk = true;
+            }
+            app.pan_drag = PanDrag::idle();
+            was
+        });
+        if tracking {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            let explorer = with_app(|app| app.explorer_hwnd);
+            restore_explorer_focus(explorer);
+        }
+    }
+
+    fn reconcile_shown_image(hwnd: HWND) {
+        let Some(frame) = image_frame(hwnd) else {
+            return;
+        };
+        with_app_mut(|app| {
+            app.image_view = reconcile_image_view(app.image_view, frame);
+        });
     }
 
     fn scroll_wheel(delta: i32) {
@@ -2326,6 +2711,7 @@ mod win {
         let _stale = stale;
         apply_font(with_app(|app| app.edit_hwnd), fonts.edit);
         resize_edit(hwnd);
+        reconcile_shown_image(hwnd);
         invalidate_preview(hwnd);
     }
 
@@ -2560,6 +2946,7 @@ mod win {
         details: String,
         message: Option<String>,
         image: Option<std::sync::Arc<DecodedImage>>,
+        image_view: ImageView,
         header_font: HFONT,
         detail_font: HFONT,
         close_hovered: bool,
@@ -2575,6 +2962,7 @@ mod win {
                     Presented::Image { image, .. } => Some(std::sync::Arc::clone(image)),
                     _ => None,
                 },
+                image_view: app.image_view,
                 header_font: app.header_font,
                 detail_font: app.detail_font,
                 close_hovered: app.close_hovered,
@@ -2603,14 +2991,15 @@ mod win {
             return;
         }
         let dpi = dpi_for_anchor(hwnd);
-        let header_h = scaled_header_height(dpi).clamp(0, height);
+        let area = client_body(width, height, dpi);
+        let header_h = area.top;
         let close_w = scaled_close_width(dpi).clamp(0, width);
         let pad = scaled_header_pad(dpi).max(0);
         let body = RECT {
-            left: 0,
-            top: header_h,
-            right: width,
-            bottom: height,
+            left: area.left,
+            top: area.top,
+            right: area.right,
+            bottom: area.bottom,
         };
         fill_rect(
             dc,
@@ -2693,7 +3082,7 @@ mod win {
             rgb(210, 210, 210),
         );
         if let Some(image) = snap.image.as_deref() {
-            paint_image(dc, image, &body, dpi);
+            paint_image(dc, image, &body, dpi, snap.image_view);
         } else if let Some(message) = snap.message.as_deref() {
             let left = pad.min(width / 4);
             let right = (width - pad).max(left);
@@ -2711,23 +3100,24 @@ mod win {
         }
     }
 
-    /// Draw `image` centred in `body`. The background is filled around the
-    /// destination so a resize does not wipe the bitmap before the stretch.
-    fn paint_image(dc: HDC, image: &DecodedImage, body: &RECT, dpi: u32) {
-        let area = PxRect {
-            left: body.left,
-            top: body.top,
-            right: body.right,
-            bottom: body.bottom,
-        };
-        let dest = image_dest_rect(
-            area,
-            image.width,
-            image.height,
-            image.source_width,
-            image.source_height,
+    /// Draw `image` in `body` at the current zoom. The background is filled
+    /// around the destination so a resize does not wipe the bitmap before the
+    /// stretch. The clip is the body, so a zoomed picture cannot cover the header.
+    fn paint_image(dc: HDC, image: &DecodedImage, body: &RECT, dpi: u32, view: ImageView) {
+        let frame = ImageFrame {
+            body: PxRect {
+                left: body.left,
+                top: body.top,
+                right: body.right,
+                bottom: body.bottom,
+            },
+            image_w: image.width,
+            image_h: image.height,
+            source_w: image.source_width,
+            source_h: image.source_height,
             dpi,
-        );
+        };
+        let dest = image_view_rect(frame, view);
         let dest_w = dest.width();
         let dest_h = dest.height();
         let src_w = i32::try_from(image.width).unwrap_or(0);
@@ -2744,6 +3134,11 @@ mod win {
         if !drawable {
             fill_rect(dc, body, rgb(255, 255, 255));
             return;
+        }
+        // Keep the zoomed bitmap inside the body. The header is already drawn.
+        let clip = unsafe { SaveDC(dc) };
+        if clip != 0 {
+            let _ = unsafe { IntersectClipRect(dc, body.left, body.top, body.right, body.bottom) };
         }
         let saved = unsafe { SaveDC(dc) };
         if saved != 0 {
@@ -2778,6 +3173,9 @@ mod win {
                 DIB_RGB_COLORS,
                 SRCCOPY,
             );
+        }
+        if clip != 0 {
+            let _ = unsafe { RestoreDC(dc, clip) };
         }
     }
 

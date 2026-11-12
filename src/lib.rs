@@ -8,6 +8,7 @@ pub mod chrome;
 pub mod cli;
 pub mod geometry;
 pub mod image_preview;
+pub mod image_view;
 pub mod keys;
 pub mod preview;
 pub mod selection;
@@ -28,12 +29,18 @@ pub use image_preview::{
     decode_image, fit_size, format_image_details, image_dest_rect, sniff_image, DecodedImage,
     ImageError, ImageFormat, ImageLimits,
 };
+pub use image_view::{
+    apply_image_command, image_view_rect, pack_screen_point, reconcile_image_view,
+    reset_for_new_image, unpack_screen_point, wheel_zoom_command, ImageCommand, ImageFrame,
+    ImageView,
+};
 pub use keys::{
     classify_typeahead_vk, decide_hook_key, esc_action, hook_key_from_vk, nav_reload_due,
-    nav_reload_remaining, should_intercept_esc, should_intercept_space, typeahead_window_ms,
-    wheel_scroll_dy, EscAction, EscQuery, FocusContext, HookContext, HookDecision, HookKey,
-    KeyPhase, Modifiers, NavKey, RepeatFilter, ScrollHold, ScrollOp, SessionPhase, TrackedKey,
-    Typeahead, TypeaheadKey, NAV_RELOAD_DELAY_MS,
+    nav_reload_remaining, should_intercept_esc, should_intercept_space, typeahead_for_decision,
+    typeahead_window_ms, wheel_scroll_dy, EscAction, EscQuery, FocusContext, HookContext,
+    HookDecision, HookKey, KeyPhase, Modifiers, NavKey, RepeatFilter, ScrollHold, ScrollOp,
+    SessionPhase, TrackedKey, Typeahead, TypeaheadKey, ZoomHold, ZoomKey, ZoomOp,
+    NAV_RELOAD_DELAY_MS,
 };
 pub use preview::{
     fallback_type_name, format_byte_size, format_compact_size, format_quick_info, format_size_line,

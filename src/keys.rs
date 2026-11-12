@@ -82,6 +82,10 @@ pub struct HookContext {
     pub origin_is_foreground: bool,
     pub modifiers: Modifiers,
     pub typeahead_active: bool,
+    /// The on-screen preview is a still image. Text, errors, and a hidden
+    /// window leave this false. Zoom keys are taken only when it is set and
+    /// the session is [`SessionPhase::Visible`].
+    pub image_visible: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +93,20 @@ pub enum HookKey {
     Space,
     Esc,
     Nav(NavKey),
+    Zoom(ZoomKey),
+}
+
+/// Keys that zoom an image. Digits other than `0` and `1` are not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomKey {
+    /// `+`, including the key `VK_OEM_PLUS` and numpad `VK_ADD`.
+    In,
+    /// `-`, including `VK_OEM_MINUS` and numpad `VK_SUBTRACT`.
+    Out,
+    /// `0` and numpad `0`. Fit to the window.
+    Fit,
+    /// `1` and numpad `1`. Actual size.
+    Actual,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +150,37 @@ impl ScrollOp {
     }
 }
 
+/// Image zoom posted to the UI thread. One keyboard step; the wheel sends its
+/// own notch count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomOp {
+    In,
+    Out,
+    Fit,
+    Actual,
+}
+
+impl ZoomOp {
+    pub const fn code(self) -> u8 {
+        match self {
+            ZoomOp::In => 1,
+            ZoomOp::Out => 2,
+            ZoomOp::Fit => 3,
+            ZoomOp::Actual => 4,
+        }
+    }
+
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(ZoomOp::In),
+            2 => Some(ZoomOp::Out),
+            3 => Some(ZoomOp::Fit),
+            4 => Some(ZoomOp::Actual),
+            _ => None,
+        }
+    }
+}
+
 /// What the low-level hook should do with one key event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookDecision {
@@ -149,6 +198,8 @@ pub enum HookDecision {
     FollowSelection,
     /// Swallow the key and scroll the preview text.
     Scroll(ScrollOp),
+    /// Swallow the key and zoom the image. Not recorded as type-ahead.
+    Zoom(ZoomOp),
 }
 
 /// Key to action while a preview is hidden, pending, or visible.
@@ -161,6 +212,32 @@ pub fn decide_hook_key(ctx: &HookContext, key: HookKey) -> HookDecision {
         HookKey::Space => decide_space(ctx),
         HookKey::Esc => decide_esc(ctx),
         HookKey::Nav(nav) => decide_nav(ctx, nav),
+        HookKey::Zoom(zoom) => decide_zoom(ctx, zoom),
+    }
+}
+
+/// `+` / `-` / `0` / `1` zoom only while an image is on screen and the key
+/// would otherwise hit Explorer's list (or the preview itself has focus).
+/// Ctrl, Alt, and the Windows key pass through. Shift does not: the main `+`
+/// key is Shift+`VK_OEM_PLUS`.
+fn decide_zoom(ctx: &HookContext, key: ZoomKey) -> HookDecision {
+    if ctx.modifiers.command() {
+        return HookDecision::Pass;
+    }
+    let in_session = ctx.explorer_list_focused || ctx.preview_is_foreground;
+    if ctx.phase == SessionPhase::Visible && ctx.image_visible && in_session {
+        HookDecision::Zoom(zoom_op(key))
+    } else {
+        HookDecision::Pass
+    }
+}
+
+fn zoom_op(key: ZoomKey) -> ZoomOp {
+    match key {
+        ZoomKey::In => ZoomOp::In,
+        ZoomKey::Out => ZoomOp::Out,
+        ZoomKey::Fit => ZoomOp::Fit,
+        ZoomKey::Actual => ZoomOp::Actual,
     }
 }
 
@@ -268,6 +345,7 @@ fn hook_context_from_focus(ctx: &FocusContext) -> HookContext {
             Modifiers::NONE
         },
         typeahead_active: ctx.typeahead_active,
+        image_visible: false,
     }
 }
 
@@ -310,6 +388,7 @@ pub fn esc_action(query: EscQuery) -> EscAction {
             Modifiers::NONE
         },
         typeahead_active: false,
+        image_visible: false,
     };
     match decide_hook_key(&ctx, HookKey::Esc) {
         HookDecision::Dismiss => EscAction::Dismiss,
@@ -341,14 +420,20 @@ const VK_RIGHT: u16 = 0x27;
 const VK_DOWN: u16 = 0x28;
 const VK_DELETE: u16 = 0x2E;
 const VK_0: u16 = 0x30;
+const VK_1: u16 = 0x31;
 const VK_9: u16 = 0x39;
 const VK_A: u16 = 0x41;
 const VK_Z: u16 = 0x5A;
 const VK_NUMPAD0: u16 = 0x60;
+const VK_NUMPAD1: u16 = 0x61;
+const VK_ADD: u16 = 0x6B;
+const VK_SUBTRACT: u16 = 0x6D;
 const VK_DIVIDE: u16 = 0x6F;
 const VK_F1: u16 = 0x70;
 const VK_F24: u16 = 0x87;
 const VK_OEM_1: u16 = 0xBA;
+const VK_OEM_PLUS: u16 = 0xBB;
+const VK_OEM_MINUS: u16 = 0xBD;
 const VK_OEM_3: u16 = 0xC0;
 const VK_OEM_4: u16 = 0xDB;
 const VK_OEM_8: u16 = 0xDF;
@@ -366,7 +451,29 @@ pub fn hook_key_from_vk(vk: u16) -> Option<HookKey> {
         VK_UP => Some(HookKey::Nav(NavKey::Up)),
         VK_RIGHT => Some(HookKey::Nav(NavKey::Right)),
         VK_DOWN => Some(HookKey::Nav(NavKey::Down)),
+        VK_OEM_PLUS | VK_ADD => Some(HookKey::Zoom(ZoomKey::In)),
+        VK_OEM_MINUS | VK_SUBTRACT => Some(HookKey::Zoom(ZoomKey::Out)),
+        VK_0 | VK_NUMPAD0 => Some(HookKey::Zoom(ZoomKey::Fit)),
+        VK_1 | VK_NUMPAD1 => Some(HookKey::Zoom(ZoomKey::Actual)),
         _ => None,
+    }
+}
+
+/// Type-ahead class for a key the hook has already decided.
+///
+/// An intercepted zoom key is [`TypeaheadKey::Ignored`], so `0` / `1` / `+` /
+/// `-` do not arm Explorer's type-ahead timer while an image is showing.
+/// A passed-through zoom key keeps the ordinary classification (those virtual
+/// keys are plain characters, except under Ctrl, Alt, or the Windows key).
+pub fn typeahead_for_decision(
+    vk: u16,
+    modifiers: Modifiers,
+    decision: HookDecision,
+) -> TypeaheadKey {
+    if matches!(decision, HookDecision::Zoom(_)) {
+        TypeaheadKey::Ignored
+    } else {
+        classify_typeahead_vk(vk, modifiers)
     }
 }
 
@@ -713,6 +820,86 @@ impl Default for RepeatFilter {
     }
 }
 
+/// Swallow state for zoom keys.
+///
+/// `+` and `-` act on every key-down, including auto-repeat. `0` and `1` act
+/// on the first down only. Repeats and the matching key-up stay swallowed when
+/// the first down was swallowed, so Explorer does not see a partial press.
+/// If the image goes away mid-hold, the rest of that press stays swallowed
+/// and does not zoom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoomHold {
+    held: u8,
+}
+
+impl ZoomHold {
+    pub const fn new() -> Self {
+        Self { held: 0 }
+    }
+
+    pub fn observe(&mut self, key: ZoomKey, phase: KeyPhase, take: bool) -> RepeatDecision {
+        let bit = zoom_bit(key);
+        match phase {
+            KeyPhase::Down => {
+                if take {
+                    let first = self.held & bit == 0;
+                    self.held |= bit;
+                    RepeatDecision {
+                        act: zoom_repeat_acts(key) || first,
+                        swallow: true,
+                    }
+                } else if self.held & bit != 0 {
+                    RepeatDecision {
+                        act: false,
+                        swallow: true,
+                    }
+                } else {
+                    RepeatDecision {
+                        act: false,
+                        swallow: false,
+                    }
+                }
+            }
+            KeyPhase::Up => {
+                let owned = self.held & bit != 0;
+                self.held &= !bit;
+                RepeatDecision {
+                    act: false,
+                    swallow: owned,
+                }
+            }
+        }
+    }
+
+    /// The UI post failed. The rest of this press passes through.
+    pub fn release(&mut self, key: ZoomKey) {
+        self.held &= !zoom_bit(key);
+    }
+
+    pub fn clear(&mut self) {
+        self.held = 0;
+    }
+}
+
+impl Default for ZoomHold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn zoom_bit(key: ZoomKey) -> u8 {
+    match key {
+        ZoomKey::In => 1 << 0,
+        ZoomKey::Out => 1 << 1,
+        ZoomKey::Fit => 1 << 2,
+        ZoomKey::Actual => 1 << 3,
+    }
+}
+
+const fn zoom_repeat_acts(key: ZoomKey) -> bool {
+    matches!(key, ZoomKey::In | ZoomKey::Out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +922,14 @@ mod tests {
             origin_is_foreground: true,
             modifiers: Modifiers::NONE,
             typeahead_active: false,
+            image_visible: false,
+        }
+    }
+
+    fn image_list() -> HookContext {
+        HookContext {
+            image_visible: true,
+            ..list_ctx(SessionPhase::Visible)
         }
     }
 
@@ -1202,6 +1397,323 @@ mod tests {
         assert_eq!(hook_key_from_vk(VK_ESCAPE), Some(HookKey::Esc));
         assert_eq!(hook_key_from_vk(VK_DOWN), Some(HookKey::Nav(NavKey::Down)));
         assert_eq!(hook_key_from_vk(b'A' as u16), None);
+        assert_eq!(
+            hook_key_from_vk(VK_OEM_PLUS),
+            Some(HookKey::Zoom(ZoomKey::In))
+        );
+        assert_eq!(hook_key_from_vk(VK_ADD), Some(HookKey::Zoom(ZoomKey::In)));
+        assert_eq!(
+            hook_key_from_vk(VK_OEM_MINUS),
+            Some(HookKey::Zoom(ZoomKey::Out))
+        );
+        assert_eq!(
+            hook_key_from_vk(VK_SUBTRACT),
+            Some(HookKey::Zoom(ZoomKey::Out))
+        );
+        assert_eq!(hook_key_from_vk(VK_0), Some(HookKey::Zoom(ZoomKey::Fit)));
+        assert_eq!(
+            hook_key_from_vk(VK_NUMPAD0),
+            Some(HookKey::Zoom(ZoomKey::Fit))
+        );
+        assert_eq!(hook_key_from_vk(VK_1), Some(HookKey::Zoom(ZoomKey::Actual)));
+        assert_eq!(
+            hook_key_from_vk(VK_NUMPAD1),
+            Some(HookKey::Zoom(ZoomKey::Actual))
+        );
+        // Other digits and the rest of the numpad stay type-ahead, not zoom.
+        assert_eq!(hook_key_from_vk(0x32), None);
+        assert_eq!(hook_key_from_vk(VK_DIVIDE), None);
+    }
+
+    #[test]
+    fn zoom_keys_follow_image_text_and_hidden() {
+        let image = image_list();
+        assert_eq!(
+            decide_hook_key(&image, HookKey::Zoom(ZoomKey::In)),
+            HookDecision::Zoom(ZoomOp::In)
+        );
+        assert_eq!(
+            decide_hook_key(&image, HookKey::Zoom(ZoomKey::Out)),
+            HookDecision::Zoom(ZoomOp::Out)
+        );
+        assert_eq!(
+            decide_hook_key(&image, HookKey::Zoom(ZoomKey::Fit)),
+            HookDecision::Zoom(ZoomOp::Fit)
+        );
+        assert_eq!(
+            decide_hook_key(&image, HookKey::Zoom(ZoomKey::Actual)),
+            HookDecision::Zoom(ZoomOp::Actual)
+        );
+
+        // Text and errors are a visible session with no image.
+        let text = list_ctx(SessionPhase::Visible);
+        assert!(!text.image_visible);
+        for key in [ZoomKey::In, ZoomKey::Out, ZoomKey::Fit, ZoomKey::Actual] {
+            assert_eq!(
+                decide_hook_key(&text, HookKey::Zoom(key)),
+                HookDecision::Pass,
+                "{key:?}"
+            );
+        }
+
+        for phase in [SessionPhase::Hidden, SessionPhase::Pending] {
+            let mut ctx = image_list();
+            ctx.phase = phase;
+            assert_eq!(
+                decide_hook_key(&ctx, HookKey::Zoom(ZoomKey::In)),
+                HookDecision::Pass,
+                "{phase:?}"
+            );
+        }
+
+        // The preview window itself is in front, the list is not.
+        let mut preview = image_list();
+        preview.explorer_list_focused = false;
+        preview.preview_is_foreground = true;
+        assert_eq!(
+            decide_hook_key(&preview, HookKey::Zoom(ZoomKey::Actual)),
+            HookDecision::Zoom(ZoomOp::Actual)
+        );
+
+        // Address bar and other apps: the list is not focused.
+        let mut elsewhere = image_list();
+        elsewhere.explorer_list_focused = false;
+        elsewhere.preview_is_foreground = false;
+        assert_eq!(
+            decide_hook_key(&elsewhere, HookKey::Zoom(ZoomKey::Fit)),
+            HookDecision::Pass
+        );
+    }
+
+    #[test]
+    fn zoom_keys_pass_command_modifiers_and_keep_shift() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                win: true,
+                ..Modifiers::NONE
+            },
+        ] {
+            let mut ctx = image_list();
+            ctx.modifiers = modifiers;
+            assert_eq!(
+                decide_hook_key(&ctx, HookKey::Zoom(ZoomKey::In)),
+                HookDecision::Pass,
+                "{modifiers:?}"
+            );
+            assert_eq!(
+                typeahead_for_decision(VK_OEM_PLUS, modifiers, HookDecision::Pass),
+                TypeaheadKey::Ignored
+            );
+        }
+        let mut shifted = image_list();
+        shifted.modifiers.shift = true;
+        assert_eq!(
+            decide_hook_key(&shifted, HookKey::Zoom(ZoomKey::In)),
+            HookDecision::Zoom(ZoomOp::In)
+        );
+        assert_eq!(
+            decide_hook_key(&shifted, HookKey::Zoom(ZoomKey::Fit)),
+            HookDecision::Zoom(ZoomOp::Fit)
+        );
+    }
+
+    #[test]
+    fn numpad_and_main_zoom_keys_share_a_decision() {
+        let image = image_list();
+        let pairs = [
+            (VK_OEM_PLUS, VK_ADD, ZoomOp::In),
+            (VK_OEM_MINUS, VK_SUBTRACT, ZoomOp::Out),
+            (VK_0, VK_NUMPAD0, ZoomOp::Fit),
+            (VK_1, VK_NUMPAD1, ZoomOp::Actual),
+        ];
+        for (main, numpad, op) in pairs {
+            let main_key = hook_key_from_vk(main).unwrap();
+            let numpad_key = hook_key_from_vk(numpad).unwrap();
+            assert_eq!(decide_hook_key(&image, main_key), HookDecision::Zoom(op));
+            assert_eq!(decide_hook_key(&image, numpad_key), HookDecision::Zoom(op));
+        }
+    }
+
+    #[test]
+    fn intercepted_zoom_key_does_not_arm_typeahead() {
+        let image = image_list();
+        let decision = decide_hook_key(&image, HookKey::Zoom(ZoomKey::Fit));
+        assert_eq!(decision, HookDecision::Zoom(ZoomOp::Fit));
+        let kind = typeahead_for_decision(VK_0, Modifiers::NONE, decision);
+        assert_eq!(kind, TypeaheadKey::Ignored);
+        let mut timer = Typeahead::new(1000);
+        timer.observe(kind, 10);
+        assert!(!timer.active(10));
+        // Space still toggles. Recording `0` as a plain character would block it.
+        assert_eq!(decide_hook_key(&image, HookKey::Space), HookDecision::Space);
+
+        for vk in [
+            VK_0,
+            VK_1,
+            VK_NUMPAD0,
+            VK_NUMPAD1,
+            VK_OEM_PLUS,
+            VK_OEM_MINUS,
+            VK_ADD,
+            VK_SUBTRACT,
+        ] {
+            let passed = decide_hook_key(
+                &list_ctx(SessionPhase::Visible),
+                hook_key_from_vk(vk).unwrap(),
+            );
+            assert_eq!(passed, HookDecision::Pass);
+            assert_eq!(
+                typeahead_for_decision(vk, Modifiers::NONE, passed),
+                TypeaheadKey::PlainChar,
+                "{vk}"
+            );
+        }
+
+        let armed = typeahead_for_decision(VK_0, Modifiers::NONE, HookDecision::Pass);
+        timer.observe(armed, 20);
+        assert!(timer.active(20));
+        let mut blocked = image;
+        blocked.typeahead_active = true;
+        assert_eq!(
+            decide_hook_key(&blocked, HookKey::Space),
+            HookDecision::Pass
+        );
+
+        // A zoom key does not extend a timer that a letter already started.
+        let mut ongoing = Typeahead::new(1000);
+        ongoing.observe(TypeaheadKey::PlainChar, 0);
+        ongoing.observe(
+            typeahead_for_decision(VK_ADD, Modifiers::NONE, HookDecision::Zoom(ZoomOp::In)),
+            500,
+        );
+        assert!(ongoing.active(999));
+        assert!(!ongoing.active(1000));
+    }
+
+    #[test]
+    fn arrows_still_follow_the_selection_while_an_image_is_visible() {
+        let image = image_list();
+        for key in [NavKey::Up, NavKey::Down, NavKey::Left, NavKey::Right] {
+            assert_eq!(
+                decide_hook_key(&image, HookKey::Nav(key)),
+                HookDecision::FollowSelection,
+                "{key:?}"
+            );
+        }
+        assert_eq!(
+            decide_hook_key(&image, HookKey::Nav(NavKey::PageDown)),
+            HookDecision::Scroll(ScrollOp::PageDown)
+        );
+    }
+
+    #[test]
+    fn zoom_hold_repeats_plus_and_acts_once_for_zero() {
+        let mut hold = ZoomHold::new();
+        assert_eq!(
+            hold.observe(ZoomKey::In, KeyPhase::Down, true),
+            RepeatDecision {
+                act: true,
+                swallow: true
+            }
+        );
+        assert_eq!(
+            hold.observe(ZoomKey::In, KeyPhase::Down, true),
+            RepeatDecision {
+                act: true,
+                swallow: true
+            }
+        );
+        assert_eq!(
+            hold.observe(ZoomKey::In, KeyPhase::Up, false),
+            RepeatDecision {
+                act: false,
+                swallow: true
+            }
+        );
+
+        assert_eq!(
+            hold.observe(ZoomKey::Fit, KeyPhase::Down, true),
+            RepeatDecision {
+                act: true,
+                swallow: true
+            }
+        );
+        assert_eq!(
+            hold.observe(ZoomKey::Fit, KeyPhase::Down, true),
+            RepeatDecision {
+                act: false,
+                swallow: true
+            }
+        );
+        // The image closed mid-press. Keep swallowing, do not zoom again.
+        assert_eq!(
+            hold.observe(ZoomKey::Fit, KeyPhase::Down, false),
+            RepeatDecision {
+                act: false,
+                swallow: true
+            }
+        );
+        assert_eq!(
+            hold.observe(ZoomKey::Fit, KeyPhase::Up, false),
+            RepeatDecision {
+                act: false,
+                swallow: true
+            }
+        );
+
+        // A passed-through `1` does not stick.
+        assert_eq!(
+            hold.observe(ZoomKey::Actual, KeyPhase::Down, false),
+            RepeatDecision {
+                act: false,
+                swallow: false
+            }
+        );
+        assert_eq!(
+            hold.observe(ZoomKey::Actual, KeyPhase::Up, true),
+            RepeatDecision {
+                act: false,
+                swallow: false
+            }
+        );
+    }
+
+    #[test]
+    fn zoom_hold_release_lets_a_failed_post_pass() {
+        let mut hold = ZoomHold::new();
+        let _ = hold.observe(ZoomKey::Out, KeyPhase::Down, true);
+        hold.release(ZoomKey::Out);
+        assert_eq!(
+            hold.observe(ZoomKey::Out, KeyPhase::Down, true),
+            RepeatDecision {
+                act: true,
+                swallow: true
+            }
+        );
+        hold.release(ZoomKey::Out);
+        assert_eq!(
+            hold.observe(ZoomKey::Out, KeyPhase::Up, false),
+            RepeatDecision {
+                act: false,
+                swallow: false
+            }
+        );
+    }
+
+    #[test]
+    fn zoom_op_codes_round_trip() {
+        for op in [ZoomOp::In, ZoomOp::Out, ZoomOp::Fit, ZoomOp::Actual] {
+            assert_eq!(ZoomOp::from_code(op.code()), Some(op));
+        }
+        assert_eq!(ZoomOp::from_code(0), None);
     }
 
     #[test]
