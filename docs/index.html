@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spacepeek</title>
+  <meta name="description" content="Select a file in Explorer, press Space. Early pre-release preview for Windows 11. Unsigned nightly builds.">
+  <link rel="icon" href="spacepeek.svg" type="image/svg+xml">
+  <style>
+    :root {
+      --ink: #333539;
+      --muted: #5c5e63;
+      --paper: #f4f1eb;
+      --card: #fffcf8;
+      --line: #e4dfd6;
+      --orange: #f27f28;
+      --link: #9a4510;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { font-size: 100%; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(#f27f28, #f27f28) top / 100% 6px no-repeat,
+        var(--paper);
+      color: var(--ink);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 1.0625rem;
+      line-height: 1.5;
+    }
+
+    .wrap {
+      max-width: 40rem;
+      margin: 0 auto;
+      padding: 2.75rem 1.25rem 3.5rem;
+    }
+
+    .mark {
+      display: block;
+      width: 4.75rem;
+      height: 4.75rem;
+    }
+
+    h1 {
+      margin: 0.85rem 0 0.4rem;
+      font-size: 2.5rem;
+      font-weight: 600;
+      letter-spacing: -0.035em;
+      line-height: 1.05;
+    }
+
+    .pitch {
+      margin: 0;
+      font-size: 1.35rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.3;
+    }
+
+    .status {
+      margin: 0.75rem 0 0;
+      color: var(--muted);
+    }
+
+    .download {
+      display: inline-block;
+      margin-top: 1.35rem;
+      padding: 0.72rem 1.15rem;
+      border-radius: 999px;
+      background: var(--ink);
+      color: #fff;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      text-decoration: none;
+    }
+
+    .download:hover { background: #1f2023; }
+
+    a:focus-visible {
+      outline: 3px solid var(--orange);
+      outline-offset: 3px;
+    }
+
+    .sub {
+      margin: 0.8rem 0 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    h2 {
+      margin: 2.4rem 0 0.35rem;
+      font-size: 0.78rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .features {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .features li {
+      padding: 0.85rem 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .features li:last-child { border-bottom: 1px solid var(--line); }
+
+    .features strong {
+      display: block;
+      margin-bottom: 0.12rem;
+      font-weight: 600;
+    }
+
+    kbd {
+      display: inline-block;
+      padding: 0 0.32em;
+      border: 1px solid #d5d0c7;
+      border-bottom-width: 2px;
+      border-radius: 4px;
+      background: #fff;
+      font-family: inherit;
+      font-size: 0.85em;
+      font-weight: 600;
+      line-height: 1.4;
+    }
+
+    .caution {
+      margin: 0.6rem 0 0;
+      padding: 0.95rem 1rem 1rem;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--orange);
+      border-radius: 10px;
+      background: var(--card);
+    }
+
+    .caution p { margin: 0.55rem 0 0; }
+    .caution p:first-child { margin-top: 0; }
+
+    a { color: var(--link); }
+
+    .download { color: #fff; }
+
+    .links a { color: var(--ink); font-weight: 600; }
+
+    footer {
+      margin-top: 2.5rem;
+      padding-top: 1.1rem;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem 1.1rem;
+      margin: 0 0 0.65rem;
+      padding: 0;
+      list-style: none;
+    }
+
+    .legal { margin: 0; }
+
+    @media (max-width: 32rem) {
+      .wrap { padding-top: 1.75rem; }
+      h1 { font-size: 2.1rem; }
+      .pitch { font-size: 1.2rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <img class="mark" src="spacepeek.svg" width="76" height="76" alt="Spacepeek icon, a page with an eye">
+      <h1>Spacepeek</h1>
+      <p class="pitch">Select a file in Explorer, press Space.</p>
+      <p class="status">Early pre-release software. Not a signed proper release. It has not been run on a Windows desktop.</p>
+      <a class="download" href="https://github.com/phena109/spacepeek/releases/tag/nightly">Download nightly pre-release</a>
+      <p class="sub">Unsigned builds. Windows 11, x64 and ARM64. A nightly is an untested preview, not a release.</p>
+    </header>
+
+    <main>
+      <h2>What ships today</h2>
+      <ul class="features">
+        <li>
+          <strong>Text</strong>
+          A bounded preview in a monospace font. The window does not take focus from Explorer.
+        </li>
+        <li>
+          <strong>Pictures</strong>
+          PNG, JPEG, BMP, GIF (first frame), ICO, and WebP. An animated WebP shows the first frame only.
+        </li>
+        <li>
+          <strong>Zoom and pan</strong>
+          The mouse wheel and <kbd>+</kbd> / <kbd>−</kbd> zoom a picture, including the numeric keypad. Drag to pan when it is zoomed. <kbd>0</kbd> fits the picture to the window. <kbd>1</kbd> shows it at actual size. Arrow keys still change the file.
+        </li>
+        <li>
+          <strong>Follows the selection</strong>
+          While the preview is open, it follows the file selected in that Explorer window: the arrow keys, or a click on another file.
+        </li>
+        <li>
+          <strong>Keyboard</strong>
+          Space opens the preview. Space or Esc closes it, and so does the × on the header.
+        </li>
+      </ul>
+
+      <h2>Before you run a nightly</h2>
+      <div class="caution">
+        <p>The builds are unsigned. On Windows, SmartScreen may warn. Choose More info → Run anyway. Smart App Control may block unsigned apps.</p>
+        <p>Verify the download against <a href="https://github.com/phena109/spacepeek/releases/tag/nightly">SHA256SUMS</a> on the release page.</p>
+      </div>
+
+      <h2>Supported system</h2>
+      <p>Windows 11, x64 and ARM64. There is no build for older Windows.</p>
+    </main>
+
+    <footer>
+      <ul class="links">
+        <li><a href="https://github.com/phena109/spacepeek">Source</a></li>
+        <li><a href="https://github.com/phena109/spacepeek/issues">Issues</a></li>
+        <li><a href="https://github.com/phena109/spacepeek/releases/tag/nightly">Nightly release</a></li>
+      </ul>
+      <p class="legal">MIT License. Early pre-release software, not a signed proper release.</p>
+    </footer>
+  </div>
+</body>
+</html>

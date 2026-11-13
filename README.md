@@ -1,5 +1,7 @@
 # Spacepeek
 
+[Project page](https://phena109.github.io/spacepeek)
+
 Space-bar file preview for Windows Explorer. Select a file, press Space, and a single topmost window shows a bounded text preview. The preview does not take focus from Explorer. While it is open, the preview follows the selection in that Explorer window: the arrow keys, or a click on another file. Press Space or Esc again to close it. The header has an × button as well. PNG, JPEG, BMP, GIF (first frame), ICO, and WebP are previewed too: the format is sniffed from the magic bytes, and the file has to fit the size limits.
 
 With a picture showing, the mouse wheel zooms in and out around the pointer. `+` and `−` do the same, including the numeric keypad. `0` fits the picture to the window. `1` shows it at actual size: one image pixel is one pixel at 96 DPI, scaled with the monitor the same way the fitted picture is. Those keys are taken only while a picture is showing, so a text preview still scrolls on the wheel and Explorer can still use `0` and `1` for type-ahead. Zoom stays between 10% and 800% of the fit-to-window size, in steps of one quarter, and the file is not decoded again. Drag the picture to pan when it is zoomed past that fit size. The header still moves the window. The × button still closes the preview. A drag on the picture at the fit size does not move the window or the picture. Arrow keys still change the selected file. A double-click that does not move the picture still opens the file. A drag that pans it does not also open it.
