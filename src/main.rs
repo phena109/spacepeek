@@ -45,18 +45,19 @@ mod win {
         apply_image_command, choose_selected, chrome_for_error, chrome_for_text,
         classify_typeahead_vk, close_button_bounds, decide_hook_key, double_click_action,
         effective_dpi, fallback_type_name, gate_show, hit_test, hook_key_from_vk, image_view_rect,
-        is_selection_pointer_message, load_text_preview, min_physical_size, nav_reload_remaining,
-        nonempty_path, pack_screen_point, parse_command, place_preview, pointer_over_close,
-        reconcile_image_view, reset_for_new_image, scaled_close_width, scaled_detail_font,
-        scaled_font_height, scaled_header_font, scaled_header_height, scaled_header_pad,
-        session_phase, should_reload_after_pointer, should_reload_after_shell_event, step,
-        typeahead_for_decision, typeahead_window_ms, unpack_screen_point, wheel_scroll_dy,
-        wheel_zoom_command, CancelToken, ChromeLayout, Command, DecodedImage, DoubleClickAction,
-        Effect, Event, Generation, HitZone, HookContext, HookDecision, HookKey, ImageCommand,
-        ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError,
-        PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
-        SelectionTarget, SessionPhase, ShowGate, ShowOutcome, SizeMemory, TrackedKey, Typeahead,
-        TypeaheadKey, WindowKind, ZoomHold, ZoomKey, ZoomOp, NAV_RELOAD_DELAY_MS, VERSION,
+        is_selection_pointer_message, large_icon_px, load_text_preview, min_physical_size,
+        nav_reload_remaining, nonempty_path, pack_screen_point, parse_command, place_preview,
+        pointer_over_close, reconcile_image_view, reset_for_new_image, scaled_close_width,
+        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
+        scaled_header_pad, session_phase, should_reload_after_pointer,
+        should_reload_after_shell_event, small_icon_px, step, typeahead_for_decision,
+        typeahead_window_ms, unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken,
+        ChromeLayout, Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone,
+        HookContext, HookDecision, HookKey, ImageCommand, ImageFrame, ImageView, KeyPhase,
+        Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect,
+        QuickInfo, RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShowGate,
+        ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold,
+        ZoomKey, ZoomOp, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -92,9 +93,11 @@ mod win {
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
     use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
+    use windows::Win32::UI::Controls::LoadIconWithScaleDown;
     use windows::Win32::UI::HiDpi::{
-        GetDpiForMonitor, GetDpiForWindow, GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
-        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
+        GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi,
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        MDT_EFFECTIVE_DPI,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, GetCapture, GetDoubleClickTime, GetFocus, ReleaseCapture, SetCapture,
@@ -107,39 +110,41 @@ mod win {
         IShellFolder, IShellFolderViewDual, IShellItem, IShellLinkW, IShellView, IShellWindows,
         IWebBrowser2, SHCreateItemWithParent, SHGetFileInfoW, SID_STopLevelBrowser,
         ShellExecuteExW, ShellLink, ShellWindows, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE,
-        NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW,
-        NOTIFYICON_VERSION_4, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_TYPENAME,
-        SHGFI_USEFILEATTRIBUTES, SIGDN_FILESYSPATH, SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT,
+        NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
+        NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, SHFILEINFOW,
+        SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES, SIGDN_FILESYSPATH, SLGP_RAWPATH, SVGIO_SELECTION,
+        SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, BringWindowToTop, CallNextHookEx, CallWindowProcW, CreatePopupMenu,
-        CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
+        CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW,
         FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
         GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetParent, GetSystemMetrics,
         GetWindowRect, GetWindowThreadProcessId, HideCaret, IsWindow, IsWindowVisible, KillTimer,
-        LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, PeekMessageW, PostMessageW,
-        PostQuitMessage, PostThreadMessageW, RegisterClassW, RegisterWindowMessageW, SendMessageW,
-        SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-        SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
-        WindowFromPoint, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL,
-        ES_MULTILINE, ES_READONLY, EVENT_OBJECT_SELECTION, EVENT_OBJECT_SELECTIONWITHIN,
-        EVENT_SYSTEM_FOREGROUND, GA_ROOT, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU,
-        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
-        HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_UP,
-        MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MF_STRING,
-        MINMAXINFO, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP,
-        SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
-        SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+        LoadCursorW, LoadImageW, MessageBoxW, MoveWindow, PeekMessageW, PostMessageW,
+        PostQuitMessage, PostThreadMessageW, RegisterClassExW, RegisterWindowMessageW,
+        SendMessageW, SetClassLongPtrW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+        SetWindowPos, SetWindowTextW, SetWindowsHookExW, ShowWindow, TrackPopupMenu,
+        TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW,
+        ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, EVENT_OBJECT_SELECTION,
+        EVENT_OBJECT_SELECTIONWITHIN, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GCLP_HICON, GCLP_HICONSM,
+        GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL,
+        ICON_SMALL2, IDC_ARROW, IMAGE_FLAGS, IMAGE_ICON, KBDLLHOOKSTRUCT, LLKHF_UP, MA_NOACTIVATE,
+        MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MF_STRING, MINMAXINFO, MSG,
+        MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP, SM_CXFRAME,
+        SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
+        SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
         WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT,
         WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
         WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP,
         WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
         WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
         WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK,
-        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
-        WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSW, WNDCLASS_STYLES, WS_CHILD, WS_CLIPCHILDREN,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME,
-        WS_VISIBLE, WS_VSCROLL,
+        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_SYSKEYDOWN,
+        WM_SYSKEYUP, WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD,
+        WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP,
+        WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -195,6 +200,18 @@ mod win {
         edit_hwnd: HWND,
         explorer_hwnd: HWND,
         instance: HINSTANCE,
+        /// DPI the current [`Self::small_icon`] / [`Self::large_icon`] were loaded
+        /// for. Zero until the first successful load.
+        icon_dpi: u32,
+        /// Tray and caption icon from `LoadIconWithScaleDown`. Caller-owned.
+        small_icon: HICON,
+        /// Window-class and Alt-Tab icon. Caller-owned, same as `small_icon`.
+        large_icon: HICON,
+        /// Handles last handed to the preview window class. They stay alive
+        /// until that class is pointed at a new pair. The hidden message class
+        /// is updated before an old handle is destroyed, so it is not tracked.
+        preview_class_small: HICON,
+        preview_class_large: HICON,
         font: HFONT,
         header_font: HFONT,
         detail_font: HFONT,
@@ -337,6 +354,11 @@ mod win {
             edit_hwnd: HWND::default(),
             explorer_hwnd: HWND::default(),
             instance,
+            icon_dpi: 0,
+            small_icon: HICON::default(),
+            large_icon: HICON::default(),
+            preview_class_small: HICON::default(),
+            preview_class_large: HICON::default(),
             font: HFONT::default(),
             header_font: HFONT::default(),
             detail_font: HFONT::default(),
@@ -358,6 +380,8 @@ mod win {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            // Once, at the system DPI. A later monitor change reloads.
+            refresh_icons(GetDpiForSystem());
             register_class(instance, MESSAGE_CLASS, CS_HREDRAW | CS_VREDRAW)?;
             // `CS_DBLCLKS` so an image or message body (drawn by this window,
             // not an edit child) receives `WM_LBUTTONDBLCLK`.
@@ -370,6 +394,7 @@ mod win {
             app.borrow_mut().msg_hwnd = msg_hwnd;
             MAIN_HWND.store(msg_hwnd.0 as isize, Ordering::Release);
             register_taskbar_created();
+            set_window_icons(msg_hwnd);
             add_tray_icon(msg_hwnd);
             install_foreground_hook();
 
@@ -382,6 +407,7 @@ mod win {
                     remove_selection_hook();
                     remove_tray_icon(msg_hwnd);
                     let _ = DestroyWindow(msg_hwnd);
+                    discard_icons();
                     CoUninitialize();
                     return Err(err);
                 }
@@ -2145,7 +2171,11 @@ mod win {
         );
         let class_name = utf16(PREVIEW_CLASS);
         let title = utf16(&presented.header().name);
-        unsafe {
+        // Match the monitor this window is about to open on. The previous
+        // class icon stays valid through `CreateWindowExW`; retarget runs
+        // after, once this window can take the new pair.
+        refresh_icons(dpi);
+        let hwnd = unsafe {
             CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 PCWSTR(class_name.as_ptr()),
@@ -2160,8 +2190,11 @@ mod win {
                 instance,
                 None,
             )
-            .ok()
-        }
+            .ok()?
+        };
+        let previous = retarget_preview_class(hwnd);
+        drop_unique(&[previous.0, previous.1]);
+        Some(hwnd)
     }
 
     fn install_body(
@@ -2707,6 +2740,8 @@ mod win {
             }
         }
         let dpi = (wparam.0 as u32) & 0xffff;
+        // One reload for this DPI: tray via NIM_MODIFY, this window via WM_SETICON.
+        refresh_icons(dpi);
         let (fonts, stale) = swap_fonts(dpi);
         let _stale = stale;
         apply_font(with_app(|app| app.edit_hwnd), fonts.edit);
@@ -3626,24 +3661,35 @@ mod win {
         style: WNDCLASS_STYLES,
     ) -> windows::core::Result<()> {
         let wide = utf16(name);
+        let (small, large) = with_app(|app| (app.small_icon, app.large_icon));
         unsafe {
             let cursor = LoadCursorW(HINSTANCE::default(), IDC_ARROW)?;
             let brush = GetSysColorBrush(COLOR_WINDOW);
-            let class = WNDCLASSW {
+            // `hIconSm` is not on `WNDCLASSW`. Both sizes are set here so a
+            // window created a moment later already has the Spacepeek icon.
+            let class = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style,
                 lpfnWndProc: Some(wndproc),
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: instance,
-                hIcon: HICON::default(),
+                hIcon: large,
                 hCursor: cursor,
                 hbrBackground: brush,
                 lpszMenuName: PCWSTR::null(),
                 lpszClassName: PCWSTR(wide.as_ptr()),
+                hIconSm: small,
             };
-            if RegisterClassW(&class) == 0 {
+            if RegisterClassExW(&class) == 0 {
                 return Err(windows::core::Error::from_win32());
             }
+        }
+        if name == PREVIEW_CLASS {
+            with_app_mut(|app| {
+                app.preview_class_small = small;
+                app.preview_class_large = large;
+            });
         }
         Ok(())
     }
@@ -3875,6 +3921,7 @@ mod win {
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
+        discard_icons();
     }
 
     fn register_taskbar_created() {
@@ -3925,9 +3972,209 @@ mod win {
             uCallbackMessage: WM_SPACEPEEK_TRAY,
             ..NOTIFYICONDATAW::default()
         };
-        data.hIcon = unsafe { LoadIconW(None, IDI_APPLICATION).unwrap_or_default() };
+        data.hIcon = with_app(|app| app.small_icon);
         write_wide_z(&mut data.szTip, "Spacepeek");
         data
+    }
+
+    /// Point `hwnd`'s class and window icons at the pair currently stored.
+    /// Does not load and does not destroy. The class change applies to every
+    /// window of that class.
+    fn set_window_icons(hwnd: HWND) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        let (small, large) = with_app(|app| (app.small_icon, app.large_icon));
+        unsafe {
+            if !large.is_invalid() {
+                let _ = SetClassLongPtrW(hwnd, GCLP_HICON, large.0 as isize);
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(ICON_BIG as usize),
+                    LPARAM(large.0 as isize),
+                );
+            }
+            if !small.is_invalid() {
+                let _ = SetClassLongPtrW(hwnd, GCLP_HICONSM, small.0 as isize);
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(ICON_SMALL as usize),
+                    LPARAM(small.0 as isize),
+                );
+                let _ = SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    WPARAM(ICON_SMALL2 as usize),
+                    LPARAM(small.0 as isize),
+                );
+            }
+        }
+    }
+
+    /// Point the preview class at the current pair. The returned handles are
+    /// what the class used before. The caller destroys them if nothing else
+    /// still stores them. Two calls with the same handle must destroy once.
+    fn retarget_preview_class(hwnd: HWND) -> (HICON, HICON) {
+        let previous = with_app_mut(|app| {
+            let previous = (app.preview_class_small, app.preview_class_large);
+            app.preview_class_small = app.small_icon;
+            app.preview_class_large = app.large_icon;
+            previous
+        });
+        set_window_icons(hwnd);
+        previous
+    }
+
+    /// Reload when `dpi` is not the one already loaded. Two loader calls
+    /// (small and large), then the message window, the preview window when
+    /// it exists, and the tray. No file I/O: the image is already mapped
+    /// in the executable.
+    fn refresh_icons(dpi: u32) {
+        let dpi = effective_dpi(dpi);
+        let (instance, ready) = with_app(|app| {
+            let ready =
+                app.icon_dpi == dpi && !app.small_icon.is_invalid() && !app.large_icon.is_invalid();
+            (app.instance, ready)
+        });
+        if ready {
+            return;
+        }
+        let Some((small, large)) = load_icon_pair(instance, dpi) else {
+            debug_log("Spacepeek: icon resource was not loaded\n");
+            return;
+        };
+        let (msg, preview, old_small, old_large) = with_app_mut(|app| {
+            let old_small = std::mem::replace(&mut app.small_icon, small);
+            let old_large = std::mem::replace(&mut app.large_icon, large);
+            app.icon_dpi = dpi;
+            (app.msg_hwnd, app.preview_hwnd, old_small, old_large)
+        });
+        set_window_icons(msg);
+        let previous = if preview.0.is_null() {
+            (HICON::default(), HICON::default())
+        } else {
+            retarget_preview_class(preview)
+        };
+        // Tray learns the new icon before the old handle is destroyed.
+        update_tray_icon(msg);
+        drop_unique(&[old_small, old_large, previous.0, previous.1]);
+    }
+
+    fn load_icon_pair(instance: HINSTANCE, dpi: u32) -> Option<(HICON, HICON)> {
+        let small = load_scaled_icon(instance, small_icon_px(dpi));
+        let large = load_scaled_icon(instance, large_icon_px(dpi));
+        if small.is_invalid() || large.is_invalid() {
+            destroy_icon(small);
+            destroy_icon(large);
+            None
+        } else {
+            Some((small, large))
+        }
+    }
+
+    /// Resource id 1. `LoadIconWithScaleDown` owns the returned icon, so it
+    /// is destroyed on replace. `LoadImageW` is the same contract when
+    /// comctl32 6 does not answer.
+    fn load_scaled_icon(instance: HINSTANCE, px: i32) -> HICON {
+        let name = embedded_icon_name();
+        unsafe {
+            match LoadIconWithScaleDown(instance, name, px, px) {
+                Ok(icon) if !icon.is_invalid() => icon,
+                _ => load_image_icon(instance, name, px),
+            }
+        }
+    }
+
+    fn load_image_icon(instance: HINSTANCE, name: PCWSTR, px: i32) -> HICON {
+        unsafe {
+            match LoadImageW(instance, name, IMAGE_ICON, px, px, IMAGE_FLAGS(0)) {
+                Ok(handle) if !handle.0.is_null() => HICON(handle.0),
+                _ => HICON::default(),
+            }
+        }
+    }
+
+    fn embedded_icon_name() -> PCWSTR {
+        PCWSTR(std::ptr::without_provenance(usize::from(ICON_RESOURCE_ID)))
+    }
+
+    fn update_tray_icon(hwnd: HWND) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        let small = with_app(|app| app.small_icon);
+        if small.is_invalid() {
+            return;
+        }
+        let mut data = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: TRAY_ID,
+            uFlags: NIF_ICON,
+            ..NOTIFYICONDATAW::default()
+        };
+        data.hIcon = small;
+        let updated = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data).as_bool() };
+        if !updated {
+            debug_log("Spacepeek: notification icon was not updated\n");
+        }
+    }
+
+    /// Destroy each handle once, and only when the app no longer stores it.
+    /// A handle still named by the preview class, or by the current pair,
+    /// stays alive. Repeated entries in `icons` are destroyed at most once.
+    fn drop_unique(icons: &[HICON]) {
+        let mut seen = [HICON::default(); 4];
+        for &icon in icons {
+            if icon.is_invalid() || seen.contains(&icon) {
+                continue;
+            }
+            let live = with_app(|app| {
+                icon == app.small_icon
+                    || icon == app.large_icon
+                    || icon == app.preview_class_small
+                    || icon == app.preview_class_large
+            });
+            if !live {
+                destroy_icon(icon);
+            }
+            if let Some(slot) = seen.iter_mut().find(|slot| slot.is_invalid()) {
+                *slot = icon;
+            }
+        }
+    }
+
+    fn destroy_icon(icon: HICON) {
+        if icon.is_invalid() {
+            return;
+        }
+        unsafe {
+            let _ = DestroyIcon(icon);
+        }
+    }
+
+    fn discard_icons() {
+        let icons = with_app_mut(|app| {
+            app.icon_dpi = 0;
+            [
+                std::mem::take(&mut app.small_icon),
+                std::mem::take(&mut app.large_icon),
+                std::mem::take(&mut app.preview_class_small),
+                std::mem::take(&mut app.preview_class_large),
+            ]
+        });
+        let mut destroyed = [HICON::default(); 4];
+        for icon in icons {
+            if icon.is_invalid() || destroyed.contains(&icon) {
+                continue;
+            }
+            destroy_icon(icon);
+            if let Some(slot) = destroyed.iter_mut().find(|slot| slot.is_invalid()) {
+                *slot = icon;
+            }
+        }
     }
 
     fn write_wide_z(dst: &mut [u16], text: &str) {

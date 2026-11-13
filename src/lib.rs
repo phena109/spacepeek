@@ -7,6 +7,7 @@ pub const VERSION: &str = env!("SPACEPEEK_VERSION");
 pub mod chrome;
 pub mod cli;
 pub mod geometry;
+pub mod icon;
 pub mod image_preview;
 pub mod image_view;
 pub mod keys;
@@ -25,6 +26,7 @@ pub use geometry::{
     effective_dpi, place_preview, preview_placement, scaled_font_height, scaled_preview_size,
     Placement, PxRect, PxSize, LOGICAL_FONT_HEIGHT, LOGICAL_PREVIEW_HEIGHT, LOGICAL_PREVIEW_WIDTH,
 };
+pub use icon::{large_icon_px, small_icon_px, ICON_RESOURCE_ID};
 pub use image_preview::{
     decode_image, fit_size, format_image_details, image_dest_rect, sniff_image, DecodedImage,
     ImageError, ImageFormat, ImageLimits,

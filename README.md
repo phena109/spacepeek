@@ -21,7 +21,7 @@ A slim header shows the file name and that details line. Drag the header to move
 
 First runnable vertical slice.
 
-The preview core (bounded reads, character-boundary truncation to 1,000 UTF-16 code units per line, binary sniffing, a deny-list of known binary extensions, cancellation, state machine, keyboard rules, which Explorer selection events and clicks schedule a reload, header text, hit testing, close-button hover, which double-click region opens the file, quick-info lines for unsupported files, remembered window size, the sentences shown for errors and empty files, image zoom and pan placement, and which zoom keys are taken) is implemented and unit-tested. The Windows runtime is wired: single-instance mutex, low-level keyboard hook, Explorer selection lookup, and one non-activating `SpacepeekPreview` window. Every UI transition goes through `state::step`.
+The preview core (bounded reads, character-boundary truncation to 1,000 UTF-16 code units per line, binary sniffing, a deny-list of known binary extensions, cancellation, state machine, keyboard rules, which Explorer selection events and clicks schedule a reload, header text, hit testing, close-button hover, which double-click region opens the file, quick-info lines for unsupported files, remembered window size, the sentences shown for errors and empty files, image zoom and pan placement, which zoom keys are taken, the icon file's directory, and which pixel size a DPI selects) is implemented and unit-tested. The Windows runtime is wired: single-instance mutex, low-level keyboard hook, Explorer selection lookup, and one non-activating `SpacepeekPreview` window. Every UI transition goes through `state::step`.
 
 Compile-checked for the Windows targets below on a Linux host. **Never executed on Windows.** No timings are claimed.
 
@@ -48,7 +48,7 @@ cargo check --target aarch64-pc-windows-msvc
 
 Start `spacepeek.exe` and leave it running. Spacepeek does not start automatically with Windows. To start it when you sign in, put a shortcut in the Startup folder (`shell:startup`).
 
-A Spacepeek icon stays in the notification area while it is running. Right-click that icon and choose Exit Spacepeek to quit. A left-click opens the same menu. Or run `spacepeek.exe --quit`. That exits with code 0 when it finds the running instance, and with code 1 when nothing is running. If nothing is running, `--quit` shows a short notice. `spacepeek.exe --version` prints the build version.
+Spacepeek's own icon stays in the notification area while it is running. The same mark is the program icon in Explorer and on the preview window. It is embedded from `assets/spacepeek.ico` (resource id 1). The notification area and the caption use the small size, 16 pixels at 96 DPI, and the window uses the large size, 32 pixels at 96 DPI. Both scale with the monitor (20 and 40 at 125%, 24 and 48 at 150%). Right-click that icon and choose Exit Spacepeek to quit. A left-click opens the same menu. Or run `spacepeek.exe --quit`. That exits with code 0 when it finds the running instance, and with code 1 when nothing is running. If nothing is running, `--quit` shows a short notice. `spacepeek.exe --version` prints the build version.
 
 A second launch shows a message that Spacepeek is already running and exits with a non-zero code.
 
@@ -56,7 +56,7 @@ On Linux and macOS the binary prints `Spacepeek runs on Windows only` and exits 
 
 ## Manual Explorer test (Windows 11)
 
-1. Build and start `spacepeek.exe`.
+1. Build and start `spacepeek.exe`. The notification area shows the Spacepeek icon, and Explorer shows that same mark on `spacepeek.exe`. Neither is the generic Windows application icon.
 2. Open File Explorer and select a text file. The extension does not decide this: `.txt`, source code, `Makefile`, `Dockerfile`, `LICENSE`, and `.gitignore` all preview when the bytes look like text.
 3. Press Space. A preview window should open over that Explorer window with the file name in the header and the file text in a monospace font. Explorer keeps the keyboard focus, and the preview text has no caret. Drag the header to move the window, drag an edge to resize it, or click × to close it. Moving the pointer over × turns that button a light grey; moving it away clears the grey. Double-click the text or the picture (not the header, and not ×) to close the preview and open the file the way Explorer would. A folder opens in Explorer. A triple-click does not open it twice. A long file shows a truncation notice at the top of the text and `(truncated)` in the header. Clicking or dragging the header should not leave a caret in the preview or take the keyboard away from Explorer for good.
 4. Press Space or Esc. The window closes. Explorer still has the focus. Press Space again. The preview opens without clicking the file list first.
@@ -88,6 +88,7 @@ The tests run on Linux. They cover the platform-independent core only.
 - A Space that continues an Explorer type-ahead search is passed through. While a preview is already open, that Space does not move the preview.
 - Image zoom runs from 10% to 800% of the fit-to-window size, in 25% steps. The decoded bitmap is reused; only the destination rectangle changes. Wheel zoom, keyboard zoom, and drag-to-pan are compile-checked and covered by unit tests. They have not been run on a Windows desktop.
 - The Windows runtime has not been executed. Compile checks are not a substitute for that.
+- Explorer, the taskbar, the notification area, and the preview window are meant to use the Spacepeek icon embedded in the executable, not the generic Windows application icon. The Win32 loader (`LoadIconWithScaleDown`) picks a size for the monitor DPI and reloads that size when the preview's DPI changes. That path is compile-checked, not run on a Windows desktop. The icon file's directory and the DPI size math are unit-tested.
 
 ## License
 
