@@ -4,6 +4,7 @@
 /// to a non-empty value at compile time, otherwise from `CARGO_PKG_VERSION`.
 pub const VERSION: &str = env!("SPACEPEEK_VERSION");
 
+pub mod balloon;
 pub mod chrome;
 pub mod cli;
 pub mod geometry;
@@ -15,6 +16,10 @@ pub mod preview;
 pub mod selection;
 pub mod state;
 
+pub use balloon::{
+    copy_utf16_z, interpret_dword_flag, should_show_first_run_balloon, BALLOON_BODY,
+    BALLOON_TIMEOUT_MS, BALLOON_TITLE, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME,
+};
 pub use chrome::{
     chrome_for_error, chrome_for_text, close_button_bounds, double_click_action, hit_test,
     min_physical_size, pointer_over_close, scaled_close_width, scaled_detail_font,

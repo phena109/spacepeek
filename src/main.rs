@@ -43,21 +43,23 @@ mod win {
 
     use spacepeek::{
         apply_image_command, choose_selected, chrome_for_error, chrome_for_text,
-        classify_typeahead_vk, close_button_bounds, decide_hook_key, double_click_action,
-        effective_dpi, fallback_type_name, gate_show, hit_test, hook_key_from_vk, image_view_rect,
-        is_selection_pointer_message, large_icon_px, load_text_preview, min_physical_size,
-        nav_reload_remaining, nonempty_path, pack_screen_point, parse_command, place_preview,
-        pointer_over_close, reconcile_image_view, reset_for_new_image, scaled_close_width,
-        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
-        scaled_header_pad, session_phase, should_reload_after_pointer,
-        should_reload_after_shell_event, small_icon_px, step, typeahead_for_decision,
+        classify_typeahead_vk, close_button_bounds, copy_utf16_z, decide_hook_key,
+        double_click_action, effective_dpi, fallback_type_name, gate_show, hit_test,
+        hook_key_from_vk, image_view_rect, interpret_dword_flag, is_selection_pointer_message,
+        large_icon_px, load_text_preview, min_physical_size, nav_reload_remaining, nonempty_path,
+        pack_screen_point, parse_command, place_preview, pointer_over_close, reconcile_image_view,
+        reset_for_new_image, scaled_close_width, scaled_detail_font, scaled_font_height,
+        scaled_header_font, scaled_header_height, scaled_header_pad, session_phase,
+        should_reload_after_pointer, should_reload_after_shell_event,
+        should_show_first_run_balloon, small_icon_px, step, typeahead_for_decision,
         typeahead_window_ms, unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken,
         ChromeLayout, Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone,
         HookContext, HookDecision, HookKey, ImageCommand, ImageFrame, ImageView, KeyPhase,
         Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect,
         QuickInfo, RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShowGate,
         ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold,
-        ZoomKey, ZoomOp, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, VERSION,
+        ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, FIRST_RUN_SHOWN,
+        FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -89,6 +91,11 @@ mod win {
     use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Ole::IOleWindow;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_DWORD, REG_NONE,
+        REG_OPTION_NON_VOLATILE,
+    };
     use windows::Win32::System::SystemInformation::GetTickCount;
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
@@ -109,11 +116,11 @@ mod win {
         FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
         IShellFolder, IShellFolderViewDual, IShellItem, IShellLinkW, IShellView, IShellWindows,
         IWebBrowser2, SHCreateItemWithParent, SHGetFileInfoW, SID_STopLevelBrowser,
-        ShellExecuteExW, ShellLink, ShellWindows, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE,
-        NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
-        NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SEE_MASK_FLAG_NO_UI, SHELLEXECUTEINFOW, SHFILEINFOW,
-        SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES, SIGDN_FILESYSPATH, SLGP_RAWPATH, SVGIO_SELECTION,
-        SVSI_SELECT,
+        ShellExecuteExW, ShellLink, ShellWindows, Shell_NotifyIconW, NIF_ICON, NIF_INFO,
+        NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+        NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SEE_MASK_FLAG_NO_UI,
+        SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES, SIGDN_FILESYSPATH,
+        SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, BringWindowToTop, CallNextHookEx, CallWindowProcW, CreatePopupMenu,
@@ -395,7 +402,7 @@ mod win {
             MAIN_HWND.store(msg_hwnd.0 as isize, Ordering::Release);
             register_taskbar_created();
             set_window_icons(msg_hwnd);
-            add_tray_icon(msg_hwnd);
+            let tray_ready = add_tray_icon(msg_hwnd);
             install_foreground_hook();
 
             // The hook cannot share this thread: a slow Explorer COM call on the
@@ -412,6 +419,12 @@ mod win {
                     return Err(err);
                 }
             };
+            // Hook and tray are already in. The HKCU read and the balloon come
+            // after that so they cannot delay the hook. A failed notify leaves
+            // the flag unset. `TaskbarCreated` only replaces the icon.
+            if tray_ready {
+                maybe_show_first_run_balloon(msg_hwnd);
+            }
             let mut msg = MSG::default();
             loop {
                 let rc = GetMessageW(&mut msg, HWND::default(), 0, 0);
@@ -1233,6 +1246,7 @@ mod win {
     fn message_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         let taskbar = TASKBAR_CREATED.load(Ordering::Acquire);
         if taskbar != 0 && msg == taskbar {
+            // Replace the icon only. The first-run balloon is not shown again.
             add_tray_icon(hwnd);
             return LRESULT(0);
         }
@@ -3929,14 +3943,14 @@ mod win {
         TASKBAR_CREATED.store(msg, Ordering::Release);
     }
 
-    fn add_tray_icon(hwnd: HWND) {
+    fn add_tray_icon(hwnd: HWND) -> bool {
         unsafe {
             let mut data = tray_icon_data(hwnd);
             if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
                 if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
                     debug_log("Spacepeek: notification icon was not added\n");
-                    return;
+                    return false;
                 }
             }
             data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
@@ -3945,6 +3959,111 @@ mod win {
             if !version4 {
                 debug_log("Spacepeek: notification icon version was not set\n");
             }
+            true
+        }
+    }
+
+    /// After the hook is installed and [`add_tray_icon`] has succeeded.
+    /// One HKCU query. The DWORD is written only when `Shell_NotifyIconW`
+    /// reports success, so a failed balloon can be tried on a later launch.
+    fn maybe_show_first_run_balloon(hwnd: HWND) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        if !should_show_first_run_balloon(read_first_run_flag()) {
+            return;
+        }
+        if !show_first_run_balloon(hwnd) {
+            debug_log("Spacepeek: first-run notification was not shown\n");
+            return;
+        }
+        if !write_first_run_flag() {
+            debug_log("Spacepeek: first-run flag was not saved\n");
+        }
+    }
+
+    fn show_first_run_balloon(hwnd: HWND) -> bool {
+        let mut data = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: TRAY_ID,
+            uFlags: NIF_INFO,
+            dwInfoFlags: NIIF_INFO,
+            ..NOTIFYICONDATAW::default()
+        };
+        // Vista and later often ignore this. Ten seconds is the modest fallback.
+        data.Anonymous.uTimeout = BALLOON_TIMEOUT_MS;
+        if !copy_utf16_z(&mut data.szInfoTitle, BALLOON_TITLE)
+            || !copy_utf16_z(&mut data.szInfo, BALLOON_BODY)
+        {
+            return false;
+        }
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &data).as_bool() }
+    }
+
+    /// `HKCU\Software\Spacepeek\FirstRunBalloonShown` when it is a DWORD.
+    /// Does not create the key. `None` when it is missing or not a DWORD.
+    fn read_first_run_flag() -> Option<u32> {
+        let subkey = utf16(FIRST_RUN_SUBKEY);
+        let name = utf16(FIRST_RUN_VALUE_NAME);
+        unsafe {
+            let mut key = HKEY::default();
+            if RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(subkey.as_ptr()),
+                0,
+                KEY_QUERY_VALUE,
+                &mut key,
+            ) != ERROR_SUCCESS
+            {
+                return None;
+            }
+            let mut raw = [0u8; 4];
+            let mut size = raw.len() as u32;
+            let mut kind = REG_NONE;
+            let status = RegQueryValueExW(
+                key,
+                PCWSTR(name.as_ptr()),
+                None,
+                Some(&mut kind),
+                Some(raw.as_mut_ptr()),
+                Some(&mut size),
+            );
+            let _ = RegCloseKey(key);
+            interpret_dword_flag(
+                status == ERROR_SUCCESS,
+                kind == REG_DWORD,
+                size,
+                u32::from_le_bytes(raw),
+            )
+        }
+    }
+
+    /// Create `HKCU\Software\Spacepeek` if needed and set the one DWORD.
+    /// Nothing else is written, and nothing is written under HKLM.
+    fn write_first_run_flag() -> bool {
+        let subkey = utf16(FIRST_RUN_SUBKEY);
+        let name = utf16(FIRST_RUN_VALUE_NAME);
+        let raw = FIRST_RUN_SHOWN.to_le_bytes();
+        unsafe {
+            let mut key = HKEY::default();
+            if RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(subkey.as_ptr()),
+                0,
+                PCWSTR::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                None,
+                &mut key,
+                None,
+            ) != ERROR_SUCCESS
+            {
+                return false;
+            }
+            let status = RegSetValueExW(key, PCWSTR(name.as_ptr()), 0, REG_DWORD, Some(&raw));
+            let _ = RegCloseKey(key);
+            status == ERROR_SUCCESS
         }
     }
 
