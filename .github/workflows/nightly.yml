@@ -182,13 +182,16 @@ jobs:
           set -euo pipefail
           DATE_ISO="${DATE:0:4}-${DATE:4:2}-${DATE:6:2}"
           cat > notes.md <<EOF
-          Untested automated build of \`main\`.
+          Untested automated build of \`main\`. These are unsigned pre-release nightlies, not a signed release.
 
           - Commit: [\`${SHORT}\`](https://github.com/${GH_REPO}/commit/${SHA})
           - Build date (Australia/Sydney): ${DATE_ISO}
           - Version: \`${VERSION}\`
+          - Targets: Windows 11, x64 and ARM64
 
-          Verify the downloads against \`SHA256SUMS.txt\`.
+          Windows SmartScreen may warn that Windows protected your PC. Choose **More info**, then **Run anyway**. Smart App Control may block unsigned apps.
+
+          Verify the downloads against \`SHA256SUMS.txt\` on this release page before you run them.
           EOF
 
           gh release delete nightly --cleanup-tag --yes || true
