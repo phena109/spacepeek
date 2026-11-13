@@ -34,6 +34,7 @@ fn embed_windows_resource(version: &str) {
         .set("FileVersion", version)
         .set("ProductVersion", version)
         .set("ProductName", "Spacepeek")
+        .set("CompanyName", "Spacepeek")
         .set("FileDescription", "Spacepeek file previewer")
         .set("LegalCopyright", "MIT License");
     if let Err(err) = res.compile() {
