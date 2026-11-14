@@ -47,10 +47,10 @@ mod win {
         double_click_action, effective_dpi, fallback_type_name, gate_show, hit_test,
         hook_key_from_vk, image_view_rect, interpret_dword_flag, is_selection_pointer_message,
         large_icon_px, load_text_preview, min_physical_size, nav_reload_remaining, nonempty_path,
-        pack_screen_point, parse_command, place_preview, pointer_over_close, reconcile_image_view,
-        reset_for_new_image, scaled_close_width, scaled_detail_font, scaled_font_height,
-        scaled_header_font, scaled_header_height, scaled_header_pad, session_phase,
-        should_reload_after_pointer, should_reload_after_shell_event,
+        pack_screen_point, parse_command, place_preview, pointer_over_close, preview_text,
+        reconcile_image_view, reset_for_new_image, scaled_close_width, scaled_detail_font,
+        scaled_font_height, scaled_header_font, scaled_header_height, scaled_header_pad,
+        session_phase, should_reload_after_pointer, should_reload_after_shell_event,
         should_show_first_run_balloon, small_icon_px, step, typeahead_for_decision,
         typeahead_window_ms, unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken,
         ChromeLayout, Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone,
@@ -101,6 +101,11 @@ mod win {
     use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
     use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
     use windows::Win32::UI::Controls::LoadIconWithScaleDown;
+    use windows::Win32::UI::Controls::RichEdit::{
+        EDITSTREAM, EM_AUTOURLDETECT, EM_EXLIMITTEXT, EM_HIDESELECTION, EM_SETBKGNDCOLOR,
+        EM_SETEVENTMASK, EM_SETTARGETDEVICE, EM_STREAMIN, MSFTEDIT_CLASS, SFF_PLAINRTF, SF_RTF,
+        SF_TEXT,
+    };
     use windows::Win32::UI::HiDpi::{
         GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi,
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -176,17 +181,26 @@ mod win {
     const EM_SETLIMITTEXT: u32 = 0x00C5;
     /// `EM_LINESCROLL`. Kept local so the edit control does not need the Controls feature.
     const EM_LINESCROLL: u32 = 0x00B6;
-    /// RichEdit 4.1 class from Msftedit.dll. Loaded only for a Markdown preview.
-    const RICHEDIT_CLASS: &str = "RICHEDIT50W";
-    const EM_EXLIMITTEXT: u32 = WM_USER + 53;
-    const EM_HIDESELECTION: u32 = WM_USER + 63;
-    const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
-    const EM_SETEVENTMASK: u32 = WM_USER + 69;
-    const EM_SETTARGETDEVICE: u32 = WM_USER + 72;
-    const EM_STREAMIN: u32 = WM_USER + 73;
-    const EM_AUTOURLDETECT: u32 = WM_USER + 91;
-    const SF_RTFNOOBJS: usize = 0x0003;
-    const SFF_PLAINRTF: usize = 0x4000;
+    /// `EM_STREAMIN` format. `SF_RTF` is the inbound RTF format. `SF_RTFNOOBJS`
+    /// is outbound-only in richedit.h and also sets the `SF_TEXT` bit, so it is
+    /// the wrong value to stream RTF in. `SFF_PLAINRTF` ignores language-specific
+    /// keywords (`\lang` and similar); the RTF we generate does not use any.
+    const STREAM_IN_FORMAT: u32 = SF_RTF | SFF_PLAINRTF;
+    const _: () = {
+        assert!(STREAM_IN_FORMAT & SF_TEXT == 0);
+        assert!(STREAM_IN_FORMAT & SF_RTF == SF_RTF);
+        assert!(STREAM_IN_FORMAT & SFF_PLAINRTF == SFF_PLAINRTF);
+    };
+    /// `EDITSTREAM` is `#[repr(C, packed(4))]` on 64-bit in windows 0.58, so
+    /// `pfnCallback` is at byte 12 and the struct is 20 bytes. A naturally
+    /// aligned layout would put the callback at 16 and RichEdit would call
+    /// garbage. This is `cfg(windows)` via the enclosing module.
+    #[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    const _: () = {
+        assert!(std::mem::size_of::<EDITSTREAM>() == 20);
+        assert!(std::mem::offset_of!(EDITSTREAM, dwError) == 8);
+        assert!(std::mem::offset_of!(EDITSTREAM, pfnCallback) == 12);
+    };
     /// `WM_MOUSELEAVE`. Kept local so the preview does not need the Controls feature.
     const WM_MOUSELEAVE: u32 = 0x02A3;
     const NAV_TIMER_ID: usize = 1;
@@ -2250,7 +2264,19 @@ mod win {
                     return false;
                 };
                 apply_font(edit, edit_font);
-                stream_rtf(edit, rtf);
+                if stream_rtf(edit, rtf) {
+                    resize_edit_pair(hwnd, edit);
+                    suppress_caret(edit);
+                    return true;
+                }
+                // Stream failed (bad callback, dwError, or nothing read). A
+                // RichEdit left empty is a white pane. Show the plain preview.
+                destroy_edit();
+                let Some(edit) = create_plain_edit(hwnd, instance) else {
+                    return false;
+                };
+                apply_font(edit, edit_font);
+                set_text(edit, &plain_preview_text());
                 resize_edit_pair(hwnd, edit);
                 suppress_caret(edit);
                 true
@@ -2265,7 +2291,7 @@ mod win {
     fn ensure_body(parent: HWND, instance: HINSTANCE, rich: bool) -> Option<HWND> {
         let existing = with_app(|app| app.edit_hwnd);
         if !existing.0.is_null() && unsafe { IsWindow(existing).as_bool() } {
-            if class_eq(existing, RICHEDIT_CLASS) == rich {
+            if is_msftedit(existing) == rich {
                 return Some(existing);
             }
             destroy_edit();
@@ -2319,7 +2345,6 @@ mod win {
         if !ensure_msftedit() {
             return None;
         }
-        let class_name = utf16(RICHEDIT_CLASS);
         // Wrap on: no ES_AUTOHSCROLL. Vertical and horizontal bars still
         // appear when a code line is wider than the window.
         let style = WS_CHILD
@@ -2332,7 +2357,7 @@ mod win {
         let edit = unsafe {
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
-                PCWSTR(class_name.as_ptr()),
+                MSFTEDIT_CLASS,
                 PCWSTR::null(),
                 style,
                 0,
@@ -2385,19 +2410,14 @@ mod win {
         }
     }
 
-    #[repr(C)]
-    struct EditStream {
-        dw_cookie: usize,
-        dw_error: u32,
-        pfn_callback: Option<unsafe extern "system" fn(usize, *mut u8, i32, *mut i32) -> u32>,
-    }
-
     struct RtfStream {
         bytes: *const u8,
         len: usize,
         offset: usize,
     }
 
+    /// `EDITSTREAMCALLBACK`. Returns 0 after copying the next slice, or a
+    /// nonzero code when the caller did not provide a byte-count slot.
     unsafe extern "system" fn rtf_stream_in(
         cookie: usize,
         buffer: *mut u8,
@@ -2422,9 +2442,11 @@ mod win {
         0
     }
 
-    fn stream_rtf(hwnd: HWND, rtf: &str) {
-        if hwnd.0.is_null() {
-            return;
+    /// Stream RTF into a RichEdit control. False when the control reports
+    /// `dwError` or reads nothing from a non-empty stream.
+    fn stream_rtf(hwnd: HWND, rtf: &str) -> bool {
+        if hwnd.0.is_null() || rtf.is_empty() {
+            return false;
         }
         let bytes = rtf.as_bytes();
         let mut state = RtfStream {
@@ -2432,19 +2454,50 @@ mod win {
             len: bytes.len(),
             offset: 0,
         };
-        let mut stream = EditStream {
-            dw_cookie: &mut state as *mut RtfStream as usize,
-            dw_error: 0,
-            pfn_callback: Some(rtf_stream_in),
+        let mut stream = EDITSTREAM {
+            dwCookie: &mut state as *mut RtfStream as usize,
+            dwError: 0,
+            pfnCallback: Some(rtf_stream_in),
         };
-        unsafe {
-            let _ = SendMessageW(
+        let read = unsafe {
+            SendMessageW(
                 hwnd,
                 EM_STREAMIN,
-                WPARAM(SF_RTFNOOBJS | SFF_PLAINRTF),
-                LPARAM(&mut stream as *mut EditStream as isize),
-            );
+                WPARAM(STREAM_IN_FORMAT as usize),
+                LPARAM(&mut stream as *mut EDITSTREAM as isize),
+            )
+        };
+        // `dwError` is a u32 at offset 8 inside a 4-byte-packed struct, so a
+        // copy is aligned. A nonzero value means the callback or the control
+        // aborted the stream.
+        let error = stream.dwError;
+        error == 0 && read.0 > 0
+    }
+
+    /// Plain-text body for a failed Markdown stream. The loader already built
+    /// this for the EDIT path; a missing preview becomes a short error line.
+    fn plain_preview_text() -> String {
+        with_app(|app| match &app.state {
+            PreviewState::Showing { preview, .. } => preview_text(preview),
+            PreviewState::PendingShow {
+                outcome: ShowOutcome::Ready(preview),
+                ..
+            } => preview_text(preview),
+            _ => "Could not display this Markdown preview.".to_string(),
+        })
+    }
+
+    fn is_msftedit(hwnd: HWND) -> bool {
+        if hwnd.0.is_null() {
+            return false;
         }
+        let mut buf = [0u16; 64];
+        let n = unsafe { GetClassNameW(hwnd, &mut buf) };
+        if n <= 0 {
+            return false;
+        }
+        let class = unsafe { MSFTEDIT_CLASS.as_wide() };
+        class == &buf[..n as usize]
     }
 
     fn destroy_edit() {
