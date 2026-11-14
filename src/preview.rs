@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::image_preview::{
     decode_image, sniff_image, DecodedImage, ImageError, ImageFormat, ImageLimits,
 };
+use crate::markdown::{is_markdown_path, render_markdown, should_render_markdown};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeniedKind {
@@ -371,6 +372,9 @@ pub struct Preview {
     pub total_bytes: u64,
     /// Decoded image pixels. `None` for a text preview.
     pub image: Option<Arc<DecodedImage>>,
+    /// RTF for a Markdown preview, built on the loader thread. `None` for
+    /// plain text, images, or a Markdown file that fell back to the EDIT path.
+    pub markdown_rtf: Option<Arc<str>>,
 }
 
 /// Default file-byte budget for the EDIT control.
@@ -621,14 +625,33 @@ pub fn load_text_preview<P: AsRef<Path>>(
         None
     };
 
-    Ok(Preview {
+    let mut preview = Preview {
         content: prepared.content,
         truncated,
         line_count: prepared.lines_shown,
         truncation,
         total_bytes,
         image: None,
-    })
+        markdown_rtf: None,
+    };
+
+    // Extension check after the text sniff, so a `.md` PNG still uses the
+    // image path and a `.txt` file never pays for Markdown parsing.
+    if is_markdown_path(path) && should_render_markdown(text.len(), prepared.lines_in_source) {
+        if cancel.is_cancelled(&gen) {
+            return Err(PreviewError::Cancelled);
+        }
+        let notice = preview
+            .truncation
+            .as_ref()
+            .and_then(format_truncation_notice);
+        preview.markdown_rtf = Some(Arc::from(render_markdown(&text, notice.as_deref())));
+        if cancel.is_cancelled(&gen) {
+            return Err(PreviewError::Cancelled);
+        }
+    }
+
+    Ok(preview)
 }
 
 /// How many leading bytes [`sniff_image`] needs.
@@ -686,6 +709,7 @@ fn load_image_preview(
         truncation: None,
         total_bytes,
         image: Some(Arc::new(decoded)),
+        markdown_rtf: None,
     })
 }
 
@@ -2449,5 +2473,71 @@ mod tests {
             load_text_preview(&text, PreviewLimits::default(), &token, stale),
             Err(PreviewError::Cancelled)
         );
+    }
+
+    #[test]
+    fn markdown_extension_gets_rtf_after_the_text_sniff() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = b"# Title\n\nHello **world**.\n";
+        for name in ["notes.md", "notes.MD", "notes.markdown"] {
+            let path = write_file(&dir, name, src);
+            let preview = load(&path, PreviewLimits::default()).unwrap();
+            assert!(preview.image.is_none(), "{name}");
+            assert!(!preview.truncated, "{name}");
+            let rtf = preview.markdown_rtf.as_deref().expect(name);
+            assert!(rtf.starts_with(r"{\rtf1"), "{name}");
+            assert!(rtf.contains("Title"), "{name}");
+            assert!(rtf.contains("\\b"), "{name}");
+        }
+
+        let txt = write_file(&dir, "notes.txt", src);
+        let preview = load(&txt, PreviewLimits::default()).unwrap();
+        assert!(preview.markdown_rtf.is_none());
+        assert!(preview.content.contains("Hello"));
+
+        let mdx = write_file(&dir, "notes.mdx", src);
+        let preview = load(&mdx, PreviewLimits::default()).unwrap();
+        assert!(preview.markdown_rtf.is_none());
+    }
+
+    #[test]
+    fn markdown_over_the_line_cap_falls_back_to_plain_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut src = String::new();
+        for i in 0..2_001 {
+            src.push_str("line ");
+            src.push_str(&i.to_string());
+            src.push('\n');
+        }
+        let path = write_file(&dir, "huge.md", src.as_bytes());
+        let preview = load(&path, PreviewLimits::default()).unwrap();
+        assert!(preview.markdown_rtf.is_none());
+        assert!(preview.truncated);
+        assert_eq!(preview.line_count, 2_000);
+        assert!(preview.content.starts_with("line 0"));
+    }
+
+    #[test]
+    fn markdown_truncation_notice_is_in_the_rtf() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = format!("# Title\n\n{}\n", "word ".repeat(20_000));
+        assert!(src.len() > 64 * 1024);
+        let path = write_file(&dir, "long.md", src.as_bytes());
+        let preview = load(&path, PreviewLimits::default()).unwrap();
+        assert!(preview.truncated);
+        let rtf = preview.markdown_rtf.as_deref().expect("prefix still fits the line cap");
+        assert!(rtf.contains("Showing the first"));
+        assert!(rtf.contains("Title"));
+    }
+
+    #[test]
+    fn crlf_markdown_file_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, "win.md", b"# Title\r\n\r\nA **bold** line\r\n");
+        let preview = load(&path, PreviewLimits::default()).unwrap();
+        let rtf = preview.markdown_rtf.as_deref().unwrap();
+        assert!(rtf.contains("Title"));
+        assert!(rtf.contains("\\b"));
+        assert!(rtf.contains("bold"));
     }
 }

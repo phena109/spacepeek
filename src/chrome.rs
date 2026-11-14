@@ -11,6 +11,7 @@ use crate::geometry::{
     LOGICAL_PREVIEW_WIDTH,
 };
 use crate::image_preview::{format_image_details, DecodedImage};
+use crate::markdown::is_markdown_path;
 use crate::preview::{
     format_compact_size, format_grouped, message_with_quick_info, preview_text, Preview,
     PreviewError,
@@ -53,6 +54,8 @@ pub enum WindowKind {
     Message,
     /// Decoded bitmap. Opens at the same size as [`Self::Content`].
     Image,
+    /// Formatted Markdown in a RichEdit control. Same default size as text.
+    Markdown,
 }
 
 /// File name and the secondary header line.
@@ -64,6 +67,7 @@ pub struct HeaderText {
 
 /// What the window should draw. The text body is the edit control; a message
 /// is painted centred under the header. An image is the decoded bitmap.
+/// Markdown is RTF already built on the loader thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Presented {
     Text {
@@ -78,6 +82,10 @@ pub enum Presented {
         header: HeaderText,
         image: Arc<DecodedImage>,
     },
+    Markdown {
+        header: HeaderText,
+        rtf: Arc<str>,
+    },
 }
 
 impl Presented {
@@ -86,6 +94,7 @@ impl Presented {
             Presented::Text { .. } => WindowKind::Content,
             Presented::Message { .. } => WindowKind::Message,
             Presented::Image { .. } => WindowKind::Image,
+            Presented::Markdown { .. } => WindowKind::Markdown,
         }
     }
 
@@ -93,14 +102,15 @@ impl Presented {
         match self {
             Presented::Text { header, .. }
             | Presented::Message { header, .. }
-            | Presented::Image { header, .. } => header,
+            | Presented::Image { header, .. }
+            | Presented::Markdown { header, .. } => header,
         }
     }
 
     pub fn message(&self) -> Option<&str> {
         match self {
             Presented::Message { message, .. } => Some(message),
-            Presented::Text { .. } | Presented::Image { .. } => None,
+            Presented::Text { .. } | Presented::Image { .. } | Presented::Markdown { .. } => None,
         }
     }
 }
@@ -148,14 +158,28 @@ pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
             image: Arc::clone(image),
         };
     }
+    let mut details = format_header_details(
+        preview.total_bytes,
+        preview.line_count as u64,
+        preview.truncated,
+    );
+    if is_markdown_path(path) {
+        if let Some(rtf) = preview.markdown_rtf.as_ref() {
+            details.push_str(" · Markdown");
+            return Presented::Markdown {
+                header: HeaderText {
+                    name: path_label(path),
+                    details,
+                },
+                rtf: Arc::clone(rtf),
+            };
+        }
+        details.push_str(" · Markdown as text");
+    }
     Presented::Text {
         header: HeaderText {
             name: path_label(path),
-            details: format_header_details(
-                preview.total_bytes,
-                preview.line_count as u64,
-                preview.truncated,
-            ),
+            details,
         },
         body: preview_text(preview),
     }
@@ -178,7 +202,7 @@ pub fn chrome_for_error(path: &Path, error: &PreviewError) -> Presented {
 
 pub fn default_logical_size(kind: WindowKind) -> LogicalSize {
     match kind {
-        WindowKind::Content | WindowKind::Image => LogicalSize {
+        WindowKind::Content | WindowKind::Image | WindowKind::Markdown => LogicalSize {
             width: LOGICAL_PREVIEW_WIDTH,
             height: LOGICAL_PREVIEW_HEIGHT,
         },
@@ -460,6 +484,7 @@ mod tests {
             truncation: None,
             total_bytes,
             image: None,
+            markdown_rtf: None,
         }
     }
 
@@ -513,15 +538,18 @@ mod tests {
             panic!("expected text chrome");
         };
         assert_eq!(header.name, "ノート.md");
-        assert_eq!(header.details, "1.2 MB · 2,000 lines (truncated)");
+        assert_eq!(
+            header.details,
+            "1.2 MB · 2,000 lines (truncated) · Markdown as text"
+        );
         assert!(body.starts_with("Showing the first 64 KB of 1.2 MB"));
         assert!(body.contains("line"));
 
-        let plain = chrome_for_text(Path::new("notes.md"), &preview(12 * 1024, 40, false));
+        let plain = chrome_for_text(Path::new("notes.txt"), &preview(12 * 1024, 40, false));
         assert_eq!(
             plain.header(),
             &HeaderText {
-                name: "notes.md".to_string(),
+                name: "notes.txt".to_string(),
                 details: "12 KB · 40 lines".to_string(),
             }
         );
@@ -549,6 +577,7 @@ mod tests {
             truncation: None,
             total_bytes: 1_258_291,
             image: Some(Arc::clone(&image)),
+            markdown_rtf: None,
         };
         let presented = chrome_for_text(Path::new("photo.jpg"), &preview);
         assert_eq!(presented.kind(), WindowKind::Image);
@@ -570,6 +599,40 @@ mod tests {
         assert_eq!(
             mem.opening_logical(WindowKind::Image),
             mem.opening_logical(WindowKind::Content)
+        );
+        assert_eq!(
+            default_logical_size(WindowKind::Markdown),
+            default_logical_size(WindowKind::Content)
+        );
+    }
+
+    #[test]
+    fn markdown_chrome_uses_rtf_and_header_status() {
+        let rtf: Arc<str> = Arc::from(r"{\rtf1\ansi hi}");
+        let preview = Preview {
+            content: "# hi".to_string(),
+            truncated: false,
+            line_count: 1,
+            truncation: None,
+            total_bytes: 4,
+            image: None,
+            markdown_rtf: Some(Arc::clone(&rtf)),
+        };
+        let presented = chrome_for_text(Path::new("README.MD"), &preview);
+        assert_eq!(presented.kind(), WindowKind::Markdown);
+        assert_eq!(presented.message(), None);
+        assert_eq!(presented.header().name, "README.MD");
+        assert_eq!(presented.header().details, "4 B · 1 line · Markdown");
+        let Presented::Markdown { rtf: shown, .. } = presented else {
+            panic!("expected markdown chrome");
+        };
+        assert!(Arc::ptr_eq(&shown, &rtf));
+
+        let fallback = chrome_for_text(Path::new("notes.markdown"), &preview(64 * 1024, 2_000, true));
+        assert_eq!(fallback.kind(), WindowKind::Content);
+        assert_eq!(
+            fallback.header().details,
+            "64 KB · 2,000 lines (truncated) · Markdown as text"
         );
     }
 
