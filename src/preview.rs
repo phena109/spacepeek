@@ -2525,7 +2525,10 @@ mod tests {
         let path = write_file(&dir, "long.md", src.as_bytes());
         let preview = load(&path, PreviewLimits::default()).unwrap();
         assert!(preview.truncated);
-        let rtf = preview.markdown_rtf.as_deref().expect("prefix still fits the line cap");
+        let rtf = preview
+            .markdown_rtf
+            .as_deref()
+            .expect("prefix still fits the line cap");
         assert!(rtf.contains("Showing the first"));
         assert!(rtf.contains("Title"));
     }

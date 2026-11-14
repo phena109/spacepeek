@@ -89,7 +89,7 @@ mod win {
     };
     use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
     use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
     use windows::Win32::System::Ole::IOleWindow;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
@@ -176,6 +176,17 @@ mod win {
     const EM_SETLIMITTEXT: u32 = 0x00C5;
     /// `EM_LINESCROLL`. Kept local so the edit control does not need the Controls feature.
     const EM_LINESCROLL: u32 = 0x00B6;
+    /// RichEdit 4.1 class from Msftedit.dll. Loaded only for a Markdown preview.
+    const RICHEDIT_CLASS: &str = "RICHEDIT50W";
+    const EM_EXLIMITTEXT: u32 = WM_USER + 53;
+    const EM_HIDESELECTION: u32 = WM_USER + 63;
+    const EM_SETBKGNDCOLOR: u32 = WM_USER + 67;
+    const EM_SETEVENTMASK: u32 = WM_USER + 69;
+    const EM_SETTARGETDEVICE: u32 = WM_USER + 72;
+    const EM_STREAMIN: u32 = WM_USER + 73;
+    const EM_AUTOURLDETECT: u32 = WM_USER + 91;
+    const SF_RTFNOOBJS: usize = 0x0003;
+    const SFF_PLAINRTF: usize = 0x4000;
     /// `WM_MOUSELEAVE`. Kept local so the preview does not need the Controls feature.
     const WM_MOUSELEAVE: u32 = 0x02A3;
     const NAV_TIMER_ID: usize = 1;
@@ -296,6 +307,8 @@ mod win {
     static INPUT_GEN: AtomicU64 = AtomicU64::new(0);
     /// Previous edit-control window procedure. Zero when the edit is gone.
     static EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
+    /// `Msftedit.dll` module. 0 = not loaded, −1 = load failed, else HMODULE bits.
+    static MSFTEDIT: AtomicIsize = AtomicIsize::new(0);
     static FOREGROUND_HOOK: AtomicIsize = AtomicIsize::new(0);
     /// Selection WinEvent hook. Zero when no preview session is open.
     static SELECTION_HOOK: AtomicIsize = AtomicIsize::new(0);
@@ -2167,6 +2180,10 @@ mod win {
                 header: header.clone(),
                 image: std::sync::Arc::clone(image),
             },
+            Presented::Markdown { header, rtf } => Presented::Markdown {
+                header: header.clone(),
+                rtf: std::sync::Arc::clone(rtf),
+            },
         }
     }
 
@@ -2219,11 +2236,21 @@ mod win {
     ) -> bool {
         match presented {
             Presented::Text { body, .. } => {
-                let Some(edit) = ensure_edit(hwnd, instance) else {
+                let Some(edit) = ensure_body(hwnd, instance, false) else {
                     return false;
                 };
                 apply_font(edit, edit_font);
                 set_text(edit, body);
+                resize_edit_pair(hwnd, edit);
+                suppress_caret(edit);
+                true
+            }
+            Presented::Markdown { rtf, .. } => {
+                let Some(edit) = ensure_body(hwnd, instance, true) else {
+                    return false;
+                };
+                apply_font(edit, edit_font);
+                stream_rtf(edit, rtf);
                 resize_edit_pair(hwnd, edit);
                 suppress_caret(edit);
                 true
@@ -2235,11 +2262,22 @@ mod win {
         }
     }
 
-    fn ensure_edit(parent: HWND, instance: HINSTANCE) -> Option<HWND> {
+    fn ensure_body(parent: HWND, instance: HINSTANCE, rich: bool) -> Option<HWND> {
         let existing = with_app(|app| app.edit_hwnd);
         if !existing.0.is_null() && unsafe { IsWindow(existing).as_bool() } {
-            return Some(existing);
+            if class_eq(existing, RICHEDIT_CLASS) == rich {
+                return Some(existing);
+            }
+            destroy_edit();
         }
+        if rich {
+            create_rich_edit(parent, instance)
+        } else {
+            create_plain_edit(parent, instance)
+        }
+    }
+
+    fn create_plain_edit(parent: HWND, instance: HINSTANCE) -> Option<HWND> {
         let edit_class = utf16("EDIT");
         // ES_AUTOHSCROLL turns word wrap off for a multiline EDIT. WS_HSCROLL
         // keeps a bar so columns and indentation scroll sideways instead of
@@ -2275,6 +2313,138 @@ mod win {
         subclass_edit(edit);
         with_app_mut(|app| app.edit_hwnd = edit);
         Some(edit)
+    }
+
+    fn create_rich_edit(parent: HWND, instance: HINSTANCE) -> Option<HWND> {
+        if !ensure_msftedit() {
+            return None;
+        }
+        let class_name = utf16(RICHEDIT_CLASS);
+        // Wrap on: no ES_AUTOHSCROLL. Vertical and horizontal bars still
+        // appear when a code line is wider than the window.
+        let style = WS_CHILD
+            | WS_VISIBLE
+            | WS_VSCROLL
+            | WS_HSCROLL
+            | WINDOW_STYLE(ES_MULTILINE as u32)
+            | WINDOW_STYLE(ES_READONLY as u32)
+            | WINDOW_STYLE(ES_AUTOVSCROLL as u32);
+        let edit = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR::null(),
+                style,
+                0,
+                0,
+                0,
+                0,
+                parent,
+                HMENU::default(),
+                instance,
+                None,
+            )
+            .ok()?
+        };
+        unsafe {
+            let _ = SendMessageW(edit, EM_EXLIMITTEXT, WPARAM(1_048_576), LPARAM(0));
+            let _ = SendMessageW(edit, EM_AUTOURLDETECT, WPARAM(0), LPARAM(0));
+            let _ = SendMessageW(edit, EM_SETEVENTMASK, WPARAM(0), LPARAM(0));
+            let _ = SendMessageW(edit, EM_HIDESELECTION, WPARAM(1), LPARAM(0));
+            let _ = SendMessageW(
+                edit,
+                EM_SETBKGNDCOLOR,
+                WPARAM(0),
+                LPARAM(rgb(255, 255, 255).0 as isize),
+            );
+            let _ = SendMessageW(edit, EM_SETTARGETDEVICE, WPARAM(0), LPARAM(0));
+        }
+        subclass_edit(edit);
+        with_app_mut(|app| app.edit_hwnd = edit);
+        Some(edit)
+    }
+
+    fn ensure_msftedit() -> bool {
+        let bits = MSFTEDIT.load(Ordering::Acquire);
+        if bits > 0 {
+            return true;
+        }
+        if bits < 0 {
+            return false;
+        }
+        let loaded = unsafe { LoadLibraryW(w!("Msftedit.dll")) };
+        match loaded {
+            Ok(module) if !module.is_invalid() => {
+                MSFTEDIT.store(module.0 as isize, Ordering::Release);
+                true
+            }
+            _ => {
+                MSFTEDIT.store(-1, Ordering::Release);
+                false
+            }
+        }
+    }
+
+    #[repr(C)]
+    struct EditStream {
+        dw_cookie: usize,
+        dw_error: u32,
+        pfn_callback: Option<unsafe extern "system" fn(usize, *mut u8, i32, *mut i32) -> u32>,
+    }
+
+    struct RtfStream {
+        bytes: *const u8,
+        len: usize,
+        offset: usize,
+    }
+
+    unsafe extern "system" fn rtf_stream_in(
+        cookie: usize,
+        buffer: *mut u8,
+        bytes_requested: i32,
+        bytes_read: *mut i32,
+    ) -> u32 {
+        if bytes_read.is_null() {
+            return 1;
+        }
+        *bytes_read = 0;
+        if buffer.is_null() || bytes_requested <= 0 || cookie == 0 {
+            return 0;
+        }
+        let stream = &mut *(cookie as *mut RtfStream);
+        let remaining = stream.len.saturating_sub(stream.offset);
+        let take = remaining.min(bytes_requested as usize);
+        if take > 0 {
+            std::ptr::copy_nonoverlapping(stream.bytes.add(stream.offset), buffer, take);
+            stream.offset += take;
+        }
+        *bytes_read = take as i32;
+        0
+    }
+
+    fn stream_rtf(hwnd: HWND, rtf: &str) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        let bytes = rtf.as_bytes();
+        let mut state = RtfStream {
+            bytes: bytes.as_ptr(),
+            len: bytes.len(),
+            offset: 0,
+        };
+        let mut stream = EditStream {
+            dw_cookie: &mut state as *mut RtfStream as usize,
+            dw_error: 0,
+            pfn_callback: Some(rtf_stream_in),
+        };
+        unsafe {
+            let _ = SendMessageW(
+                hwnd,
+                EM_STREAMIN,
+                WPARAM(SF_RTFNOOBJS | SFF_PLAINRTF),
+                LPARAM(&mut stream as *mut EditStream as isize),
+            );
+        }
     }
 
     fn destroy_edit() {
@@ -2624,7 +2794,7 @@ mod win {
             }
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_RBUTTONDBLCLK
             | WM_MBUTTONDOWN | WM_MBUTTONUP | WM_MBUTTONDBLCLK | WM_KEYDOWN | WM_KEYUP
-            | WM_CHAR | WM_SYSKEYDOWN | WM_SYSKEYUP => LRESULT(0),
+            | WM_CHAR | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_CONTEXTMENU => LRESULT(0),
             WM_SETFOCUS => {
                 let result = call_edit_proc(hwnd, msg, wparam, lparam);
                 let _ = HideCaret(hwnd);

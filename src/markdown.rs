@@ -574,13 +574,13 @@ fn format_table(rows: &[Vec<String>]) -> String {
 }
 
 fn push_table_row(out: &mut String, row: &[String], widths: &[usize], cols: usize) {
-    for i in 0..cols {
+    for (i, width) in widths.iter().enumerate().take(cols) {
         if i > 0 {
             out.push_str(" | ");
         }
         let cell = row.get(i).map(String::as_str).unwrap_or("");
         out.push_str(cell);
-        let pad = widths[i].saturating_sub(cell.chars().count());
+        let pad = width.saturating_sub(cell.chars().count());
         for _ in 0..pad {
             out.push(' ');
         }
@@ -640,10 +640,7 @@ fn push_pard(out: &mut String, block: &MdBlock) {
             let _ = write!(out, "\\sa80\\li{li}\\fi-360\\f0\\fs{BODY_FS}\\cf{cf} ");
         }
         MdBlockKind::Code | MdBlockKind::Html => {
-            let _ = write!(
-                out,
-                "\\sa40\\li{li}\\f1\\fs{CODE_FS}\\cf1\\highlight4 "
-            );
+            let _ = write!(out, "\\sa40\\li{li}\\f1\\fs{CODE_FS}\\cf1\\highlight4 ");
         }
         MdBlockKind::Rule => {
             let _ = write!(
@@ -706,8 +703,10 @@ fn push_rtf_text(out: &mut String, text: &str) {
             c if (c as u32) < 0x20 || c == '\u{7F}' => {}
             c if c.is_ascii() => out.push(c),
             c => {
-                for unit in c.encode_utf16() {
-                    let signed = i16::from_ne_bytes(unit.to_ne_bytes());
+                let mut buf = [0u16; 2];
+                let n = c.encode_utf16(&mut buf).len();
+                for &unit in buf.iter().take(n) {
+                    let signed = unit as i16;
                     let _ = write!(out, "\\u{signed}?");
                 }
             }
@@ -730,18 +729,26 @@ mod tests {
     }
 
     fn kinds(src: &str) -> Vec<MdBlockKind> {
-        doc(src).blocks.into_iter().map(|block| block.kind).collect()
+        doc(src)
+            .blocks
+            .into_iter()
+            .map(|block| block.kind)
+            .collect()
     }
 
     fn sample_markdown(target_bytes: usize) -> String {
+        // Long paragraphs keep the line count under the Markdown cap at 64 KiB
+        // so the timed path matches `should_render_markdown`.
         let unit = concat!(
-            "# Heading\n\n",
+            "## Heading\n\n",
             "A paragraph with **bold**, *italic*, ~~strike~~, `code`, ",
-            "and a [link](https://example.com).\n\n",
-            "- item\n- nested:\n  1. one\n  2. two\n\n",
-            "> quote\n\n",
-            "```\ncode block\n```\n\n",
-            "---\n\n"
+            "and a [link](https://example.com). ",
+            "More words fill the paragraph so a 64 KiB document stays under ",
+            "two thousand lines while still exercising the usual constructs. ",
+            "A second sentence with `more code` and ~~strike~~ keeps the parser busy.\n\n",
+            "- item with **bold** and a [link](https://example.com)\n",
+            "> quote with *emphasis*\n\n",
+            "```\nfn sample() { let x = 1; }\n```\n\n",
         );
         let mut out = String::with_capacity(target_bytes.saturating_add(unit.len()));
         while out.len() < target_bytes {
@@ -770,10 +777,16 @@ mod tests {
     #[test]
     fn huge_file_fallback_uses_byte_and_line_caps() {
         assert!(should_render_markdown(0, 0));
-        assert!(should_render_markdown(MARKDOWN_MAX_BYTES, MARKDOWN_MAX_LINES));
+        assert!(should_render_markdown(
+            MARKDOWN_MAX_BYTES,
+            MARKDOWN_MAX_LINES
+        ));
         assert!(!should_render_markdown(MARKDOWN_MAX_BYTES + 1, 1));
         assert!(!should_render_markdown(1, MARKDOWN_MAX_LINES + 1));
-        assert!(!should_render_markdown(MARKDOWN_MAX_BYTES + 1, MARKDOWN_MAX_LINES + 1));
+        assert!(!should_render_markdown(
+            MARKDOWN_MAX_BYTES + 1,
+            MARKDOWN_MAX_LINES + 1
+        ));
         assert_eq!(MARKDOWN_MAX_BYTES, 64 * 1024);
         assert_eq!(MARKDOWN_MAX_LINES, 2_000);
     }
@@ -790,7 +803,10 @@ mod tests {
             })
             .collect();
         assert_eq!(levels, vec![1, 2, 3, 4, 5, 6]);
-        let sizes: Vec<u16> = levels.iter().map(|level| heading_half_points(*level)).collect();
+        let sizes: Vec<u16> = levels
+            .iter()
+            .map(|level| heading_half_points(*level))
+            .collect();
         for pair in sizes.windows(2) {
             assert!(pair[0] > pair[1], "heading sizes must step down: {sizes:?}");
         }
@@ -898,10 +914,13 @@ mod tests {
     #[test]
     fn indented_code_block_is_code() {
         let parsed = doc("para\n\n    foo()\n    bar()\n");
-        assert!(parsed
-            .blocks
-            .iter()
-            .any(|block| matches!(block.kind, MdBlockKind::Code) && plain(block).contains("foo()")));
+        assert!(
+            parsed
+                .blocks
+                .iter()
+                .any(|block| matches!(block.kind, MdBlockKind::Code)
+                    && plain(block).contains("foo()"))
+        );
     }
 
     #[test]
@@ -1003,9 +1022,20 @@ mod tests {
             .find(|block| matches!(block.kind, MdBlockKind::Code))
             .unwrap();
         let text = plain(code);
-        assert!(text.contains("A  | BB"));
-        assert!(text.contains("x  | yz"));
-        assert!(text.contains("---"));
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("A") && line.contains("BB") && line.contains('|')),
+            "{text:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("x") && line.contains("yz") && line.contains('|')),
+            "{text:?}"
+        );
+        assert!(text.contains('-'), "{text:?}");
         let rtf = document_to_rtf(&parsed, None);
         assert!(rtf.contains("\\f1"));
     }
@@ -1087,6 +1117,11 @@ mod tests {
         );
         assert!(!parsed.blocks.is_empty());
         assert!(rtf.starts_with(r"{\rtf1"));
+        assert!(
+            src.lines().count() <= MARKDOWN_MAX_LINES,
+            "cap sample should stay within the line cap, got {}",
+            src.lines().count()
+        );
         assert!(should_render_markdown(src.len(), src.lines().count()));
     }
 

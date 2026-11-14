@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn markdown_chrome_uses_rtf_and_header_status() {
         let rtf: Arc<str> = Arc::from(r"{\rtf1\ansi hi}");
-        let preview = Preview {
+        let md_preview = Preview {
             content: "# hi".to_string(),
             truncated: false,
             line_count: 1,
@@ -618,7 +618,7 @@ mod tests {
             image: None,
             markdown_rtf: Some(Arc::clone(&rtf)),
         };
-        let presented = chrome_for_text(Path::new("README.MD"), &preview);
+        let presented = chrome_for_text(Path::new("README.MD"), &md_preview);
         assert_eq!(presented.kind(), WindowKind::Markdown);
         assert_eq!(presented.message(), None);
         assert_eq!(presented.header().name, "README.MD");
@@ -628,7 +628,10 @@ mod tests {
         };
         assert!(Arc::ptr_eq(&shown, &rtf));
 
-        let fallback = chrome_for_text(Path::new("notes.markdown"), &preview(64 * 1024, 2_000, true));
+        let fallback = chrome_for_text(
+            Path::new("notes.markdown"),
+            &preview(64 * 1024, 2_000, true),
+        );
         assert_eq!(fallback.kind(), WindowKind::Content);
         assert_eq!(
             fallback.header().details,
