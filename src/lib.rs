@@ -14,6 +14,7 @@ pub mod image_view;
 pub mod keys;
 pub mod preview;
 pub mod selection;
+pub mod shell_icon;
 pub mod state;
 
 pub use balloon::{
@@ -58,6 +59,13 @@ pub use preview::{
 pub use selection::{
     choose_selected, is_selection_pointer_message, nonempty_path, should_reload_after_pointer,
     should_reload_after_shell_event, SelectionTarget,
+};
+pub use shell_icon::{
+    accept_shell_icon_result, icon_inflight_timed_out, icon_mask_stride, icon_spawn_decision,
+    layout_shell_icon_message, shell_icon_gap_px, shell_icon_min_px, shell_icon_pixel_size_ok,
+    shell_icon_px, shell_icon_size_still_wanted, shell_image_list_id, should_request_shell_icon,
+    should_retry_icon_request, tick_elapsed_ms, IconSpawn, ShellIconLayout, ShellIconPixels,
+    SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP,
 };
 pub use state::{
     gate_show, session_phase, step, Effect, Event, PreviewState, ShowGate, ShowOutcome,
