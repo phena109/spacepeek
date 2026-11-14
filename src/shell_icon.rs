@@ -282,8 +282,8 @@ fn mul_255(channel: u8, alpha: u16) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preview::{DeniedKind, PreviewError};
     use crate::geometry::PxRect;
+    use crate::preview::{DeniedKind, PreviewError};
 
     fn body(width: i32, height: i32) -> PxRect {
         PxRect {
