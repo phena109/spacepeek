@@ -42,45 +42,51 @@ mod win {
     };
 
     use spacepeek::{
-        apply_image_command, choose_selected, chrome_for_error, chrome_for_text,
-        classify_typeahead_vk, close_button_bounds, copy_utf16_z, decide_hook_key,
+        accept_shell_icon_result, apply_image_command, choose_selected, chrome_for_error,
+        chrome_for_text, classify_typeahead_vk, close_button_bounds, copy_utf16_z, decide_hook_key,
         double_click_action, effective_dpi, fallback_type_name, gate_show, hit_test,
-        hook_key_from_vk, image_view_rect, interpret_dword_flag, is_selection_pointer_message,
-        large_icon_px, load_text_preview, min_physical_size, nav_reload_remaining, nonempty_path,
-        pack_screen_point, parse_command, place_preview, pointer_over_close, preview_text,
-        reconcile_image_view, reset_for_new_image, scaled_close_width, scaled_detail_font,
-        scaled_font_height, scaled_header_font, scaled_header_height, scaled_header_pad,
-        session_phase, should_reload_after_pointer, should_reload_after_shell_event,
-        should_show_first_run_balloon, small_icon_px, step, typeahead_for_decision,
-        typeahead_window_ms, unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken,
-        ChromeLayout, Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone,
-        HookContext, HookDecision, HookKey, ImageCommand, ImageFrame, ImageView, KeyPhase,
-        Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect,
-        QuickInfo, RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShowGate,
+        hook_key_from_vk, icon_inflight_timed_out, icon_mask_stride, icon_spawn_decision,
+        image_view_rect, interpret_dword_flag, is_selection_pointer_message, large_icon_px,
+        layout_shell_icon_message, load_text_preview, min_physical_size, nav_reload_remaining,
+        nonempty_path, pack_screen_point, parse_command, place_preview, pointer_over_close,
+        preview_text, reconcile_image_view, reset_for_new_image, scaled_close_width,
+        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
+        scaled_header_pad, session_phase, shell_icon_gap_px, shell_icon_min_px,
+        shell_icon_pixel_size_ok, shell_icon_px, shell_icon_size_still_wanted, shell_image_list_id,
+        should_reload_after_pointer, should_reload_after_shell_event, should_request_shell_icon,
+        should_retry_icon_request, should_show_first_run_balloon, small_icon_px, step,
+        tick_elapsed_ms, typeahead_for_decision, typeahead_window_ms, unpack_screen_point,
+        wheel_scroll_dy, wheel_zoom_command, CancelToken, ChromeLayout, Command, DecodedImage,
+        DoubleClickAction, Effect, Event, Generation, HitZone, HookContext, HookDecision, HookKey,
+        IconSpawn, ImageCommand, ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, Presented,
+        Preview, PreviewError, PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter,
+        ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels, ShowGate,
         ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold,
         ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, FIRST_RUN_SHOWN,
-        FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, VERSION,
+        FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS,
+        SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, COLORREF, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
-        E_FAIL, FILETIME, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT,
+        E_FAIL, FILETIME, HANDLE, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE,
         SYSTEMTIME, WPARAM,
     };
     use windows::Win32::Globalization::{
         GetDateFormatEx, GetTimeFormatEx, DATE_LONGDATE, TIME_NOSECONDS,
     };
     use windows::Win32::Graphics::Gdi::{
-        BeginPaint, ClientToScreen, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject,
-        DrawTextW, EndPaint, ExcludeClipRect, FillRect, GetDC, GetMonitorInfoW, GetSysColorBrush,
-        GetTextFaceW, IntersectClipRect, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC,
-        RoundRect, SaveDC, ScreenToClient, SelectObject, SetBkMode, SetBrushOrgEx,
-        SetStretchBltMode, SetTextColor, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-        CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT,
-        DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-        DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL, FW_SEMIBOLD, HALFTONE, HDC,
-        HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_SOLID, SRCCOPY,
-        TRANSPARENT, VARIABLE_PITCH,
+        AlphaBlend, BeginPaint, ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateFontW,
+        CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, ExcludeClipRect,
+        FillRect, GetDC, GetDIBits, GetMonitorInfoW, GetObjectW, GetSysColorBrush, GetTextFaceW,
+        IntersectClipRect, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC, RoundRect,
+        SaveDC, ScreenToClient, SelectObject, SetBkMode, SetBrushOrgEx, SetStretchBltMode,
+        SetTextColor, StretchDIBits, AC_SRC_ALPHA, AC_SRC_OVER, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET,
+        DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
+        DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL,
+        FW_SEMIBOLD, HALFTONE, HBITMAP, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        PAINTSTRUCT, PS_SOLID, RGBQUAD, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
     };
     use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, WIN32_FIND_DATAW};
     use windows::Win32::System::Com::{
@@ -100,11 +106,13 @@ mod win {
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
     use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
-    use windows::Win32::UI::Controls::LoadIconWithScaleDown;
     use windows::Win32::UI::Controls::RichEdit::{
         EDITSTREAM, EM_AUTOURLDETECT, EM_EXLIMITTEXT, EM_HIDESELECTION, EM_SETBKGNDCOLOR,
         EM_SETEVENTMASK, EM_SETTARGETDEVICE, EM_STREAMIN, MSFTEDIT_CLASS, SFF_PLAINRTF, SF_RTF,
         SF_TEXT,
+    };
+    use windows::Win32::UI::Controls::{
+        IImageList, LoadIconWithScaleDown, ILD_IMAGE, ILD_PRESERVEALPHA, ILD_TRANSPARENT,
     };
     use windows::Win32::UI::HiDpi::{
         GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi,
@@ -119,44 +127,47 @@ mod win {
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
         FolderItem, FolderItems, IEnumIDList, IFolderView, IFolderView2, ILFree, IShellBrowser,
-        IShellFolder, IShellFolderViewDual, IShellItem, IShellLinkW, IShellView, IShellWindows,
-        IWebBrowser2, SHCreateItemWithParent, SHGetFileInfoW, SID_STopLevelBrowser,
+        IShellFolder, IShellFolderViewDual, IShellItem, IShellItemImageFactory, IShellLinkW,
+        IShellView, IShellWindows, IWebBrowser2, SHCreateItemFromParsingName,
+        SHCreateItemWithParent, SHGetFileInfoW, SHGetImageList, SID_STopLevelBrowser,
         ShellExecuteExW, ShellLink, ShellWindows, Shell_NotifyIconW, NIF_ICON, NIF_INFO,
         NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
         NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SEE_MASK_FLAG_NO_UI,
-        SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES, SIGDN_FILESYSPATH,
+        SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_SYSICONINDEX, SHGFI_TYPENAME,
+        SHGFI_USEFILEATTRIBUTES, SIGDN_FILESYSPATH, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
         SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, BringWindowToTop, CallNextHookEx, CallWindowProcW, CreatePopupMenu,
         CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW,
         FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
-        GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetParent, GetSystemMetrics,
-        GetWindowRect, GetWindowThreadProcessId, HideCaret, IsWindow, IsWindowVisible, KillTimer,
-        LoadCursorW, LoadImageW, MessageBoxW, MoveWindow, PeekMessageW, PostMessageW,
-        PostQuitMessage, PostThreadMessageW, RegisterClassExW, RegisterWindowMessageW,
-        SendMessageW, SetClassLongPtrW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-        SetWindowPos, SetWindowTextW, SetWindowsHookExW, ShowWindow, TrackPopupMenu,
-        TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW,
-        ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, EVENT_OBJECT_SELECTION,
-        EVENT_OBJECT_SELECTIONWITHIN, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GCLP_HICON, GCLP_HICONSM,
-        GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-        HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL,
-        ICON_SMALL2, IDC_ARROW, IMAGE_FLAGS, IMAGE_ICON, KBDLLHOOKSTRUCT, LLKHF_UP, MA_NOACTIVATE,
-        MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MF_STRING, MINMAXINFO, MSG,
-        MSLLHOOKSTRUCT, PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP, SM_CXFRAME,
-        SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE,
-        SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-        WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT,
-        WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
-        WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP,
-        WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
-        WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
-        WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK,
-        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_SYSKEYDOWN,
-        WM_SYSKEYUP, WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD,
-        WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP,
-        WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
+        GetForegroundWindow, GetGUIThreadInfo, GetIconInfo, GetMessageW, GetParent,
+        GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, HideCaret, IsWindow,
+        IsWindowVisible, KillTimer, LoadCursorW, LoadImageW, MessageBoxW, MoveWindow, PeekMessageW,
+        PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassExW,
+        RegisterWindowMessageW, SendMessageW, SetClassLongPtrW, SetForegroundWindow, SetTimer,
+        SetWindowLongPtrW, SetWindowPos, SetWindowTextW, SetWindowsHookExW, ShowWindow,
+        TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, CS_DBLCLKS,
+        CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY,
+        EVENT_OBJECT_SELECTION, EVENT_OBJECT_SELECTIONWITHIN, EVENT_SYSTEM_FOREGROUND, GA_ROOT,
+        GCLP_HICON, GCLP_HICONSM, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU, HTBOTTOM,
+        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+        HTTOPRIGHT, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2, IDC_ARROW, IMAGE_FLAGS,
+        IMAGE_ICON, KBDLLHOOKSTRUCT, LLKHF_UP, MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION,
+        MB_OK, MESSAGEBOX_STYLE, MF_STRING, MINMAXINFO, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE,
+        SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN,
+        SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+        TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CHAR, WM_CLOSE,
+        WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE,
+        WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+        WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL, WM_PAINT,
+        WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT,
+        WM_SETICON, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WM_VSCROLL,
+        WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE,
+        WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -174,6 +185,8 @@ mod win {
     const WM_SPACEPEEK_OPEN: u32 = WM_APP + 9;
     /// `wparam` is a [`ZoomOp`] code. One keyboard step.
     const WM_SPACEPEEK_ZOOM: u32 = WM_APP + 10;
+    /// Shell-icon pixels for an unsupported file. `lparam` is `Box<IconMsg>`.
+    const WM_SPACEPEEK_ICON: u32 = WM_APP + 11;
     /// `WM_CAPTURECHANGED`. Kept local so the preview does not need extra features.
     const WM_CAPTURECHANGED: u32 = 0x0215;
     /// `NIN_KEYSELECT` is `WM_USER + 1`. The windows crate exports `NIN_SELECT` only.
@@ -222,6 +235,42 @@ mod win {
     struct LoadMsg {
         gen: Generation,
         result: std::result::Result<Preview, PreviewError>,
+    }
+
+    struct IconMsg {
+        gen: Generation,
+        started_tick: u32,
+        /// Side length this worker was asked to fetch, in physical pixels.
+        size_px: i32,
+        pixels: Option<ShellIconPixels>,
+    }
+
+    /// Latest-request coalescing for the unsupported-file shell icon.
+    ///
+    /// Pixel data is the only thing that crosses from the worker. GDI handles
+    /// created on that thread are destroyed there.
+    #[derive(Default)]
+    struct ShellIconState {
+        wanted: Option<ShellIconWanted>,
+        inflight: Option<ShellIconInflight>,
+        /// Generation whose lookup already exceeded the timeout. Not retried.
+        given_up: Option<Generation>,
+        pixels: Option<std::sync::Arc<ShellIconPixels>>,
+        last_icon_rect: Option<PxRect>,
+    }
+
+    #[derive(Clone)]
+    struct ShellIconWanted {
+        gen: Generation,
+        path: PathBuf,
+        size_px: i32,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ShellIconInflight {
+        gen: Generation,
+        size_px: i32,
+        started_tick: u32,
     }
 
     struct App {
@@ -275,6 +324,8 @@ mod win {
         /// The gesture that just ended moved the picture, so the following
         /// double-click must not also open the file.
         suppress_dblclk: bool,
+        /// Shell icon for the current unsupported/quick-info preview, if any.
+        shell_icon: ShellIconState,
     }
 
     /// Pointer position at mouse-down and the pan at that moment.
@@ -330,6 +381,8 @@ mod win {
     static SELECTION_HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
     /// Explorer thread for which `SetWinEventHook` already failed. Zero when unset.
     static SELECTION_HOOK_FAILED: AtomicU32 = AtomicU32::new(0);
+    /// Live shell-icon worker threads, including abandoned hung ones.
+    static ICON_WORKERS: AtomicU32 = AtomicU32::new(0);
     // Hook-thread only. The low-level hook runs on `spacepeek-hook`.
     thread_local! {
         static REPEATS: RefCell<RepeatFilter> = const { RefCell::new(RepeatFilter::new()) };
@@ -408,6 +461,7 @@ mod win {
             image_view: ImageView::fit(),
             pan_drag: PanDrag::idle(),
             suppress_dblclk: false,
+            shell_icon: ShellIconState::default(),
         })));
         APP.store(app, Ordering::Release);
 
@@ -1310,6 +1364,10 @@ mod win {
                 }
                 LRESULT(0)
             }
+            WM_SPACEPEEK_ICON => {
+                on_icon_loaded(lparam);
+                LRESULT(0)
+            }
             WM_SPACEPEEK_FOREGROUND => {
                 on_foreground_hwnd(HWND(wparam.0 as *mut _));
                 LRESULT(0)
@@ -1492,6 +1550,9 @@ mod win {
                         app.image_view = reset_for_new_image(app.image_view);
                         app.pan_drag = PanDrag::idle();
                         app.suppress_dblclk = false;
+                        app.shell_icon.pixels = None;
+                        app.shell_icon.last_icon_rect = None;
+                        app.shell_icon.wanted = None;
                         publish_preview_hwnd(HWND::default());
                         publish_image_visible(None);
                     }
@@ -1544,6 +1605,51 @@ mod win {
     fn on_loaded(lparam: LPARAM) {
         let msg = unsafe { Box::from_raw(lparam.0 as *mut LoadMsg) };
         dispatch(Event::LoadFinished(msg.gen, msg.result));
+    }
+
+    fn on_icon_loaded(lparam: LPARAM) {
+        ICON_WORKERS.fetch_sub(1, Ordering::SeqCst);
+        let msg = unsafe { Box::from_raw(lparam.0 as *mut IconMsg) };
+        let now = unsafe { GetTickCount() };
+        let elapsed = tick_elapsed_ms(msg.started_tick, now);
+        let hwnd = with_app(|app| app.preview_hwnd);
+        let accept = with_app_mut(|app| {
+            if app
+                .shell_icon
+                .inflight
+                .is_some_and(|inf| inf.gen == msg.gen)
+            {
+                app.shell_icon.inflight = None;
+            }
+            let live = live_icon_generation(&app.state);
+            let size_ok = shell_icon_size_still_wanted(
+                msg.gen,
+                msg.size_px,
+                app.shell_icon
+                    .wanted
+                    .as_ref()
+                    .map(|wanted| (wanted.gen, wanted.size_px)),
+            );
+            // A DPI change keeps this generation and asks for a new side.
+            // Drop the old bitmap. The fetch for the new side still starts below.
+            size_ok
+                && accept_shell_icon_result(
+                    msg.gen,
+                    live,
+                    &app.cancel,
+                    elapsed,
+                    SHELL_ICON_TIMEOUT_MS,
+                )
+        });
+        if accept {
+            if let Some(pixels) = msg.pixels {
+                with_app_mut(|app| {
+                    app.shell_icon.pixels = Some(std::sync::Arc::new(pixels));
+                });
+                invalidate_shell_icon(hwnd);
+            }
+        }
+        maybe_start_icon_worker();
     }
 
     fn on_nav_request() {
@@ -1638,6 +1744,8 @@ mod win {
             }
             return;
         }
+        maybe_abandon_timed_out_icon();
+        maybe_start_icon_worker();
         if !foreground_allows_preview() {
             dispatch(Event::FocusLost);
         }
@@ -1938,6 +2046,413 @@ mod win {
         }
     }
 
+    fn live_icon_generation(state: &PreviewState) -> Option<Generation> {
+        match state {
+            PreviewState::Failed { gen, error, .. } if should_request_shell_icon(Some(error)) => {
+                Some(*gen)
+            }
+            _ => None,
+        }
+    }
+
+    fn clear_shell_icon_pixels() {
+        with_app_mut(|app| {
+            app.shell_icon.pixels = None;
+            app.shell_icon.last_icon_rect = None;
+            app.shell_icon.wanted = None;
+        });
+    }
+
+    /// After the window is showing an unsupported/quick-info preview, ask for
+    /// that file's shell icon. Text and image paths never reach this.
+    fn maybe_request_shell_icon() {
+        let request = with_app(|app| match &app.state {
+            PreviewState::Failed { gen, path, error }
+                if should_request_shell_icon(Some(error)) && !app.preview_hwnd.0.is_null() =>
+            {
+                Some((*gen, path.clone(), app.preview_hwnd))
+            }
+            _ => None,
+        });
+        let Some((gen, path, hwnd)) = request else {
+            with_app_mut(|app| app.shell_icon.wanted = None);
+            return;
+        };
+        let size_px = shell_icon_px(dpi_for_anchor(hwnd));
+        with_app_mut(|app| {
+            app.shell_icon.wanted = Some(ShellIconWanted { gen, path, size_px });
+        });
+        maybe_start_icon_worker();
+    }
+
+    fn maybe_abandon_timed_out_icon() {
+        let now = unsafe { GetTickCount() };
+        with_app_mut(|app| {
+            let Some(inf) = app.shell_icon.inflight else {
+                return;
+            };
+            if icon_inflight_timed_out(
+                tick_elapsed_ms(inf.started_tick, now),
+                SHELL_ICON_TIMEOUT_MS,
+            ) {
+                app.shell_icon.given_up = Some(inf.gen);
+                app.shell_icon.inflight = None;
+            }
+        });
+    }
+
+    fn maybe_start_icon_worker() {
+        maybe_abandon_timed_out_icon();
+        let wanted = with_app(|app| {
+            let wanted = app.shell_icon.wanted.clone()?;
+            if !should_retry_icon_request(wanted.gen, app.shell_icon.given_up) {
+                return None;
+            }
+            let inflight = app
+                .shell_icon
+                .inflight
+                .map(|inf| inf.gen == wanted.gen && inf.size_px == wanted.size_px);
+            let live = ICON_WORKERS.load(Ordering::SeqCst);
+            Some((wanted, inflight, live))
+        });
+        let Some((wanted, inflight, live)) = wanted else {
+            return;
+        };
+        match icon_spawn_decision(inflight, live, SHELL_ICON_WORKER_CAP) {
+            IconSpawn::Spawn => spawn_icon_worker(wanted),
+            IconSpawn::AlreadyInFlight | IconSpawn::Coalesce | IconSpawn::AtCap => {}
+        }
+    }
+
+    fn spawn_icon_worker(wanted: ShellIconWanted) {
+        let hwnd = with_app(|app| app.msg_hwnd);
+        if hwnd.0.is_null() {
+            return;
+        }
+        let started_tick = unsafe { GetTickCount() };
+        let cancel = with_app(|app| app.cancel.clone());
+        with_app_mut(|app| {
+            app.shell_icon.inflight = Some(ShellIconInflight {
+                gen: wanted.gen,
+                size_px: wanted.size_px,
+                started_tick,
+            });
+        });
+        ICON_WORKERS.fetch_add(1, Ordering::SeqCst);
+        let hwnd_bits = hwnd.0 as isize;
+        let gen = wanted.gen;
+        let spawned = std::thread::Builder::new()
+            .name("spacepeek-icon".to_string())
+            .spawn(move || {
+                let pixels = fetch_shell_icon(&wanted.path, wanted.size_px, &cancel, wanted.gen);
+                post_icon(
+                    HWND(hwnd_bits as *mut _),
+                    wanted.gen,
+                    started_tick,
+                    wanted.size_px,
+                    pixels,
+                );
+            });
+        if spawned.is_err() {
+            ICON_WORKERS.fetch_sub(1, Ordering::SeqCst);
+            with_app_mut(|app| {
+                if app.shell_icon.inflight.is_some_and(|inf| inf.gen == gen) {
+                    app.shell_icon.inflight = None;
+                }
+            });
+        }
+    }
+
+    fn post_icon(
+        hwnd: HWND,
+        gen: Generation,
+        started_tick: u32,
+        size_px: i32,
+        pixels: Option<ShellIconPixels>,
+    ) {
+        if hwnd.0.is_null() {
+            ICON_WORKERS.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
+        let raw = Box::into_raw(Box::new(IconMsg {
+            gen,
+            started_tick,
+            size_px,
+            pixels,
+        }));
+        let posted =
+            unsafe { PostMessageW(hwnd, WM_SPACEPEEK_ICON, WPARAM(0), LPARAM(raw as isize)) };
+        if posted.is_err() {
+            drop(unsafe { Box::from_raw(raw) });
+            ICON_WORKERS.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// COM STA on this worker only. The HBITMAP never leaves the thread.
+    fn fetch_shell_icon(
+        path: &Path,
+        size_px: i32,
+        cancel: &CancelToken,
+        gen: Generation,
+    ) -> Option<ShellIconPixels> {
+        if size_px <= 0 || cancel.is_cancelled(&gen) {
+            return None;
+        }
+        let _com = ComInit::enter()?;
+        if cancel.is_cancelled(&gen) {
+            return None;
+        }
+        let (color, mask) = shell_icon_bitmap(path, size_px)?;
+        if cancel.is_cancelled(&gen) {
+            drop_icon_bitmaps(color, mask);
+            return None;
+        }
+        hbitmap_to_pixels(color, mask)
+    }
+
+    /// Colour bitmap, plus the AND mask when this came from an `HICON`.
+    /// The caller destroys both handles.
+    fn shell_icon_bitmap(path: &Path, size_px: i32) -> Option<(HBITMAP, Option<HBITMAP>)> {
+        if let Some(color) = shell_icon_from_item_factory(path, size_px) {
+            return Some((color, None));
+        }
+        shell_icon_from_image_list(path, size_px)
+    }
+
+    fn shell_icon_from_item_factory(path: &Path, size_px: i32) -> Option<HBITMAP> {
+        let wide = wide_path(path);
+        let factory: IShellItemImageFactory =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()? };
+        let size = SIZE {
+            cx: size_px,
+            cy: size_px,
+        };
+        let flags = SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK;
+        let hbmp = unsafe { factory.GetImage(size, flags).ok()? };
+        if hbmp.is_invalid() {
+            None
+        } else {
+            Some(hbmp)
+        }
+    }
+
+    fn shell_icon_from_image_list(path: &Path, size_px: i32) -> Option<(HBITMAP, Option<HBITMAP>)> {
+        let wide = wide_path(path);
+        let mut info = SHFILEINFOW::default();
+        let got = unsafe {
+            SHGetFileInfoW(
+                PCWSTR(wide.as_ptr()),
+                FILE_ATTRIBUTE_NORMAL,
+                Some(&mut info),
+                std::mem::size_of::<SHFILEINFOW>() as u32,
+                SHGFI_SYSICONINDEX,
+            )
+        };
+        if got == 0 {
+            return None;
+        }
+        let list: IImageList = unsafe { SHGetImageList(shell_image_list_id(size_px)).ok()? };
+        let flags = ILD_IMAGE.0 | ILD_TRANSPARENT.0 | ILD_PRESERVEALPHA.0;
+        let icon = unsafe { list.GetIcon(info.iIcon, flags).ok()? };
+        hicon_to_hbitmap(icon)
+    }
+
+    /// Both bitmaps belong to the caller. The icon is destroyed here.
+    fn hicon_to_hbitmap(icon: HICON) -> Option<(HBITMAP, Option<HBITMAP>)> {
+        if icon.is_invalid() {
+            return None;
+        }
+        let mut info = ICONINFO::default();
+        let got = unsafe { GetIconInfo(icon, &mut info) };
+        unsafe {
+            let _ = DestroyIcon(icon);
+        }
+        if got.is_err() {
+            return None;
+        }
+        if info.hbmColor.is_invalid() {
+            drop_hbitmap(info.hbmMask);
+            return None;
+        }
+        let mask = if info.hbmMask.is_invalid() {
+            None
+        } else {
+            Some(info.hbmMask)
+        };
+        Some((info.hbmColor, mask))
+    }
+
+    /// `mask` is the icon AND mask from `GetIconInfo`, when this bitmap came
+    /// from an `HICON`. Both handles are destroyed here, exactly once.
+    fn hbitmap_to_pixels(color: HBITMAP, mask: Option<HBITMAP>) -> Option<ShellIconPixels> {
+        let pixels = convert_icon_bitmaps(color, mask);
+        drop_icon_bitmaps(color, mask);
+        pixels
+    }
+
+    fn convert_icon_bitmaps(color: HBITMAP, mask: Option<HBITMAP>) -> Option<ShellIconPixels> {
+        let (width, height) = bitmap_size(color)?;
+        if !shell_icon_pixel_size_ok(width, height) {
+            return None;
+        }
+        let hdc = unsafe { CreateCompatibleDC(HDC::default()) };
+        if hdc.is_invalid() {
+            return None;
+        }
+        let color_bits = read_bgra_dib(hdc, color, width, height);
+        let mask_bits = mask.and_then(|mask| read_and_mask(hdc, mask, width, height));
+        unsafe {
+            let _ = DeleteDC(hdc);
+        }
+        let color_bits = color_bits?;
+        ShellIconPixels::from_bgra_and_mask(width, height, color_bits, mask_bits.as_deref())
+    }
+
+    fn bitmap_size(hbmp: HBITMAP) -> Option<(i32, i32)> {
+        if hbmp.is_invalid() {
+            return None;
+        }
+        let mut bmp = BITMAP::default();
+        let got = unsafe {
+            GetObjectW(
+                HGDIOBJ(hbmp.0),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(std::ptr::from_mut(&mut bmp).cast()),
+            )
+        };
+        if got == 0 || bmp.bmWidth <= 0 || bmp.bmHeight == 0 {
+            return None;
+        }
+        Some((bmp.bmWidth, bmp.bmHeight.saturating_abs()))
+    }
+
+    fn read_bgra_dib(hdc: HDC, hbmp: HBITMAP, width: i32, height: i32) -> Option<Vec<u8>> {
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = height.saturating_neg();
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB.0;
+        let nbytes = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        let mut bits = vec![0u8; nbytes];
+        let copied = unsafe {
+            GetDIBits(
+                hdc,
+                hbmp,
+                0,
+                height as u32,
+                Some(bits.as_mut_ptr().cast()),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            )
+        };
+        if copied == 0 {
+            None
+        } else {
+            Some(bits)
+        }
+    }
+
+    /// 1-bit top-down AND mask. Bit 0 is black (opaque) and bit 1 is white
+    /// (transparent), which is how an icon mask is stored.
+    fn read_and_mask(hdc: HDC, mask: HBITMAP, width: i32, height: i32) -> Option<Vec<u8>> {
+        let (mask_w, mask_h) = bitmap_size(mask)?;
+        if mask_w != width || mask_h != height {
+            return None;
+        }
+        let stride = icon_mask_stride(width)?;
+        let rows = usize::try_from(height).ok()?;
+        let nbytes = stride.checked_mul(rows)?;
+        let mut bits = vec![0u8; nbytes];
+        let mut info = MaskBitmapInfo {
+            header: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: height.saturating_neg(),
+                biPlanes: 1,
+                biBitCount: 1,
+                biCompression: BI_RGB.0,
+                biClrUsed: 2,
+                ..BITMAPINFOHEADER::default()
+            },
+            colors: [
+                RGBQUAD {
+                    rgbBlue: 0,
+                    rgbGreen: 0,
+                    rgbRed: 0,
+                    rgbReserved: 0,
+                },
+                RGBQUAD {
+                    rgbBlue: 255,
+                    rgbGreen: 255,
+                    rgbRed: 255,
+                    rgbReserved: 0,
+                },
+            ],
+        };
+        let copied = unsafe {
+            GetDIBits(
+                hdc,
+                mask,
+                0,
+                height as u32,
+                Some(bits.as_mut_ptr().cast()),
+                std::ptr::from_mut(&mut info).cast(),
+                DIB_RGB_COLORS,
+            )
+        };
+        if copied == height {
+            Some(bits)
+        } else {
+            None
+        }
+    }
+
+    #[repr(C)]
+    struct MaskBitmapInfo {
+        header: BITMAPINFOHEADER,
+        colors: [RGBQUAD; 2],
+    }
+
+    fn drop_icon_bitmaps(color: HBITMAP, mask: Option<HBITMAP>) {
+        drop_hbitmap(color);
+        if let Some(mask) = mask {
+            drop_hbitmap(mask);
+        }
+    }
+
+    fn drop_hbitmap(hbmp: HBITMAP) {
+        if hbmp.is_invalid() {
+            return;
+        }
+        unsafe {
+            let _ = DeleteObject(hbmp);
+        }
+    }
+
+    fn invalidate_shell_icon(hwnd: HWND) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        let rect = with_app(|app| app.shell_icon.last_icon_rect);
+        if let Some(rect) = rect {
+            let area = RECT {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+            };
+            unsafe {
+                let _ = InvalidateRect(hwnd, Some(&area), false);
+            }
+        } else {
+            invalidate_preview(hwnd);
+        }
+    }
+
     unsafe fn shortcut_target(path: &Path) -> Option<String> {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
         let file: IPersistFile = link.cast().ok()?;
@@ -2009,6 +2524,7 @@ mod win {
             return;
         }
         dispatch(Event::ShowCommitted);
+        maybe_request_shell_icon();
     }
 
     fn update_content() {
@@ -2031,6 +2547,7 @@ mod win {
             return;
         }
         reveal_preview();
+        maybe_request_shell_icon();
     }
 
     fn is_pending_show() -> bool {
@@ -2042,6 +2559,7 @@ mod win {
     /// could not be created. An existing window keeps its pixel size; only a
     /// new window takes the remembered (or default) outer size.
     fn fill_preview_window() -> bool {
+        clear_shell_icon_pixels();
         let (presented, anchor, instance, existing) = with_app(|app| {
             (
                 presented_from(&app.state),
@@ -2526,6 +3044,7 @@ mod win {
 
     fn hide_preview(restore_focus: bool) {
         end_image_pan();
+        clear_shell_icon_pixels();
         let (preview, explorer) = with_app(|app| (app.preview_hwnd, app.explorer_hwnd));
         with_app_mut(|app| {
             app.last_nav_tick = None;
@@ -2985,6 +3504,7 @@ mod win {
         resize_edit(hwnd);
         reconcile_shown_image(hwnd);
         invalidate_preview(hwnd);
+        maybe_request_shell_icon();
     }
 
     fn zone_to_hit(zone: HitZone) -> u32 {
@@ -3222,6 +3742,8 @@ mod win {
         header_font: HFONT,
         detail_font: HFONT,
         close_hovered: bool,
+        reserve_shell_icon: bool,
+        shell_icon: Option<std::sync::Arc<ShellIconPixels>>,
     }
 
     fn paint_preview(hwnd: HWND) {
@@ -3238,6 +3760,15 @@ mod win {
                 header_font: app.header_font,
                 detail_font: app.detail_font,
                 close_hovered: app.close_hovered,
+                reserve_shell_icon: match &app.state {
+                    PreviewState::Failed { error, .. }
+                    | PreviewState::PendingShow {
+                        outcome: ShowOutcome::Failed(error),
+                        ..
+                    } => should_request_shell_icon(Some(error)),
+                    _ => false,
+                },
+                shell_icon: app.shell_icon.pixels.clone(),
             })
         });
         let mut ps = PAINTSTRUCT::default();
@@ -3358,17 +3889,18 @@ mod win {
         } else if let Some(message) = snap.message.as_deref() {
             let left = pad.min(width / 4);
             let right = (width - pad).max(left);
-            paint_message(
-                dc,
-                message,
-                RECT {
-                    left,
-                    top: header_h,
-                    right,
-                    bottom: height,
-                },
-                snap.header_font,
-            );
+            let area = RECT {
+                left,
+                top: header_h,
+                right,
+                bottom: height,
+            };
+            paint_message(dc, message, area, snap.header_font);
+            if snap.reserve_shell_icon {
+                paint_reserved_shell_icon(hwnd, dc, message, area, snap);
+            } else {
+                with_app_mut(|app| app.shell_icon.last_icon_rect = None);
+            }
         }
     }
 
@@ -3500,6 +4032,128 @@ mod win {
             if !previous.is_invalid() {
                 let _ = SelectObject(dc, previous);
             }
+        }
+    }
+
+    /// Text stays where `paint_message` put it. The icon uses leftover space
+    /// above that block so a late bitmap cannot move the words.
+    fn paint_reserved_shell_icon(hwnd: HWND, dc: HDC, message: &str, area: RECT, snap: &PaintSnap) {
+        let area_w = (area.right - area.left).max(0);
+        let text_h = measure_message_height(dc, message, area_w, snap.header_font);
+        let dpi = dpi_for_anchor(hwnd);
+        let body = PxRect {
+            left: area.left,
+            top: area.top,
+            right: area.right,
+            bottom: area.bottom,
+        };
+        let layout = layout_shell_icon_message(
+            body,
+            text_h,
+            shell_icon_px(dpi),
+            shell_icon_gap_px(dpi),
+            shell_icon_min_px(dpi),
+        );
+        with_app_mut(|app| app.shell_icon.last_icon_rect = layout.icon);
+        if let (Some(dest), Some(pixels)) = (layout.icon, snap.shell_icon.as_deref()) {
+            paint_shell_icon(dc, pixels, dest);
+        }
+    }
+
+    fn measure_message_height(dc: HDC, message: &str, width: i32, font: HFONT) -> i32 {
+        if width <= 0 || message.is_empty() {
+            return 0;
+        }
+        let mut wide: Vec<u16> = message.encode_utf16().collect();
+        let mut measure = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: 0,
+        };
+        let flags = DT_WORDBREAK | DT_NOPREFIX | DT_CENTER | DT_CALCRECT;
+        unsafe {
+            let previous = if font.0.is_null() {
+                HGDIOBJ::default()
+            } else {
+                SelectObject(dc, font)
+            };
+            let _ = DrawTextW(dc, &mut wide, &mut measure, flags);
+            if !previous.is_invalid() {
+                let _ = SelectObject(dc, previous);
+            }
+        }
+        (measure.bottom - measure.top).max(0)
+    }
+
+    fn paint_shell_icon(dc: HDC, pixels: &ShellIconPixels, dest: PxRect) {
+        let dest_w = dest.width();
+        let dest_h = dest.height();
+        let src_w = pixels.width;
+        let src_h = pixels.height;
+        if dest_w <= 0 || dest_h <= 0 || src_w <= 0 || src_h <= 0 {
+            return;
+        }
+        let expected = match (src_w as usize).checked_mul(src_h as usize) {
+            Some(pixels_n) => match pixels_n.checked_mul(4) {
+                Some(bytes) => bytes,
+                None => return,
+            },
+            None => return,
+        };
+        if pixels.bgra.len() < expected {
+            return;
+        }
+        let mem = unsafe { CreateCompatibleDC(dc) };
+        if mem.is_invalid() {
+            return;
+        }
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut bmi = BITMAPINFO::default();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = src_w;
+        bmi.bmiHeader.biHeight = src_h.saturating_neg();
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB.0;
+        let dib =
+            unsafe { CreateDIBSection(mem, &bmi, DIB_RGB_COLORS, &mut bits, HANDLE::default(), 0) };
+        let Ok(dib) = dib else {
+            unsafe {
+                let _ = DeleteDC(mem);
+            }
+            return;
+        };
+        if bits.is_null() {
+            unsafe {
+                let _ = DeleteObject(dib);
+                let _ = DeleteDC(mem);
+            }
+            return;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(pixels.bgra.as_ptr(), bits.cast::<u8>(), expected);
+        }
+        let previous = unsafe { SelectObject(mem, dib) };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        unsafe {
+            let _ = AlphaBlend(
+                dc, dest.left, dest.top, dest_w, dest_h, mem, 0, 0, src_w, src_h, blend,
+            );
+        }
+        if !previous.is_invalid() {
+            unsafe {
+                let _ = SelectObject(mem, previous);
+            }
+        }
+        unsafe {
+            let _ = DeleteObject(dib);
+            let _ = DeleteDC(mem);
         }
     }
 
