@@ -82,6 +82,13 @@ pub struct MdDocument {
 
 const MAX_INDENT: u8 = 16;
 const TWIPS_PER_INDENT: i32 = 360;
+/// Extra left indent for a quote, and the padding added to a code block.
+const QUOTE_EXTRA_TWIPS: i32 = 240;
+const CODE_EXTRA_TWIPS: i32 = 180;
+/// Deepest `\li` the writer emits. Indent is clamped to [`MAX_INDENT`] first,
+/// so a 10,000-deep quote or list cannot push the margin off the page.
+const MAX_LEFT_INDENT_TWIPS: i32 =
+    (MAX_INDENT as i32) * TWIPS_PER_INDENT + QUOTE_EXTRA_TWIPS + CODE_EXTRA_TWIPS;
 const BODY_FS: u16 = 27;
 const CODE_FS: u16 = 22;
 
@@ -656,15 +663,17 @@ fn push_pard(out: &mut String, block: &MdBlock) {
 }
 
 fn left_indent_twips(block: &MdBlock) -> i32 {
-    let mut li = i32::from(block.indent) * TWIPS_PER_INDENT;
+    let depth = i32::from(block.indent.min(MAX_INDENT));
+    let mut li = depth * TWIPS_PER_INDENT;
     if block.quote {
-        li += 240;
+        li += QUOTE_EXTRA_TWIPS;
     }
-    match block.kind {
+    let li = match block.kind {
         MdBlockKind::ListItem { .. } => li.max(TWIPS_PER_INDENT),
-        MdBlockKind::Code | MdBlockKind::Html => li + 180,
+        MdBlockKind::Code | MdBlockKind::Html => li + CODE_EXTRA_TWIPS,
         _ => li,
-    }
+    };
+    li.min(MAX_LEFT_INDENT_TWIPS)
 }
 
 fn push_styled_run(out: &mut String, run: &MdRun, block: &MdBlock) {
@@ -1154,5 +1163,158 @@ mod tests {
         assert!(matches!(got[2], MdBlockKind::ListItem { .. }));
         assert!(matches!(got[3], MdBlockKind::Code));
         assert!(matches!(got[4], MdBlockKind::Rule));
+    }
+
+    /// RTF size ceiling for adversarial input. Linear in the source, with room
+    /// for the header and one control word per block. Not exponential in depth.
+    const RTF_SIZE_FACTOR: usize = 8;
+    const RTF_SIZE_SLACK: usize = 4 * 1024;
+
+    fn assert_li_capped(rtf: &str) {
+        let bytes = rtf.as_bytes();
+        let mut i = 0;
+        while i + 3 < bytes.len() {
+            let is_control = bytes[i] == b'\\'
+                && bytes[i + 1] == b'l'
+                && bytes[i + 2] == b'i'
+                && bytes.get(i + 3).is_some_and(|b| b.is_ascii_digit())
+                && i.checked_sub(1).is_none_or(|prev| bytes[prev] != b'\\');
+            if !is_control {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 3;
+            let mut val: i32 = 0;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                val = val
+                    .saturating_mul(10)
+                    .saturating_add(i32::from(bytes[j] - b'0'));
+                j += 1;
+            }
+            assert!(
+                val <= MAX_LEFT_INDENT_TWIPS,
+                "\\li{val} exceeds {MAX_LEFT_INDENT_TWIPS}"
+            );
+            i = j;
+        }
+    }
+
+    /// Parse, build the model, and emit RTF on the default test-thread stack.
+    fn assert_adversarial(source: &str) {
+        assert!(
+            source.len() <= MARKDOWN_MAX_BYTES,
+            "source is {} bytes",
+            source.len()
+        );
+        let lines = source.lines().count();
+        assert!(
+            lines <= MARKDOWN_MAX_LINES,
+            "source has {lines} lines, cap is {MARKDOWN_MAX_LINES}"
+        );
+        let doc = parse_markdown(source);
+        assert!(doc.blocks.iter().all(|block| block.indent <= MAX_INDENT));
+        let rtf = document_to_rtf(&doc, None);
+        let limit = source
+            .len()
+            .saturating_mul(RTF_SIZE_FACTOR)
+            .saturating_add(RTF_SIZE_SLACK);
+        assert!(
+            rtf.len() <= limit,
+            "rtf is {} bytes for {} bytes of input (limit {limit})",
+            rtf.len(),
+            source.len()
+        );
+        assert!(rtf.starts_with(r"{\rtf1"));
+        assert!(rtf.ends_with('}'));
+        assert_li_capped(&rtf);
+    }
+
+    #[test]
+    fn deep_nested_blockquotes_stay_bounded() {
+        let mut source = ">".repeat(10_000);
+        source.push_str(" quoted\n");
+        assert_adversarial(&source);
+        let doc = parse_markdown(&source);
+        let deepest = doc
+            .blocks
+            .iter()
+            .map(|block| block.indent)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(deepest, MAX_INDENT);
+    }
+
+    #[test]
+    fn deep_nested_lists_stay_bounded() {
+        let mut source = "- ".repeat(10_000);
+        source.push_str("item\n");
+        assert_adversarial(&source);
+        let doc = parse_markdown(&source);
+        let deepest = doc
+            .blocks
+            .iter()
+            .map(|block| block.indent)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(deepest, MAX_INDENT);
+    }
+
+    #[test]
+    fn one_long_line_stays_bounded() {
+        let source = "a".repeat(60 * 1024);
+        assert_eq!(source.len(), 60 * 1024);
+        assert_adversarial(&source);
+        let doc = parse_markdown(&source);
+        let text: String = doc.blocks.iter().map(plain).collect();
+        assert_eq!(text, source);
+    }
+
+    #[test]
+    fn deep_nested_emphasis_stays_bounded() {
+        let mut source = "*".repeat(5_000);
+        source.push_str("word");
+        source.push_str(&"*".repeat(5_000));
+        assert_adversarial(&source);
+        let doc = parse_markdown(&source);
+        let text: String = doc.blocks.iter().map(plain).collect();
+        assert!(text.contains("word"));
+    }
+
+    #[test]
+    fn unclosed_fence_stays_bounded() {
+        let mut source = String::from("Before\n\n```rust\n");
+        source.push_str(&"let value = 1;\n".repeat(200));
+        assert_eq!(source.matches("```").count(), 1);
+        assert_adversarial(&source);
+        let doc = parse_markdown(&source);
+        assert!(doc
+            .blocks
+            .iter()
+            .any(|block| matches!(block.kind, MdBlockKind::Code)
+                && plain(block).contains("let value")));
+    }
+
+    #[test]
+    fn writer_clamps_indent_past_the_model_cap() {
+        let block = MdBlock {
+            kind: MdBlockKind::Paragraph,
+            indent: u8::MAX,
+            quote: true,
+            runs: vec![MdRun {
+                text: "x".to_string(),
+                style: MdStyle::default(),
+            }],
+        };
+        let expected = i32::from(MAX_INDENT) * TWIPS_PER_INDENT + QUOTE_EXTRA_TWIPS;
+        assert_eq!(left_indent_twips(&block), expected);
+        assert!(expected < i32::from(u8::MAX) * TWIPS_PER_INDENT);
+        let rtf = document_to_rtf(
+            &MdDocument {
+                blocks: vec![block],
+            },
+            None,
+        );
+        assert!(rtf.contains(&format!("\\li{expected}")));
+        assert_li_capped(&rtf);
     }
 }
