@@ -12,6 +12,7 @@ pub mod icon;
 pub mod image_preview;
 pub mod image_view;
 pub mod keys;
+pub mod markdown;
 pub mod preview;
 pub mod selection;
 pub mod shell_icon;
@@ -49,6 +50,11 @@ pub use keys::{
     HookDecision, HookKey, KeyPhase, Modifiers, NavKey, RepeatFilter, ScrollHold, ScrollOp,
     SessionPhase, TrackedKey, Typeahead, TypeaheadKey, ZoomHold, ZoomKey, ZoomOp,
     NAV_RELOAD_DELAY_MS,
+};
+pub use markdown::{
+    document_to_rtf, escape_rtf, heading_half_points, is_markdown_path, parse_markdown,
+    render_markdown, should_render_markdown, MdBlock, MdBlockKind, MdDocument, MdRun, MdStyle,
+    MARKDOWN_MAX_BYTES, MARKDOWN_MAX_LINES,
 };
 pub use preview::{
     fallback_type_name, format_byte_size, format_compact_size, format_quick_info, format_size_line,

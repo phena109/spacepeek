@@ -349,6 +349,7 @@ mod tests {
             truncation: None,
             total_bytes: 2,
             image: None,
+            markdown_rtf: None,
         }
     }
 
