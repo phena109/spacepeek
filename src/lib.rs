@@ -61,11 +61,11 @@ pub use selection::{
     should_reload_after_shell_event, SelectionTarget,
 };
 pub use shell_icon::{
-    accept_shell_icon_result, icon_inflight_timed_out, icon_spawn_decision,
+    accept_shell_icon_result, icon_inflight_timed_out, icon_mask_stride, icon_spawn_decision,
     layout_shell_icon_message, shell_icon_gap_px, shell_icon_min_px, shell_icon_pixel_size_ok,
-    shell_icon_px, shell_image_list_id, should_request_shell_icon, should_retry_icon_request,
-    tick_elapsed_ms, IconSpawn, ShellIconLayout, ShellIconPixels, SHELL_ICON_TIMEOUT_MS,
-    SHELL_ICON_WORKER_CAP,
+    shell_icon_px, shell_icon_size_still_wanted, shell_image_list_id, should_request_shell_icon,
+    should_retry_icon_request, tick_elapsed_ms, IconSpawn, ShellIconLayout, ShellIconPixels,
+    SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP,
 };
 pub use state::{
     gate_show, session_phase, step, Effect, Event, PreviewState, ShowGate, ShowOutcome,

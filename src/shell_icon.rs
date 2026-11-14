@@ -29,6 +29,9 @@ pub const SHELL_IL_EXTRALARGE: i32 = 2;
 pub const SHELL_IL_JUMBO: i32 = 4;
 
 /// Premultiplied BGRA, top-down, 4 bytes per pixel.
+///
+/// Pixels with alpha 0 also have zero RGB. `AlphaBlend` adds source colour
+/// even when alpha is 0, so leftover RGB would darken the preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellIconPixels {
     pub width: i32,
@@ -39,16 +42,41 @@ pub struct ShellIconPixels {
 impl ShellIconPixels {
     /// `None` when the side is not positive, the buffer is short, or the
     /// side is above [`SHELL_ICON_MAX_PX`].
+    ///
+    /// Same as [`Self::from_bgra_and_mask`] with no AND mask. A colour
+    /// buffer whose alpha is 0 everywhere is then treated as opaque.
     pub fn from_bgra(width: i32, height: i32, bgra: Vec<u8>) -> Option<Self> {
+        Self::from_bgra_and_mask(width, height, bgra, None)
+    }
+
+    /// Build pixels from a 32-bit colour buffer and an optional 1-bit AND mask.
+    ///
+    /// `mask` is top-down, DWORD-aligned, most-significant bit first. A set
+    /// bit is transparent. It is used only when every colour pixel has alpha
+    /// 0 (a legacy bitmap with no alpha channel). A missing or short mask
+    /// then makes the bitmap opaque. Other buffers are premultiplied when a
+    /// non-zero alpha pixel has colour above that alpha. Alpha 0 never
+    /// counts as that signal, and its RGB is cleared.
+    pub fn from_bgra_and_mask(
+        width: i32,
+        height: i32,
+        mut bgra: Vec<u8>,
+        mask: Option<&[u8]>,
+    ) -> Option<Self> {
         if !shell_icon_pixel_size_ok(width, height) {
             return None;
         }
-        let expected = usize::try_from(width)
-            .ok()?
-            .checked_mul(usize::try_from(height).ok()?)?
-            .checked_mul(4)?;
+        let expected = pixel_byte_len(width, height)?;
         if bgra.len() < expected {
             return None;
+        }
+        if color_alpha_absent(&bgra[..expected]) {
+            let used_mask = mask.is_some_and(|mask| {
+                apply_icon_and_mask(&mut bgra[..expected], width, height, mask)
+            });
+            if !used_mask {
+                set_opaque_alpha(&mut bgra[..expected]);
+            }
         }
         let mut pixels = Self {
             width,
@@ -60,15 +88,27 @@ impl ShellIconPixels {
     }
 
     fn ensure_premultiplied(&mut self) {
-        if needs_premultiply(&self.bgra) {
-            premultiply_bgra_in_place(&mut self.bgra);
+        let Some(nbytes) = pixel_byte_len(self.width, self.height) else {
+            return;
+        };
+        let nbytes = nbytes.min(self.bgra.len());
+        if needs_premultiply(&self.bgra[..nbytes]) {
+            premultiply_bgra_in_place(&mut self.bgra[..nbytes]);
         }
+        clear_transparent_rgb(&mut self.bgra[..nbytes]);
     }
 }
 
 /// True when `width` and `height` are a shell-icon bitmap we will keep.
 pub fn shell_icon_pixel_size_ok(width: i32, height: i32) -> bool {
     width > 0 && height > 0 && width <= SHELL_ICON_MAX_PX && height <= SHELL_ICON_MAX_PX
+}
+
+fn pixel_byte_len(width: i32, height: i32) -> Option<usize> {
+    usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(4)
 }
 
 /// Icon side in physical pixels for `dpi`. A missing DPI (`0`) is 96.
@@ -258,11 +298,107 @@ pub fn accept_shell_icon_result(
         && shell_icon_arrived_in_time(elapsed_ms, timeout_ms)
 }
 
-/// True when any pixel has a colour channel above its alpha, which a
-/// premultiplied buffer cannot.
+/// True unless this generation is currently wanted at a different size.
+///
+/// A DPI change keeps the generation and replaces the wanted side length.
+/// The bitmap fetched for the old side is then stale and must be dropped.
+/// No wanted size for this generation is not a mismatch. The caller still
+/// starts a fetch for the size it wants now.
+pub fn shell_icon_size_still_wanted(
+    result_gen: Generation,
+    result_size_px: i32,
+    wanted: Option<(Generation, i32)>,
+) -> bool {
+    match wanted {
+        Some((gen, size_px)) if gen == result_gen => result_size_px == size_px,
+        _ => true,
+    }
+}
+
+/// True when a pixel with non-zero alpha has a colour channel above that
+/// alpha, which a premultiplied buffer cannot. Alpha 0 is ignored: shell
+/// bitmaps often leave leftover RGB in pixels that are already transparent.
 pub fn needs_premultiply(bgra: &[u8]) -> bool {
-    bgra.chunks_exact(4)
-        .any(|px| px[0] > px[3] || px[1] > px[3] || px[2] > px[3])
+    bgra.chunks_exact(4).any(|px| {
+        let alpha = px[3];
+        alpha != 0 && (px[0] > alpha || px[1] > alpha || px[2] > alpha)
+    })
+}
+
+/// DWORD-aligned byte width of one row of a 1-bit icon AND mask.
+pub fn icon_mask_stride(width: i32) -> Option<usize> {
+    let width = usize::try_from(width).ok()?;
+    if width == 0 {
+        return None;
+    }
+    width.checked_add(31)?.checked_div(32)?.checked_mul(4)
+}
+
+/// True when every pixel's alpha is 0. An empty or partial trailing byte
+/// does not count.
+fn color_alpha_absent(bgra: &[u8]) -> bool {
+    !bgra.is_empty() && bgra.len() % 4 == 0 && bgra.chunks_exact(4).all(|px| px[3] == 0)
+}
+
+fn set_opaque_alpha(bgra: &mut [u8]) {
+    for px in bgra.chunks_exact_mut(4) {
+        px[3] = 255;
+    }
+}
+
+/// Derive alpha from a 1-bit icon AND mask. A set bit is transparent
+/// (alpha 0); a clear bit is opaque (alpha 255). Rows are top-down and
+/// DWORD-aligned, and the leftmost pixel is the high bit of each byte.
+/// Returns false, without writing, when `mask` does not cover the bitmap.
+pub fn apply_icon_and_mask(bgra: &mut [u8], width: i32, height: i32, mask: &[u8]) -> bool {
+    let Some(stride) = icon_mask_stride(width) else {
+        return false;
+    };
+    let Ok(width_px) = usize::try_from(width) else {
+        return false;
+    };
+    let Ok(height_px) = usize::try_from(height) else {
+        return false;
+    };
+    if height_px == 0 {
+        return false;
+    }
+    let Some(mask_bytes) = stride.checked_mul(height_px) else {
+        return false;
+    };
+    let Some(color_bytes) = width_px
+        .checked_mul(height_px)
+        .and_then(|n| n.checked_mul(4))
+    else {
+        return false;
+    };
+    if mask.len() < mask_bytes || bgra.len() < color_bytes {
+        return false;
+    }
+    for y in 0..height_px {
+        let row = &mask[y * stride..y * stride + stride];
+        for x in 0..width_px {
+            let alpha = if mask_bit_is_set(row, x) { 0 } else { 255 };
+            bgra[(y * width_px + x) * 4 + 3] = alpha;
+        }
+    }
+    true
+}
+
+fn mask_bit_is_set(row: &[u8], x: usize) -> bool {
+    let shift = 7 - (x % 8);
+    row[x / 8] & (1 << shift) != 0
+}
+
+/// Zero RGB where alpha is 0 so a later `AlphaBlend` cannot add it.
+fn clear_transparent_rgb(bgra: &mut [u8]) {
+    for px in bgra.chunks_exact_mut(4) {
+        if px[3] == 0 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+        }
+    }
 }
 
 /// Premultiply 8-bit BGRA in place. Short trailing bytes are left alone.
@@ -519,5 +655,141 @@ mod tests {
         let mut copy = already.clone();
         premultiply_bgra_in_place(&mut copy);
         assert_eq!(copy[0], mul_255(64, 128));
+    }
+
+    #[test]
+    fn transparent_leftover_does_not_premultiply_again() {
+        // Alpha 0 with leftover RGB is normal in a premultiplied shell bitmap.
+        assert!(!needs_premultiply(&[255, 128, 64, 0]));
+        assert!(!needs_premultiply(&[255, 128, 64, 0, 80, 40, 20, 160]));
+        // A real straight pixel still counts, even beside a transparent one.
+        assert!(needs_premultiply(&[255, 0, 0, 128, 255, 255, 255, 0]));
+
+        let bgra = vec![80, 40, 20, 160, 255, 128, 64, 0];
+        let pixels = ShellIconPixels::from_bgra(1, 2, bgra).expect("pixels");
+        assert_eq!(&pixels.bgra[0..4], &[80, 40, 20, 160]);
+        assert_eq!(&pixels.bgra[4..8], &[0, 0, 0, 0]);
+        let again = ShellIconPixels::from_bgra(1, 2, pixels.bgra.clone()).expect("stable");
+        assert_eq!(again.bgra, pixels.bgra);
+    }
+
+    #[test]
+    fn straight_alpha_premultiplies_and_clears_transparent_rgb() {
+        let bgra = vec![255, 128, 0, 128, 9, 8, 7, 0];
+        let pixels = ShellIconPixels::from_bgra(1, 2, bgra).expect("pixels");
+        assert_eq!(pixels.bgra[0], mul_255(255, 128));
+        assert_eq!(pixels.bgra[1], mul_255(128, 128));
+        assert_eq!(pixels.bgra[2], 0);
+        assert_eq!(pixels.bgra[3], 128);
+        assert_eq!(&pixels.bgra[4..8], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn missing_alpha_without_mask_is_opaque() {
+        let pixels =
+            ShellIconPixels::from_bgra(1, 2, vec![10, 20, 30, 0, 40, 50, 60, 0]).expect("pixels");
+        assert_eq!(pixels.bgra, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+        // One real alpha sample keeps the buffer on the alpha path.
+        let mixed =
+            ShellIconPixels::from_bgra(1, 2, vec![10, 20, 30, 0, 1, 2, 3, 4]).expect("mixed");
+        assert_eq!(&mixed.bgra[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&mixed.bgra[4..8], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn missing_alpha_derives_opacity_from_and_mask() {
+        assert_eq!(icon_mask_stride(1), Some(4));
+        assert_eq!(icon_mask_stride(32), Some(4));
+        assert_eq!(icon_mask_stride(33), Some(8));
+        assert_eq!(icon_mask_stride(0), None);
+
+        // 2×1. Bit 7 is pixel 0 (clear = opaque), bit 6 is pixel 1 (set = transparent).
+        let mask = [0x40, 0, 0, 0];
+        let pixels = ShellIconPixels::from_bgra_and_mask(
+            2,
+            1,
+            vec![10, 20, 30, 0, 40, 50, 60, 0],
+            Some(&mask),
+        )
+        .expect("pixels");
+        assert_eq!(&pixels.bgra[0..4], &[10, 20, 30, 255]);
+        assert_eq!(&pixels.bgra[4..8], &[0, 0, 0, 0]);
+
+        // 1×2, stride 4. Top bit set, bottom bit clear. Padding must not shift row 1.
+        let rows = [
+            0x80, 0, 0, 0, // row 0
+            0x00, 0, 0, 0, // row 1
+        ];
+        let pixels = ShellIconPixels::from_bgra_and_mask(
+            1,
+            2,
+            vec![10, 20, 30, 0, 40, 50, 60, 0],
+            Some(&rows),
+        )
+        .expect("rows");
+        assert_eq!(&pixels.bgra[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&pixels.bgra[4..8], &[40, 50, 60, 255]);
+
+        // Width 8: only the low bit of the first byte (pixel 7) is transparent.
+        let mut wide = vec![0u8; 8 * 4];
+        for px in wide.chunks_exact_mut(4) {
+            px[0] = 9;
+        }
+        let mut wide_mask = [0u8; 4];
+        wide_mask[0] = 0x01;
+        let pixels =
+            ShellIconPixels::from_bgra_and_mask(8, 1, wide, Some(&wide_mask)).expect("wide");
+        for (i, px) in pixels.bgra.chunks_exact(4).enumerate() {
+            if i == 7 {
+                assert_eq!(px, &[0, 0, 0, 0]);
+            } else {
+                assert_eq!(px, &[9, 0, 0, 255]);
+            }
+        }
+
+        // A real alpha channel wins over the mask.
+        let kept = ShellIconPixels::from_bgra_and_mask(
+            1,
+            1,
+            vec![10, 20, 30, 128],
+            Some(&[0x80, 0, 0, 0]),
+        )
+        .expect("kept");
+        assert_eq!(kept.bgra, vec![10, 20, 30, 128]);
+
+        // A short mask is not applied; the legacy bitmap stays opaque.
+        let fallback =
+            ShellIconPixels::from_bgra_and_mask(1, 1, vec![10, 20, 30, 0], Some(&[0x80]))
+                .expect("fallback");
+        assert_eq!(fallback.bgra, vec![10, 20, 30, 255]);
+
+        let mut untouched = vec![10, 20, 30, 0];
+        assert!(!apply_icon_and_mask(&mut untouched, 1, 1, &[0x80]));
+        assert_eq!(untouched, vec![10, 20, 30, 0]);
+    }
+
+    #[test]
+    fn dpi_size_change_drops_the_older_icon() {
+        let (token, gen) = token_and_gen();
+        let live = Some(gen);
+        assert!(accept_shell_icon_result(
+            gen,
+            live,
+            &token,
+            10,
+            SHELL_ICON_TIMEOUT_MS
+        ));
+        assert!(shell_icon_size_still_wanted(gen, 96, Some((gen, 96))));
+        assert!(!shell_icon_size_still_wanted(gen, 96, Some((gen, 144))));
+        let show_stale = shell_icon_size_still_wanted(gen, 96, Some((gen, 144)))
+            && accept_shell_icon_result(gen, live, &token, 10, SHELL_ICON_TIMEOUT_MS);
+        assert!(!show_stale);
+        let show_current = shell_icon_size_still_wanted(gen, 144, Some((gen, 144)))
+            && accept_shell_icon_result(gen, live, &token, 10, SHELL_ICON_TIMEOUT_MS);
+        assert!(show_current);
+        // Another generation, or no request, is not a size mismatch.
+        let other = Generation::new(gen.value + 1);
+        assert!(shell_icon_size_still_wanted(gen, 96, Some((other, 144))));
+        assert!(shell_icon_size_still_wanted(gen, 96, None));
     }
 }
