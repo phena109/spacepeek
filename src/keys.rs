@@ -1,13 +1,97 @@
 //! Keyboard policy for the low-level hook.
 //!
-//! The hook thread only collects booleans and a tick. [`decide_hook_key`]
-//! turns that into an action. Timing helpers take the tick as an input so
+//! The hook thread collects booleans, a tick, and the desktop icon
+//! selection count when that list is focused. [`decide_hook_key`] turns
+//! that into an action. Timing helpers take the tick as an input so
 //! wraparound can be tested without a clock.
+
+/// Explorer's top-level window class (`CabinetWClass`).
+pub const CLASS_CABINET: &str = "CabinetWClass";
+/// Explorer's file list (`DirectUIHWND`).
+pub const CLASS_EXPLORER_LIST: &str = "DirectUIHWND";
+/// Desktop host. Holds `SHELLDLL_DefView` until a slideshow or Win+Tab moves it.
+pub const CLASS_PROGMAN: &str = "Progman";
+/// Alternate desktop host after the wallpaper engine re-parents `SHELLDLL_DefView`.
+pub const CLASS_WORKERW: &str = "WorkerW";
+/// Shell folder view that parents the desktop icon list.
+pub const CLASS_DEF_VIEW: &str = "SHELLDLL_DefView";
+/// Desktop icon list. Window text is [`DESKTOP_LIST_TITLE`].
+pub const CLASS_DESKTOP_LIST: &str = "SysListView32";
+/// Label-edit / rename box. Space must type a space, not open a preview.
+pub const CLASS_EDIT: &str = "Edit";
+/// Taskbar. Space is never taken.
+pub const CLASS_TASKBAR: &str = "Shell_TrayWnd";
+/// Preview window class. Space toggles while it is in front.
+pub const CLASS_PREVIEW: &str = "SpacepeekPreview";
+/// `GetWindowText` of the desktop `SysListView32`.
+pub const DESKTOP_LIST_TITLE: &str = "FolderView";
+
+/// Where the focused control sits for Space-to-preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellSurface {
+    /// File Explorer list: `CabinetWClass` with `DirectUIHWND` focused.
+    Explorer,
+    /// Desktop icon list: `Progman` or `WorkerW`, `SysListView32` FolderView focused.
+    Desktop,
+    /// Anything else, including a rename Edit, the taskbar, and an empty Progman.
+    Other,
+}
+
+impl ShellSurface {
+    /// True when the item list is focused. Arrows and type-ahead use that.
+    /// Space does too, unless the desktop selection count is known to be zero.
+    pub const fn list_focused(self) -> bool {
+        matches!(self, Self::Explorer | Self::Desktop)
+    }
+}
+
+/// `Progman`, or `WorkerW` after the desktop view has been re-parented.
+pub fn is_desktop_host_class(class: &str) -> bool {
+    class == CLASS_PROGMAN || class == CLASS_WORKERW
+}
+
+/// Top-level class that may keep a desktop-origin preview alive.
+pub fn is_desktop_foreground_class(class: &str) -> bool {
+    is_desktop_host_class(class)
+}
+
+/// Classify a focused control from window class names.
+///
+/// `focus_title` is the focused window's text. The desktop list is titled
+/// [`DESKTOP_LIST_TITLE`]. `None` means the title was not read: a matching
+/// class triple is still [`ShellSurface::Desktop`]. A title that is not
+/// `FolderView` is [`ShellSurface::Other`], so a stray `SysListView32` is not
+/// treated as the desktop.
+pub fn classify_shell_surface(
+    foreground_class: &str,
+    focus_class: &str,
+    focus_parent_class: &str,
+    focus_title: Option<&str>,
+) -> ShellSurface {
+    if foreground_class == CLASS_CABINET && focus_class == CLASS_EXPLORER_LIST {
+        return ShellSurface::Explorer;
+    }
+    if is_desktop_host_class(foreground_class)
+        && focus_class == CLASS_DESKTOP_LIST
+        && focus_parent_class == CLASS_DEF_VIEW
+        && focus_title
+            .map(|title| title == DESKTOP_LIST_TITLE)
+            .unwrap_or(true)
+    {
+        return ShellSurface::Desktop;
+    }
+    ShellSurface::Other
+}
 
 #[derive(Debug, Clone)]
 pub struct FocusContext {
     pub foreground_class: String,
     pub focus_class: String,
+    /// Parent of the focused control. Empty when it was not read.
+    /// Desktop classification uses this (`SHELLDLL_DefView`).
+    pub focus_parent_class: String,
+    /// Window text of the focused control. Empty when it was not read.
+    pub focus_title: String,
     /// A preview session is active (loading, pending show, or on screen).
     pub preview_visible: bool,
     pub modifiers_down: bool,
@@ -73,11 +157,36 @@ impl Default for Modifiers {
     }
 }
 
+/// How many icons the desktop `SysListView32` reports as selected.
+///
+/// Explorer never sets [`DesktopSelection::Known`]. Its list is not a
+/// cross-process list view, and the hook does not send it
+/// `LVM_GETSELECTEDCOUNT`. [`DesktopSelection::Unknown`] means the desktop
+/// query timed out or failed: Space is taken, which is the previous behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DesktopSelection {
+    /// `LVM_GETSELECTEDCOUNT` succeeded. Zero means no icon is selected.
+    Known(u32),
+    /// Not the desktop, or the call timed out or failed.
+    #[default]
+    Unknown,
+}
+
+/// Milliseconds `SendMessageTimeoutW` may block while reading that count.
+/// A timeout is [`DesktopSelection::Unknown`], and Space is taken.
+pub const DESKTOP_SELECTION_TIMEOUT_MS: u32 = 30;
+
 /// Everything the hook knows when a key goes down, without Win32 types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookContext {
     pub phase: SessionPhase,
+    /// Explorer's file list or the desktop icon list is focused.
     pub explorer_list_focused: bool,
+    /// Focused shell surface. [`HookContext::desktop_selection`] changes
+    /// Space only when this is [`ShellSurface::Desktop`].
+    pub surface: ShellSurface,
+    /// Desktop icon selection. Explorer leaves this [`DesktopSelection::Unknown`].
+    pub desktop_selection: DesktopSelection,
     pub preview_is_foreground: bool,
     pub origin_is_foreground: bool,
     pub modifiers: Modifiers,
@@ -251,6 +360,14 @@ fn decide_space(ctx: &HookContext) -> HookDecision {
     if ctx.typeahead_active && ctx.explorer_list_focused {
         return HookDecision::Pass;
     }
+    // A confirmed empty desktop selection must reach the icon list. One or
+    // more selected icons still take Space. Unknown (timeout or failure)
+    // keeps the previous take-Space behaviour. Explorer never matches here.
+    if ctx.surface == ShellSurface::Desktop
+        && matches!(ctx.desktop_selection, DesktopSelection::Known(0))
+    {
+        return HookDecision::Pass;
+    }
     if ctx.explorer_list_focused {
         HookDecision::Space
     } else {
@@ -321,9 +438,19 @@ pub fn should_intercept_space(ctx: &FocusContext) -> bool {
 }
 
 fn hook_context_from_focus(ctx: &FocusContext) -> HookContext {
-    let explorer_list_focused =
-        ctx.foreground_class == "CabinetWClass" && ctx.focus_class == "DirectUIHWND";
-    let preview_is_foreground = ctx.foreground_class == "SpacepeekPreview";
+    let title = if ctx.focus_title.is_empty() {
+        None
+    } else {
+        Some(ctx.focus_title.as_str())
+    };
+    let surface = classify_shell_surface(
+        &ctx.foreground_class,
+        &ctx.focus_class,
+        &ctx.focus_parent_class,
+        title,
+    );
+    let explorer_list_focused = surface.list_focused();
+    let preview_is_foreground = ctx.foreground_class == CLASS_PREVIEW;
     HookContext {
         // Space does not care whether the window is pending or already visible.
         phase: if ctx.preview_visible {
@@ -332,6 +459,10 @@ fn hook_context_from_focus(ctx: &FocusContext) -> HookContext {
             SessionPhase::Hidden
         },
         explorer_list_focused,
+        surface,
+        // Class names do not know the icon count. The hook fills this in
+        // for [`ShellSurface::Desktop`] only. Tests set it directly.
+        desktop_selection: DesktopSelection::Unknown,
         preview_is_foreground,
         origin_is_foreground: explorer_list_focused,
         modifiers: if ctx.modifiers_down {
@@ -375,6 +506,9 @@ pub fn esc_action(query: EscQuery) -> EscAction {
     let ctx = HookContext {
         phase: query.phase,
         explorer_list_focused: query.origin_is_foreground,
+        // Esc does not read the desktop selection count.
+        surface: ShellSurface::Other,
+        desktop_selection: DesktopSelection::Unknown,
         preview_is_foreground: query.preview_is_foreground,
         origin_is_foreground: query.origin_is_foreground,
         modifiers: if query.modifiers_down {
@@ -908,16 +1042,50 @@ mod tests {
         FocusContext {
             foreground_class: foreground.to_string(),
             focus_class: focus.to_string(),
+            focus_parent_class: String::new(),
+            focus_title: String::new(),
             preview_visible: visible,
             modifiers_down: modifiers,
             typeahead_active: false,
         }
     }
 
+    fn ctx_parent(
+        foreground: &str,
+        focus: &str,
+        parent: &str,
+        title: &str,
+        visible: bool,
+        modifiers: bool,
+    ) -> FocusContext {
+        FocusContext {
+            foreground_class: foreground.to_string(),
+            focus_class: focus.to_string(),
+            focus_parent_class: parent.to_string(),
+            focus_title: title.to_string(),
+            preview_visible: visible,
+            modifiers_down: modifiers,
+            typeahead_active: false,
+        }
+    }
+
+    fn desktop_list_ctx() -> FocusContext {
+        ctx_parent(
+            CLASS_PROGMAN,
+            CLASS_DESKTOP_LIST,
+            CLASS_DEF_VIEW,
+            DESKTOP_LIST_TITLE,
+            false,
+            false,
+        )
+    }
+
     fn list_ctx(phase: SessionPhase) -> HookContext {
         HookContext {
             phase,
             explorer_list_focused: true,
+            surface: ShellSurface::Explorer,
+            desktop_selection: DesktopSelection::Unknown,
             preview_is_foreground: false,
             origin_is_foreground: true,
             modifiers: Modifiers::NONE,
@@ -1869,5 +2037,271 @@ mod tests {
                 swallow: false
             }
         );
+    }
+
+    #[test]
+    fn classifies_explorer_list_from_cabinet_and_direct_ui() {
+        assert_eq!(
+            classify_shell_surface(CLASS_CABINET, CLASS_EXPLORER_LIST, "", None),
+            ShellSurface::Explorer
+        );
+        // Parent and title are unused for Explorer. An address-bar parent
+        // must not hide the list when DirectUIHWND itself has focus.
+        assert_eq!(
+            classify_shell_surface(CLASS_CABINET, CLASS_EXPLORER_LIST, CLASS_EDIT, Some("x")),
+            ShellSurface::Explorer
+        );
+        assert!(
+            classify_shell_surface(CLASS_CABINET, CLASS_EXPLORER_LIST, "", None).list_focused()
+        );
+    }
+
+    #[test]
+    fn classifies_desktop_list_from_progman_or_workerw() {
+        for host in [CLASS_PROGMAN, CLASS_WORKERW] {
+            assert_eq!(
+                classify_shell_surface(host, CLASS_DESKTOP_LIST, CLASS_DEF_VIEW, None),
+                ShellSurface::Desktop,
+                "{host}"
+            );
+            assert_eq!(
+                classify_shell_surface(
+                    host,
+                    CLASS_DESKTOP_LIST,
+                    CLASS_DEF_VIEW,
+                    Some(DESKTOP_LIST_TITLE)
+                ),
+                ShellSurface::Desktop,
+                "{host}"
+            );
+            assert!(is_desktop_host_class(host));
+            assert!(is_desktop_foreground_class(host));
+        }
+        assert!(!is_desktop_host_class(CLASS_CABINET));
+        assert!(!is_desktop_foreground_class(CLASS_TASKBAR));
+    }
+
+    #[test]
+    fn desktop_rename_edit_is_other() {
+        assert_eq!(
+            classify_shell_surface(
+                CLASS_PROGMAN,
+                CLASS_EDIT,
+                CLASS_DESKTOP_LIST,
+                Some("notes.txt")
+            ),
+            ShellSurface::Other
+        );
+        let rename = ctx_parent(
+            CLASS_PROGMAN,
+            CLASS_EDIT,
+            CLASS_DESKTOP_LIST,
+            "notes.txt",
+            false,
+            false,
+        );
+        assert!(!should_intercept_space(&rename));
+        let mut hook = hook_context_from_focus(&rename);
+        assert_eq!(hook.surface, ShellSurface::Other);
+        for selection in [
+            DesktopSelection::Known(0),
+            DesktopSelection::Known(2),
+            DesktopSelection::Unknown,
+        ] {
+            hook.desktop_selection = selection;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Pass,
+                "{selection:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_without_the_list_focused_is_other() {
+        assert_eq!(
+            classify_shell_surface(CLASS_PROGMAN, CLASS_PROGMAN, "", None),
+            ShellSurface::Other
+        );
+        assert_eq!(
+            classify_shell_surface(CLASS_WORKERW, CLASS_WORKERW, "", None),
+            ShellSurface::Other
+        );
+        assert_eq!(
+            classify_shell_surface(CLASS_PROGMAN, CLASS_DESKTOP_LIST, CLASS_PROGMAN, None),
+            ShellSurface::Other
+        );
+        assert_eq!(
+            classify_shell_surface(
+                CLASS_PROGMAN,
+                CLASS_DESKTOP_LIST,
+                CLASS_DEF_VIEW,
+                Some("NotFolderView")
+            ),
+            ShellSurface::Other
+        );
+        assert!(!should_intercept_space(&ctx(
+            CLASS_PROGMAN,
+            CLASS_PROGMAN,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn taskbar_and_other_apps_are_other() {
+        assert_eq!(
+            classify_shell_surface(CLASS_TASKBAR, "ToolbarWindow32", "", None),
+            ShellSurface::Other
+        );
+        assert_eq!(
+            classify_shell_surface("Notepad", CLASS_EDIT, "", None),
+            ShellSurface::Other
+        );
+        assert!(!should_intercept_space(&ctx(
+            CLASS_TASKBAR,
+            "ToolbarWindow32",
+            false,
+            false
+        )));
+        assert!(!should_intercept_space(&ctx(
+            CLASS_CABINET,
+            CLASS_EDIT,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn desktop_list_space_is_taken() {
+        assert!(should_intercept_space(&desktop_list_ctx()));
+        assert_eq!(
+            decide_hook_key(
+                &hook_context_from_focus(&desktop_list_ctx()),
+                HookKey::Space
+            ),
+            HookDecision::Space
+        );
+        let mut worker = desktop_list_ctx();
+        worker.foreground_class = CLASS_WORKERW.to_string();
+        assert!(should_intercept_space(&worker));
+    }
+
+    #[test]
+    fn desktop_space_follows_the_icon_selection_count() {
+        for host in [CLASS_PROGMAN, CLASS_WORKERW] {
+            let mut focus = desktop_list_ctx();
+            focus.foreground_class = host.to_string();
+            let mut hook = hook_context_from_focus(&focus);
+            assert_eq!(hook.surface, ShellSurface::Desktop, "{host}");
+
+            hook.desktop_selection = DesktopSelection::Known(0);
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Pass,
+                "{host} empty"
+            );
+            // The desktop still has focus while a preview is open. An empty
+            // selection must reach the desktop instead of closing the preview.
+            hook.phase = SessionPhase::Visible;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Pass,
+                "{host} empty while visible"
+            );
+
+            hook.desktop_selection = DesktopSelection::Known(2);
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Space,
+                "{host} selected"
+            );
+            hook.phase = SessionPhase::Hidden;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Space,
+                "{host} selected while hidden"
+            );
+
+            // Timeout or failure. Take Space, as before the count was readable.
+            hook.desktop_selection = DesktopSelection::Unknown;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Space,
+                "{host} unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn explorer_space_ignores_a_desktop_selection_count() {
+        let mut hook = list_ctx(SessionPhase::Hidden);
+        assert_eq!(hook.surface, ShellSurface::Explorer);
+        for selection in [
+            DesktopSelection::Unknown,
+            DesktopSelection::Known(0),
+            DesktopSelection::Known(2),
+        ] {
+            hook.desktop_selection = selection;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Space,
+                "{selection:?}"
+            );
+        }
+        let mut visible = list_ctx(SessionPhase::Visible);
+        visible.desktop_selection = DesktopSelection::Known(0);
+        assert_eq!(
+            decide_hook_key(&visible, HookKey::Space),
+            HookDecision::Space
+        );
+        assert!(should_intercept_space(&ctx(
+            CLASS_CABINET,
+            CLASS_EXPLORER_LIST,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn desktop_typeahead_space_passes_through() {
+        let mut ctx = desktop_list_ctx();
+        ctx.typeahead_active = true;
+        assert!(!should_intercept_space(&ctx));
+        assert_eq!(
+            decide_hook_key(&hook_context_from_focus(&ctx), HookKey::Space),
+            HookDecision::Pass
+        );
+    }
+
+    #[test]
+    fn desktop_modifiers_pass_space_through() {
+        let ctx = ctx_parent(
+            CLASS_PROGMAN,
+            CLASS_DESKTOP_LIST,
+            CLASS_DEF_VIEW,
+            DESKTOP_LIST_TITLE,
+            false,
+            true,
+        );
+        assert!(!should_intercept_space(&ctx));
+    }
+
+    #[test]
+    fn desktop_arrows_follow_while_a_session_is_open() {
+        let mut ctx = desktop_list_ctx();
+        ctx.preview_visible = true;
+        let hook = hook_context_from_focus(&ctx);
+        assert!(hook.explorer_list_focused);
+        assert!(hook.origin_is_foreground);
+        for key in [NavKey::Up, NavKey::Down, NavKey::Left, NavKey::Right] {
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Nav(key)),
+                HookDecision::FollowSelection,
+                "{key:?}"
+            );
+        }
+        assert_eq!(decide_hook_key(&hook, HookKey::Space), HookDecision::Space);
+        assert_eq!(decide_hook_key(&hook, HookKey::Esc), HookDecision::Dismiss);
     }
 }
