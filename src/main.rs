@@ -43,28 +43,29 @@ mod win {
 
     use spacepeek::{
         accept_shell_icon_result, apply_image_command, choose_selected, chrome_for_error,
-        chrome_for_text, classify_typeahead_vk, close_button_bounds, copy_utf16_z, decide_hook_key,
-        double_click_action, effective_dpi, fallback_type_name, gate_show, hit_test,
-        hook_key_from_vk, icon_inflight_timed_out, icon_mask_stride, icon_spawn_decision,
-        image_view_rect, interpret_dword_flag, is_selection_pointer_message, large_icon_px,
-        layout_shell_icon_message, load_text_preview, min_physical_size, nav_reload_remaining,
-        nonempty_path, pack_screen_point, parse_command, place_preview, pointer_over_close,
-        preview_text, reconcile_image_view, reset_for_new_image, scaled_close_width,
-        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
-        scaled_header_pad, session_phase, shell_icon_gap_px, shell_icon_min_px,
-        shell_icon_pixel_size_ok, shell_icon_px, shell_icon_size_still_wanted, shell_image_list_id,
-        should_reload_after_pointer, should_reload_after_shell_event, should_request_shell_icon,
-        should_retry_icon_request, should_show_first_run_balloon, small_icon_px, step,
-        tick_elapsed_ms, typeahead_for_decision, typeahead_window_ms, unpack_screen_point,
-        wheel_scroll_dy, wheel_zoom_command, CancelToken, ChromeLayout, Command, DecodedImage,
-        DoubleClickAction, Effect, Event, Generation, HitZone, HookContext, HookDecision, HookKey,
-        IconSpawn, ImageCommand, ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, Presented,
-        Preview, PreviewError, PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter,
-        ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels, ShowGate,
-        ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold,
-        ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, FIRST_RUN_SHOWN,
-        FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS,
-        SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP, VERSION,
+        chrome_for_text, classify_shell_surface, classify_typeahead_vk, close_button_bounds,
+        copy_utf16_z, decide_hook_key, double_click_action, effective_dpi, fallback_type_name,
+        gate_show, hit_test, hook_key_from_vk, icon_inflight_timed_out, icon_mask_stride,
+        icon_spawn_decision, image_view_rect, interpret_dword_flag, is_desktop_host_class,
+        is_selection_pointer_message, large_icon_px, layout_shell_icon_message, load_text_preview,
+        min_physical_size, nav_reload_remaining, nonempty_path, pack_screen_point, parse_command,
+        place_preview, pointer_over_close, preview_text, reconcile_image_view, reset_for_new_image,
+        scaled_close_width, scaled_detail_font, scaled_font_height, scaled_header_font,
+        scaled_header_height, scaled_header_pad, session_phase, shell_icon_gap_px,
+        shell_icon_min_px, shell_icon_pixel_size_ok, shell_icon_px, shell_icon_size_still_wanted,
+        shell_image_list_id, should_reload_after_pointer, should_reload_after_shell_event,
+        should_request_shell_icon, should_retry_icon_request, should_show_first_run_balloon,
+        small_icon_px, step, tick_elapsed_ms, typeahead_for_decision, typeahead_window_ms,
+        unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken, ChromeLayout,
+        Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone, HookContext,
+        HookDecision, HookKey, IconSpawn, ImageCommand, ImageFrame, ImageView, KeyPhase, Modifiers,
+        NavKey, Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, QuickInfo,
+        RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels,
+        ShellSurface, ShowGate, ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey,
+        WindowKind, ZoomHold, ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE,
+        CLASS_CABINET, CLASS_PROGMAN, CLASS_WORKERW, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY,
+        FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS,
+        SHELL_ICON_WORKER_CAP, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -79,14 +80,15 @@ mod win {
         AlphaBlend, BeginPaint, ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateFontW,
         CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, ExcludeClipRect,
         FillRect, GetDC, GetDIBits, GetMonitorInfoW, GetObjectW, GetSysColorBrush, GetTextFaceW,
-        IntersectClipRect, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC, RoundRect,
-        SaveDC, ScreenToClient, SelectObject, SetBkMode, SetBrushOrgEx, SetStretchBltMode,
-        SetTextColor, StretchDIBits, AC_SRC_ALPHA, AC_SRC_OVER, BITMAP, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET,
-        DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
-        DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL,
-        FW_SEMIBOLD, HALFTONE, HBITMAP, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        PAINTSTRUCT, PS_SOLID, RGBQUAD, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
+        IntersectClipRect, InvalidateRect, MonitorFromPoint, MonitorFromWindow, ReleaseDC,
+        RestoreDC, RoundRect, SaveDC, ScreenToClient, SelectObject, SetBkMode, SetBrushOrgEx,
+        SetStretchBltMode, SetTextColor, StretchDIBits, AC_SRC_ALPHA, AC_SRC_OVER, BITMAP,
+        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CLEARTYPE_QUALITY, COLOR_WINDOW,
+        DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS,
+        DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH,
+        FW_NORMAL, FW_SEMIBOLD, HALFTONE, HBITMAP, HDC, HFONT, HGDIOBJ, MONITORINFO,
+        MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_SOLID, RGBQUAD, SRCCOPY, TRANSPARENT,
+        VARIABLE_PITCH,
     };
     use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, WIN32_FIND_DATAW};
     use windows::Win32::System::Com::{
@@ -130,21 +132,21 @@ mod win {
         IShellFolder, IShellFolderViewDual, IShellItem, IShellItemImageFactory, IShellLinkW,
         IShellView, IShellWindows, IWebBrowser2, SHCreateItemFromParsingName,
         SHCreateItemWithParent, SHGetFileInfoW, SHGetImageList, SID_STopLevelBrowser,
-        ShellExecuteExW, ShellLink, ShellWindows, Shell_NotifyIconW, NIF_ICON, NIF_INFO,
-        NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+        ShellExecuteExW, ShellLink, ShellWindows, Shell_NotifyIconW, CSIDL_DESKTOP, NIF_ICON,
+        NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
         NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW, NOTIFYICON_VERSION_4, SEE_MASK_FLAG_NO_UI,
         SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_SYSICONINDEX, SHGFI_TYPENAME,
         SHGFI_USEFILEATTRIBUTES, SIGDN_FILESYSPATH, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
-        SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT,
+        SLGP_RAWPATH, SVGIO_SELECTION, SVSI_SELECT, SWC_DESKTOP, SWFO_NEEDDISPATCH,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, BringWindowToTop, CallNextHookEx, CallWindowProcW, CreatePopupMenu,
         CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW,
         FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
         GetForegroundWindow, GetGUIThreadInfo, GetIconInfo, GetMessageW, GetParent,
-        GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, HideCaret, IsWindow,
-        IsWindowVisible, KillTimer, LoadCursorW, LoadImageW, MessageBoxW, MoveWindow, PeekMessageW,
-        PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassExW,
+        GetSystemMetrics, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HideCaret,
+        IsWindow, IsWindowVisible, KillTimer, LoadCursorW, LoadImageW, MessageBoxW, MoveWindow,
+        PeekMessageW, PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassExW,
         RegisterWindowMessageW, SendMessageW, SetClassLongPtrW, SetForegroundWindow, SetTimer,
         SetWindowLongPtrW, SetWindowPos, SetWindowTextW, SetWindowsHookExW, ShowWindow,
         TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, CS_DBLCLKS,
@@ -280,6 +282,9 @@ mod win {
         preview_hwnd: HWND,
         edit_hwnd: HWND,
         explorer_hwnd: HWND,
+        /// Parent of the desktop `SHELLDLL_DefView` (`Progman` or `WorkerW`).
+        /// Null when the session origin is Explorer or nothing is open.
+        desktop_host_hwnd: HWND,
         instance: HINSTANCE,
         /// DPI the current [`Self::small_icon`] / [`Self::large_icon`] were loaded
         /// for. Zero until the first successful load.
@@ -368,6 +373,9 @@ mod win {
     static IMAGE_VISIBLE: AtomicBool = AtomicBool::new(false);
     /// Explorer that owns the current session. Zero when nothing is open.
     static ORIGIN_EXPLORER: AtomicIsize = AtomicIsize::new(0);
+    /// Desktop `SHELLDLL_DefView` host while a desktop-origin session is open.
+    /// Zero for Explorer origins and while hidden. The hook thread reads it.
+    static ORIGIN_DESKTOP_HOST: AtomicIsize = AtomicIsize::new(0);
     /// Bumped when Space or Esc is posted to the UI thread.
     static INPUT_GEN: AtomicU64 = AtomicU64::new(0);
     /// Previous edit-control window procedure. Zero when the edit is gone.
@@ -440,6 +448,7 @@ mod win {
             preview_hwnd: HWND::default(),
             edit_hwnd: HWND::default(),
             explorer_hwnd: HWND::default(),
+            desktop_host_hwnd: HWND::default(),
             instance,
             icon_dpi: 0,
             small_icon: HICON::default(),
@@ -966,15 +975,16 @@ mod win {
         SessionPhase::from_code(PHASE.load(Ordering::Acquire))
     }
 
-    fn publish_session(state: &PreviewState, explorer: HWND) {
+    fn publish_session(state: &PreviewState, explorer: HWND, desktop_host: HWND) {
         let phase = session_phase(state);
-        let origin = if phase.is_hidden() {
-            0
+        let (origin, host) = if phase.is_hidden() {
+            (0, 0)
         } else {
-            explorer.0 as isize
+            (explorer.0 as isize, desktop_host.0 as isize)
         };
         // Window first, then the phase, so a hook that sees a session also sees it.
         ORIGIN_EXPLORER.store(origin, Ordering::Release);
+        ORIGIN_DESKTOP_HOST.store(host, Ordering::Release);
         PHASE.store(phase as u8, Ordering::Release);
     }
 
@@ -999,7 +1009,18 @@ mod win {
             return false;
         }
         let explorer = HWND(bits as *mut _);
-        unsafe { IsWindow(explorer).as_bool() && GetForegroundWindow() == explorer }
+        let foreground = unsafe { GetForegroundWindow() };
+        if unsafe { IsWindow(explorer).as_bool() } && foreground == explorer {
+            return true;
+        }
+        let host = ORIGIN_DESKTOP_HOST.load(Ordering::Acquire);
+        if host == 0 {
+            return false;
+        }
+        let host = HWND(host as *mut _);
+        unsafe {
+            IsWindow(host).as_bool() && (foreground == host || desktop_foreground_hwnd(foreground))
+        }
     }
 
     fn preview_is_foreground() -> bool {
@@ -1016,11 +1037,40 @@ mod win {
     }
 
     fn explorer_list_focused() -> bool {
-        let foreground = unsafe { GetForegroundWindow() };
-        if !class_eq(foreground, "CabinetWClass") {
-            return false;
+        shell_surface_now().list_focused()
+    }
+
+    /// Classify the focused control. Explorer is the first branch so a
+    /// `CabinetWClass` foreground still costs two class-name reads.
+    fn shell_surface_now() -> ShellSurface {
+        shell_surface_of(unsafe { GetForegroundWindow() })
+    }
+
+    fn shell_surface_of(foreground: HWND) -> ShellSurface {
+        let mut fg_buf = [0u8; 64];
+        let Some(fg_class) = class_name_ascii(foreground, &mut fg_buf) else {
+            return ShellSurface::Other;
+        };
+        if fg_class == CLASS_CABINET {
+            let mut focus_buf = [0u8; 64];
+            let focus_class =
+                class_name_ascii(focus_hwnd(foreground), &mut focus_buf).unwrap_or("");
+            return classify_shell_surface(fg_class, focus_class, "", None);
         }
-        class_eq(focus_hwnd(foreground), "DirectUIHWND")
+        if !is_desktop_host_class(fg_class) {
+            return ShellSurface::Other;
+        }
+        let focus = focus_hwnd(foreground);
+        let mut focus_buf = [0u8; 64];
+        let Some(focus_class) = class_name_ascii(focus, &mut focus_buf) else {
+            return ShellSurface::Other;
+        };
+        let parent = unsafe { GetParent(focus).unwrap_or_default() };
+        let mut parent_buf = [0u8; 64];
+        let parent_class = class_name_ascii(parent, &mut parent_buf).unwrap_or("");
+        let mut title_buf = [0u8; 64];
+        let title = window_title_ascii(focus, &mut title_buf);
+        classify_shell_surface(fg_class, focus_class, parent_class, title)
     }
 
     fn publish_preview_hwnd(hwnd: HWND) {
@@ -1086,6 +1136,10 @@ mod win {
         HWND(ORIGIN_EXPLORER.load(Ordering::Acquire) as *mut _)
     }
 
+    fn hooked_desktop_host() -> HWND {
+        HWND(ORIGIN_DESKTOP_HOST.load(Ordering::Acquire) as *mut _)
+    }
+
     /// Preview is tested first. The preview sits above Explorer, so a point on
     /// its header, × button, or body is the preview even when that point is
     /// also inside the Explorer rectangle.
@@ -1097,6 +1151,10 @@ mod win {
         if same_root(hwnd, hooked_preview()) {
             SelectionTarget::Preview
         } else if same_root(hwnd, hooked_origin()) {
+            SelectionTarget::Origin
+        } else if same_root(hwnd, hooked_desktop_host()) {
+            // Desktop icons live under WorkerW after a slideshow / Win+Tab,
+            // while GetForegroundWindow is still Progman.
             SelectionTarget::Origin
         } else {
             SelectionTarget::Elsewhere
@@ -1303,6 +1361,41 @@ mod win {
         expected
             .encode_utf16()
             .eq(buf[..n as usize].iter().copied())
+    }
+
+    fn class_name_ascii(hwnd: HWND, buf: &mut [u8]) -> Option<&str> {
+        if hwnd.0.is_null() || buf.is_empty() {
+            return None;
+        }
+        let mut wide = [0u16; 64];
+        let n = unsafe { GetClassNameW(hwnd, &mut wide) };
+        copy_ascii_window_text(&wide, n, buf)
+    }
+
+    fn window_title_ascii(hwnd: HWND, buf: &mut [u8]) -> Option<&str> {
+        if hwnd.0.is_null() || buf.is_empty() {
+            return None;
+        }
+        let mut wide = [0u16; 64];
+        let n = unsafe { GetWindowTextW(hwnd, &mut wide) };
+        copy_ascii_window_text(&wide, n, buf)
+    }
+
+    fn copy_ascii_window_text<'a>(wide: &[u16], n: i32, buf: &'a mut [u8]) -> Option<&'a str> {
+        if n <= 0 {
+            return None;
+        }
+        let n = n as usize;
+        if n > wide.len() || n > buf.len() {
+            return None;
+        }
+        for (i, unit) in wide[..n].iter().enumerate() {
+            if *unit == 0 || *unit > 127 {
+                return None;
+            }
+            buf[i] = *unit as u8;
+        }
+        std::str::from_utf8(&buf[..n]).ok()
     }
 
     unsafe extern "system" fn wndproc(
@@ -1582,8 +1675,17 @@ mod win {
             return;
         }
         let explorer = unsafe { GetForegroundWindow() };
-        with_app_mut(|app| app.explorer_hwnd = explorer);
-        let path = nonempty_path(unsafe { selected_path(explorer) });
+        let surface = shell_surface_of(explorer);
+        let desktop_host = if surface == ShellSurface::Desktop {
+            find_desktop_host()
+        } else {
+            HWND::default()
+        };
+        with_app_mut(|app| {
+            app.explorer_hwnd = explorer;
+            app.desktop_host_hwnd = desktop_host;
+        });
+        let path = nonempty_path(unsafe { selected_path_for(surface, explorer) });
         // The hook cannot query the selection. That COM call belongs on this
         // STA thread; doing it inside the low-level hook would stall every
         // keystroke. Space was already swallowed. With no filesystem path,
@@ -1719,11 +1821,19 @@ mod win {
             dispatch(Event::FocusLost);
             return;
         }
-        if unsafe { GetForegroundWindow() != explorer } {
+        if !origin_still_foreground(explorer) {
             return;
         }
         // A cleared selection is not a new file. Leave the current preview up.
-        if let Some(path) = nonempty_path(unsafe { selected_path(explorer) }) {
+        let desktop = with_app(|app| !app.desktop_host_hwnd.0.is_null());
+        let path = nonempty_path(unsafe {
+            if desktop {
+                selected_desktop_path()
+            } else {
+                selected_explorer_path(explorer)
+            }
+        });
+        if let Some(path) = path {
             dispatch(Event::SelectionChanged(path));
         }
     }
@@ -1759,9 +1869,21 @@ mod win {
     }
 
     fn foreground_hwnd_allowed(hwnd: HWND) -> bool {
-        let (explorer, preview, message) =
-            with_app(|app| (app.explorer_hwnd, app.preview_hwnd, app.msg_hwnd));
-        hwnd == explorer || hwnd == preview || hwnd == message
+        let (explorer, preview, message, desktop_host) = with_app(|app| {
+            (
+                app.explorer_hwnd,
+                app.preview_hwnd,
+                app.msg_hwnd,
+                app.desktop_host_hwnd,
+            )
+        });
+        if hwnd == explorer || hwnd == preview || hwnd == message {
+            return true;
+        }
+        if desktop_host.0.is_null() {
+            return false;
+        }
+        hwnd == desktop_host || desktop_foreground_hwnd(hwnd)
     }
 
     fn foreground_allows_preview() -> bool {
@@ -1786,8 +1908,56 @@ mod win {
     fn origin_ready_to_show() -> bool {
         let explorer = with_app(|app| app.explorer_hwnd);
         let alive = unsafe { IsWindow(explorer).as_bool() };
-        let foreground = unsafe { GetForegroundWindow() == explorer };
-        gate_show(alive, foreground, false) == ShowGate::Show
+        gate_show(alive, origin_still_foreground(explorer), false) == ShowGate::Show
+    }
+
+    fn origin_still_foreground(explorer: HWND) -> bool {
+        let foreground = unsafe { GetForegroundWindow() };
+        foreground == explorer || desktop_origin_matches_foreground(foreground)
+    }
+
+    fn desktop_origin_matches_foreground(foreground: HWND) -> bool {
+        let host = with_app(|app| app.desktop_host_hwnd);
+        if host.0.is_null() {
+            return false;
+        }
+        foreground == host || desktop_foreground_hwnd(foreground)
+    }
+
+    fn desktop_foreground_hwnd(hwnd: HWND) -> bool {
+        class_eq(hwnd, CLASS_PROGMAN) || (class_eq(hwnd, CLASS_WORKERW) && has_def_view(hwnd))
+    }
+
+    fn has_def_view(hwnd: HWND) -> bool {
+        if hwnd.0.is_null() {
+            return false;
+        }
+        unsafe {
+            FindWindowExW(hwnd, None, w!("SHELLDLL_DefView"), None)
+                .ok()
+                .is_some_and(|child| !child.0.is_null())
+        }
+    }
+
+    fn find_desktop_host() -> HWND {
+        unsafe {
+            let progman = FindWindowW(w!("Progman"), None).unwrap_or_default();
+            if has_def_view(progman) {
+                return progman;
+            }
+            let mut after = HWND::default();
+            loop {
+                let worker = match FindWindowExW(HWND::default(), after, w!("WorkerW"), None) {
+                    Ok(hwnd) if !hwnd.0.is_null() => hwnd,
+                    _ => break,
+                };
+                if has_def_view(worker) {
+                    return worker;
+                }
+                after = worker;
+            }
+            progman
+        }
     }
 
     fn dispatch(event: Event) {
@@ -1795,7 +1965,7 @@ mod win {
             let state = std::mem::replace(&mut app.state, PreviewState::Hidden);
             let (next, effects) = step(state, event, &app.cancel);
             app.state = next;
-            publish_session(&app.state, app.explorer_hwnd);
+            publish_session(&app.state, app.explorer_hwnd, app.desktop_host_hwnd);
             effects
         });
         sync_watch_timer();
@@ -2571,12 +2741,11 @@ mod win {
         let Some(presented) = presented else {
             return false;
         };
-        let dpi_anchor = if existing.0.is_null() {
-            anchor
+        let dpi = if existing.0.is_null() {
+            dpi_for_preview_anchor(anchor)
         } else {
-            existing
+            dpi_for_anchor(existing)
         };
-        let dpi = dpi_for_anchor(dpi_anchor);
         let (fonts, stale) = swap_fonts(dpi);
         let _stale = stale;
         let title = presented.header().name.clone();
@@ -2726,12 +2895,8 @@ mod win {
         presented: &Presented,
     ) -> Option<HWND> {
         let size = with_app(|app| app.sizes.opening_physical(presented.kind(), dpi));
-        let placed = place_preview(
-            anchor_rect(anchor),
-            monitor_work_area(anchor),
-            size.width,
-            size.height,
-        );
+        let (rect, work) = preview_anchor(anchor);
+        let placed = place_preview(rect, work, size.width, size.height);
         let class_name = utf16(PREVIEW_CLASS);
         let title = utf16(&presented.header().name);
         // Match the monitor this window is about to open on. The previous
@@ -3402,6 +3567,77 @@ mod win {
                 let width = (rc.right - rc.left).max(0);
                 let height = (rc.bottom - rc.top - header).max(0);
                 let _ = MoveWindow(edit, 0, header, width, height, true);
+            }
+        }
+    }
+
+    fn desktop_session() -> bool {
+        with_app(|app| !app.desktop_host_hwnd.0.is_null())
+    }
+
+    fn preview_anchor(anchor: HWND) -> (Option<PxRect>, PxRect) {
+        if desktop_session() {
+            if let Some((rect, work)) = cursor_work_anchor() {
+                return (Some(rect), work);
+            }
+        }
+        (anchor_rect(anchor), monitor_work_area(anchor))
+    }
+
+    fn cursor_work_anchor() -> Option<(PxRect, PxRect)> {
+        unsafe {
+            let mut pt = POINT::default();
+            GetCursorPos(&mut pt).ok()?;
+            let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            if monitor.is_invalid() {
+                return None;
+            }
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..MONITORINFO::default()
+            };
+            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+                return None;
+            }
+            let work = PxRect {
+                left: info.rcWork.left,
+                top: info.rcWork.top,
+                right: info.rcWork.right,
+                bottom: info.rcWork.bottom,
+            };
+            let cursor = PxRect {
+                left: pt.x,
+                top: pt.y,
+                right: pt.x.saturating_add(1),
+                bottom: pt.y.saturating_add(1),
+            };
+            Some((cursor, work))
+        }
+    }
+
+    fn dpi_for_preview_anchor(anchor: HWND) -> u32 {
+        if desktop_session() {
+            if let Some(dpi) = cursor_monitor_dpi() {
+                return effective_dpi(dpi);
+            }
+        }
+        dpi_for_anchor(anchor)
+    }
+
+    fn cursor_monitor_dpi() -> Option<u32> {
+        unsafe {
+            let mut pt = POINT::default();
+            GetCursorPos(&mut pt).ok()?;
+            let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            if monitor.is_invalid() {
+                return None;
+            }
+            let mut x = 0u32;
+            let mut y = 0u32;
+            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y).is_ok() && x != 0 {
+                Some(x)
+            } else {
+                None
             }
         }
     }
@@ -4321,7 +4557,30 @@ mod win {
         }
     }
 
-    unsafe fn selected_path(foreground: HWND) -> Option<PathBuf> {
+    unsafe fn selected_path_for(surface: ShellSurface, foreground: HWND) -> Option<PathBuf> {
+        match surface {
+            ShellSurface::Desktop => selected_desktop_path(),
+            ShellSurface::Explorer | ShellSurface::Other => selected_explorer_path(foreground),
+        }
+    }
+
+    /// Desktop selection via `IShellWindows::FindWindowSW(CSIDL_DESKTOP)`.
+    /// Only called when the origin is the desktop, so Explorer Space still
+    /// walks `IShellWindows` by HWND and never pays for this lookup.
+    unsafe fn selected_desktop_path() -> Option<PathBuf> {
+        let shell: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL).ok()?;
+        let loc = VARIANT::from(CSIDL_DESKTOP as i32);
+        let root = VARIANT::default();
+        let mut hwnd = 0i32;
+        let dispatch = shell
+            .FindWindowSW(&loc, &root, SWC_DESKTOP, &mut hwnd, SWFO_NEEDDISPATCH)
+            .ok()?;
+        let provider: IServiceProvider = dispatch.cast().ok()?;
+        let browser: IShellBrowser = provider.QueryService(&SID_STopLevelBrowser).ok()?;
+        path_from_browser(&browser)
+    }
+
+    unsafe fn selected_explorer_path(foreground: HWND) -> Option<PathBuf> {
         if foreground.0.is_null() {
             return None;
         }
@@ -4803,7 +5062,7 @@ mod win {
         with_app_mut(|app| {
             let _ = app.cancel.generate();
             app.state = PreviewState::Hidden;
-            publish_session(&app.state, app.explorer_hwnd);
+            publish_session(&app.state, app.explorer_hwnd, app.desktop_host_hwnd);
         });
         sync_watch_timer();
         hide_preview(false);

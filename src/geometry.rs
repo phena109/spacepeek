@@ -213,6 +213,35 @@ mod tests {
     }
 
     #[test]
+    fn one_pixel_cursor_anchor_centres_on_that_monitor() {
+        // Desktop placement uses the cursor as a 1×1 anchor on the monitor
+        // that contains it, then the same clamp as Explorer.
+        let work = PxRect {
+            left: 1920,
+            top: 0,
+            right: 3840,
+            bottom: 1080,
+        };
+        let cursor = PxRect {
+            left: 2500,
+            top: 400,
+            right: 2501,
+            bottom: 401,
+        };
+        let placed = place_preview(Some(cursor), work, 760, 520);
+        assert_eq!(
+            placed,
+            Placement {
+                x: 2120,
+                y: 140,
+                width: 760,
+                height: 520,
+            }
+        );
+        assert_inside(work, placed);
+    }
+
+    #[test]
     fn centres_in_work_area_when_unanchored() {
         let work = work_1920x1080();
         let placed = place_preview(None, work, 760, 520);
