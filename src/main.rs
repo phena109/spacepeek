@@ -42,31 +42,32 @@ mod win {
     };
 
     use spacepeek::{
-        accept_shell_icon_result, apply_image_command, choose_selected, chrome_for_error,
-        chrome_for_text, classify_shell_surface, classify_typeahead_vk, close_button_bounds,
-        copy_utf16_z, decide_hook_key, double_click_action, effective_dpi, fallback_type_name,
-        gate_show, hit_test, hook_key_from_vk, icon_inflight_timed_out, icon_mask_stride,
-        icon_spawn_decision, image_view_rect, interpret_dword_flag, is_desktop_host_class,
-        is_selection_pointer_message, large_icon_px, layout_shell_icon_message, load_text_preview,
-        min_physical_size, nav_reload_remaining, nonempty_path, pack_screen_point, parse_command,
-        place_preview, pointer_over_close, preview_text, reconcile_image_view, reset_for_new_image,
-        scaled_close_width, scaled_detail_font, scaled_font_height, scaled_header_font,
-        scaled_header_height, scaled_header_pad, session_phase, shell_icon_gap_px,
-        shell_icon_min_px, shell_icon_pixel_size_ok, shell_icon_px, shell_icon_size_still_wanted,
-        shell_image_list_id, should_fetch_shell_icon, should_keep_shell_icon_pixels,
-        should_reload_after_pointer, should_reload_after_shell_event, should_request_shell_icon,
-        should_show_first_run_balloon, small_icon_px, step, tick_elapsed_ms,
-        typeahead_for_decision, typeahead_window_ms, unpack_screen_point, wheel_scroll_dy,
-        wheel_zoom_command, CancelToken, ChromeLayout, Command, DecodedImage, DesktopSelection,
-        DoubleClickAction, Effect, Event, Generation, HitZone, HookContext, HookDecision, HookKey,
-        IconSpawn, ImageCommand, ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, Presented,
-        Preview, PreviewError, PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter,
-        ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels, ShellSurface,
-        ShowGate, ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind,
-        ZoomHold, ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET,
-        CLASS_PROGMAN, CLASS_WORKERW, DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN,
-        FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS,
-        SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP, VERSION,
+        accept_shell_icon_result, apply_image_command, center_anchored_size, choose_selected,
+        chrome_for_error, chrome_for_text, classify_shell_surface, classify_typeahead_vk,
+        close_button_bounds, copy_utf16_z, decide_hook_key, double_click_action, effective_dpi,
+        fallback_type_name, gate_show, hit_test, hook_key_from_vk, icon_inflight_timed_out,
+        icon_mask_stride, icon_spawn_decision, image_view_rect, interpret_dword_flag,
+        is_desktop_host_class, is_selection_pointer_message, large_icon_px,
+        layout_shell_icon_message, load_text_preview, min_physical_size, nav_reload_remaining,
+        nonempty_path, pack_screen_point, parse_command, place_preview, pointer_over_close,
+        preview_text, reconcile_image_view, reset_for_new_image, scaled_close_width,
+        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
+        scaled_header_pad, session_phase, shell_icon_gap_px, shell_icon_min_px,
+        shell_icon_pixel_size_ok, shell_icon_px, shell_icon_size_still_wanted, shell_image_list_id,
+        should_fetch_shell_icon, should_keep_shell_icon_pixels, should_reload_after_pointer,
+        should_reload_after_shell_event, should_request_shell_icon, should_show_first_run_balloon,
+        small_icon_px, step, tick_elapsed_ms, typeahead_for_decision, typeahead_window_ms,
+        unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken, ChromeLayout,
+        Command, DecodedImage, DesktopSelection, DoubleClickAction, Effect, Event, Generation,
+        HitZone, HookContext, HookDecision, HookKey, IconSpawn, ImageCommand, ImageFrame,
+        ImageView, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits,
+        PreviewState, PxRect, PxSize, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
+        SelectionTarget, SessionPhase, ShellIconPixels, ShellSurface, ShowGate, ShowOutcome,
+        SizeGrip, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold, ZoomKey,
+        ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET, CLASS_PROGMAN,
+        CLASS_WORKERW, DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY,
+        FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS,
+        SHELL_ICON_WORKER_CAP, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -163,15 +164,17 @@ mod win {
         SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
         SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
         WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT,
-        WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
-        WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP,
-        WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
-        WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
-        WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK,
-        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_SYSKEYDOWN,
-        WM_SYSKEYUP, WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD,
-        WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP,
-        WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
+        WINEVENT_SKIPOWNPROCESS, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
+        WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_APP, WM_CHAR, WM_CLOSE,
+        WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+        WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+        WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE,
+        WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL,
+        WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT,
+        WM_SETICON, WM_SIZE, WM_SIZING, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WM_VSCROLL,
+        WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE,
+        WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -309,6 +312,9 @@ mod win {
         font_dpi: u32,
         /// Last user-chosen outer size, in logical pixels. Empty until a resize.
         sizes: SizeMemory,
+        /// Outer rect at the start of a size or move loop. Work-area limits are
+        /// filled on the first `WM_SIZING`, so a header drag does not query them.
+        size_drag: Option<SizeDrag>,
         /// Header and, for errors, the centred message. The edit holds file text.
         presented: Option<Presented>,
         /// Set for the duration of `on_space`. Explorer COM calls pump this STA
@@ -364,6 +370,53 @@ mod win {
             }
         }
     }
+
+    /// Centre captured for one resize. `limits` stays empty until `WM_SIZING`.
+    #[derive(Clone, Copy)]
+    struct SizeDrag {
+        anchor: PxRect,
+        limits: Option<SizeLimits>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct SizeLimits {
+        work: PxRect,
+        min: PxSize,
+    }
+
+    // The grip map lives in the platform-independent module. These asserts
+    // fail the Windows build if the `windows` crate's `WMSZ_*` values drift.
+    const _: () = {
+        assert!(matches!(
+            SizeGrip::from_wmsz(WMSZ_LEFT),
+            Some(SizeGrip::Left)
+        ));
+        assert!(matches!(
+            SizeGrip::from_wmsz(WMSZ_RIGHT),
+            Some(SizeGrip::Right)
+        ));
+        assert!(matches!(SizeGrip::from_wmsz(WMSZ_TOP), Some(SizeGrip::Top)));
+        assert!(matches!(
+            SizeGrip::from_wmsz(WMSZ_TOPLEFT),
+            Some(SizeGrip::TopLeft)
+        ));
+        assert!(matches!(
+            SizeGrip::from_wmsz(WMSZ_TOPRIGHT),
+            Some(SizeGrip::TopRight)
+        ));
+        assert!(matches!(
+            SizeGrip::from_wmsz(WMSZ_BOTTOM),
+            Some(SizeGrip::Bottom)
+        ));
+        assert!(matches!(
+            SizeGrip::from_wmsz(WMSZ_BOTTOMLEFT),
+            Some(SizeGrip::BottomLeft)
+        ));
+        assert!(matches!(
+            SizeGrip::from_wmsz(WMSZ_BOTTOMRIGHT),
+            Some(SizeGrip::BottomRight)
+        ));
+    };
 
     static APP: AtomicPtr<RefCell<App>> = AtomicPtr::new(std::ptr::null_mut());
     static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -465,6 +518,7 @@ mod win {
             detail_font: HFONT::default(),
             font_dpi: 0,
             sizes: SizeMemory::new(),
+            size_drag: None,
             presented: None,
             space_busy: false,
             input_baseline: 0,
@@ -1557,7 +1611,24 @@ mod win {
                 apply_min_track(hwnd, lparam);
                 LRESULT(0)
             }
+            // Capture the pre-drag rect. A header move never reaches `WM_SIZING`,
+            // so the monitor query waits until a border drag actually starts.
+            WM_ENTERSIZEMOVE => {
+                note_size_anchor(hwnd);
+                LRESULT(0)
+            }
+            // Mirror the dragged edge around the captured centre and write the
+            // rect back. No decode, no parse, no allocation: image fit is the
+            // existing `WM_SIZE` path (`reconcile_image_view`).
+            WM_SIZING => {
+                if center_size_during_drag(hwnd, wparam, lparam) {
+                    LRESULT(1)
+                } else {
+                    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+                }
+            }
             WM_EXITSIZEMOVE => {
+                clear_size_drag();
                 remember_window_size(hwnd);
                 let explorer = with_app(|app| app.explorer_hwnd);
                 restore_explorer_focus(explorer);
@@ -1700,6 +1771,7 @@ mod win {
                         app.image_view = reset_for_new_image(app.image_view);
                         app.pan_drag = PanDrag::idle();
                         app.suppress_dblclk = false;
+                        app.size_drag = None;
                         app.shell_icon.pixels = None;
                         app.shell_icon.pixels_for = None;
                         app.shell_icon.last_icon_rect = None;
@@ -2831,7 +2903,8 @@ mod win {
     /// Create the preview hidden, or replace the text of the existing one.
     /// Does not activate or show the window. Returns false if the window
     /// could not be created. An existing window keeps its pixel size; only a
-    /// new window takes the remembered (or default) outer size.
+    /// new window takes the remembered (or default) outer size. Image and
+    /// Markdown use that same remembered size. Their default matches text.
     fn fill_preview_window() -> bool {
         let next_path = with_app(|app| match &app.state {
             PreviewState::Showing { path, .. }
@@ -4020,6 +4093,84 @@ mod win {
         } else {
             spacepeek::geometry::scale_for_dpi(8, dpi).max(1)
         }
+    }
+
+    fn note_size_anchor(hwnd: HWND) {
+        let Some(anchor) = anchor_rect(hwnd) else {
+            return;
+        };
+        with_app_mut(|app| {
+            app.size_drag = Some(SizeDrag {
+                anchor,
+                limits: None,
+            });
+        });
+    }
+
+    fn clear_size_drag() {
+        with_app_mut(|app| app.size_drag = None);
+    }
+
+    /// Work area and minimum size for this drag. Queried once, on the first
+    /// `WM_SIZING`, then reused so later messages stay arithmetic.
+    fn size_limits(hwnd: HWND) -> Option<SizeLimits> {
+        if let Some(limits) = with_app(|app| app.size_drag.and_then(|drag| drag.limits)) {
+            return Some(limits);
+        }
+        let limits = SizeLimits {
+            work: monitor_work_area(hwnd),
+            min: min_physical_size(dpi_for_anchor(hwnd)),
+        };
+        let stored = with_app_mut(|app| {
+            let Some(drag) = app.size_drag.as_mut() else {
+                return false;
+            };
+            drag.limits = Some(limits);
+            true
+        });
+        if stored {
+            Some(limits)
+        } else {
+            None
+        }
+    }
+
+    /// Write a centre-anchored rect into the `WM_SIZING` `lParam`. False when
+    /// there is nothing to adjust, so the default size loop can run.
+    fn center_size_during_drag(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> bool {
+        if lparam.0 == 0 {
+            return false;
+        }
+        let Some(grip) = SizeGrip::from_wmsz(wparam.0 as u32) else {
+            return false;
+        };
+        if with_app(|app| app.size_drag.is_none()) {
+            note_size_anchor(hwnd);
+        }
+        let Some(anchor) = with_app(|app| app.size_drag.map(|drag| drag.anchor)) else {
+            return false;
+        };
+        let Some(limits) = size_limits(hwnd) else {
+            return false;
+        };
+        let proposed = unsafe { &mut *(lparam.0 as *mut RECT) };
+        let next = center_anchored_size(
+            anchor,
+            PxRect {
+                left: proposed.left,
+                top: proposed.top,
+                right: proposed.right,
+                bottom: proposed.bottom,
+            },
+            grip,
+            limits.min,
+            limits.work,
+        );
+        proposed.left = next.left;
+        proposed.top = next.top;
+        proposed.right = next.right;
+        proposed.bottom = next.bottom;
+        true
     }
 
     fn apply_min_track(hwnd: HWND, lparam: LPARAM) {

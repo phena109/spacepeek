@@ -30,8 +30,9 @@ pub use chrome::{
 };
 pub use cli::{parse_command, Command};
 pub use geometry::{
-    effective_dpi, place_preview, preview_placement, scaled_font_height, scaled_preview_size,
-    Placement, PxRect, PxSize, LOGICAL_FONT_HEIGHT, LOGICAL_PREVIEW_HEIGHT, LOGICAL_PREVIEW_WIDTH,
+    center_anchored_size, effective_dpi, place_preview, preview_placement, scaled_font_height,
+    scaled_preview_size, Placement, PxRect, PxSize, SizeGrip, LOGICAL_FONT_HEIGHT,
+    LOGICAL_PREVIEW_HEIGHT, LOGICAL_PREVIEW_WIDTH,
 };
 pub use icon::{large_icon_px, small_icon_px, ICON_RESOURCE_ID};
 pub use image_preview::{
