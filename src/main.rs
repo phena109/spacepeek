@@ -53,18 +53,18 @@ mod win {
         scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
         scaled_header_pad, session_phase, shell_icon_gap_px, shell_icon_min_px,
         shell_icon_pixel_size_ok, shell_icon_px, shell_icon_size_still_wanted, shell_image_list_id,
-        should_reload_after_pointer, should_reload_after_shell_event, should_request_shell_icon,
-        should_retry_icon_request, should_show_first_run_balloon, small_icon_px, step,
-        tick_elapsed_ms, typeahead_for_decision, typeahead_window_ms, unpack_screen_point,
-        wheel_scroll_dy, wheel_zoom_command, CancelToken, ChromeLayout, Command, DecodedImage,
-        DoubleClickAction, Effect, Event, Generation, HitZone, HookContext, HookDecision, HookKey,
-        IconSpawn, ImageCommand, ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, Presented,
-        Preview, PreviewError, PreviewLimits, PreviewState, PxRect, QuickInfo, RepeatFilter,
-        ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels, ShowGate,
-        ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold,
-        ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, FIRST_RUN_SHOWN,
-        FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS,
-        SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP, VERSION,
+        should_fetch_shell_icon, should_keep_shell_icon_pixels, should_reload_after_pointer,
+        should_reload_after_shell_event, should_request_shell_icon, should_show_first_run_balloon,
+        small_icon_px, step, tick_elapsed_ms, typeahead_for_decision, typeahead_window_ms,
+        unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken, ChromeLayout,
+        Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone, HookContext,
+        HookDecision, HookKey, IconSpawn, ImageCommand, ImageFrame, ImageView, KeyPhase, Modifiers,
+        NavKey, Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, QuickInfo,
+        RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels,
+        ShowGate, ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind,
+        ZoomHold, ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE,
+        FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID,
+        NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -76,17 +76,18 @@ mod win {
         GetDateFormatEx, GetTimeFormatEx, DATE_LONGDATE, TIME_NOSECONDS,
     };
     use windows::Win32::Graphics::Gdi::{
-        AlphaBlend, BeginPaint, ClientToScreen, CreateCompatibleDC, CreateDIBSection, CreateFontW,
-        CreatePen, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, ExcludeClipRect,
-        FillRect, GetDC, GetDIBits, GetMonitorInfoW, GetObjectW, GetSysColorBrush, GetTextFaceW,
-        IntersectClipRect, InvalidateRect, MonitorFromWindow, ReleaseDC, RestoreDC, RoundRect,
-        SaveDC, ScreenToClient, SelectObject, SetBkMode, SetBrushOrgEx, SetStretchBltMode,
-        SetTextColor, StretchDIBits, AC_SRC_ALPHA, AC_SRC_OVER, BITMAP, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET,
-        DIB_RGB_COLORS, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
-        DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL,
-        FW_SEMIBOLD, HALFTONE, HBITMAP, HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        PAINTSTRUCT, PS_SOLID, RGBQUAD, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
+        AlphaBlend, BeginPaint, BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC,
+        CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject,
+        DrawTextW, EndPaint, ExcludeClipRect, FillRect, GetDC, GetDIBits, GetMonitorInfoW,
+        GetObjectW, GetSysColorBrush, GetTextFaceW, IntersectClipRect, InvalidateRect,
+        MonitorFromWindow, ReleaseDC, RestoreDC, RoundRect, SaveDC, ScreenToClient, SelectObject,
+        SetBkMode, SetBrushOrgEx, SetStretchBltMode, SetTextColor, StretchDIBits, AC_SRC_ALPHA,
+        AC_SRC_OVER, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
+        CLEARTYPE_QUALITY, COLOR_WINDOW, DEFAULT_CHARSET, DIB_RGB_COLORS, DRAW_TEXT_FORMAT,
+        DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
+        DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_NORMAL, FW_SEMIBOLD, HALFTONE, HBITMAP,
+        HDC, HFONT, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, PS_SOLID, RGBQUAD,
+        SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
     };
     use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, WIN32_FIND_DATAW};
     use windows::Win32::System::Com::{
@@ -256,6 +257,9 @@ mod win {
         /// Generation whose lookup already exceeded the timeout. Not retried.
         given_up: Option<Generation>,
         pixels: Option<std::sync::Arc<ShellIconPixels>>,
+        /// Path and size of the last accepted lookup. Set on success and on a
+        /// finished miss so the watch timer does not start the same fetch again.
+        pixels_for: Option<ShellIconWanted>,
         last_icon_rect: Option<PxRect>,
     }
 
@@ -1500,6 +1504,8 @@ mod win {
                 open_current_file();
                 LRESULT(0)
             }
+            // Painted in WM_PAINT. Returning 1 skips the class background brush
+            // so an icon invalidation does not flash white first.
             WM_ERASEBKGND => LRESULT(1),
             WM_PAINT => {
                 paint_preview(hwnd);
@@ -1551,6 +1557,7 @@ mod win {
                         app.pan_drag = PanDrag::idle();
                         app.suppress_dblclk = false;
                         app.shell_icon.pixels = None;
+                        app.shell_icon.pixels_for = None;
                         app.shell_icon.last_icon_rect = None;
                         app.shell_icon.wanted = None;
                         publish_preview_hwnd(HWND::default());
@@ -1642,11 +1649,31 @@ mod win {
                 )
         });
         if accept {
-            if let Some(pixels) = msg.pixels {
+            let already_shown =
                 with_app_mut(|app| {
-                    app.shell_icon.pixels = Some(std::sync::Arc::new(pixels));
+                    let identity =
+                        app.shell_icon.wanted.clone().filter(|wanted| {
+                            wanted.gen == msg.gen && wanted.size_px == msg.size_px
+                        });
+                    let already_shown =
+                        identity.as_ref().is_some_and(|id| {
+                            app.shell_icon.pixels.is_some()
+                                && app.shell_icon.pixels_for.as_ref().is_some_and(|cur| {
+                                    cur.path == id.path && cur.size_px == id.size_px
+                                })
+                        });
+                    if let Some(id) = identity {
+                        app.shell_icon.pixels_for = Some(id);
+                    }
+                    already_shown
                 });
-                invalidate_shell_icon(hwnd);
+            if let Some(pixels) = msg.pixels {
+                if !already_shown {
+                    with_app_mut(|app| {
+                        app.shell_icon.pixels = Some(std::sync::Arc::new(pixels));
+                    });
+                    invalidate_shell_icon(hwnd);
+                }
             }
         }
         maybe_start_icon_worker();
@@ -2058,9 +2085,28 @@ mod win {
     fn clear_shell_icon_pixels() {
         with_app_mut(|app| {
             app.shell_icon.pixels = None;
+            app.shell_icon.pixels_for = None;
             app.shell_icon.last_icon_rect = None;
             app.shell_icon.wanted = None;
         });
+    }
+
+    /// Drop the cached icon unless the next preview is the same file.
+    fn keep_or_clear_shell_icon(next_path: Option<&Path>) {
+        let keep = with_app(|app| {
+            next_path.is_some_and(|next| {
+                should_keep_shell_icon_pixels(
+                    app.shell_icon
+                        .pixels_for
+                        .as_ref()
+                        .map(|id| id.path.as_path()),
+                    next,
+                ) && app.shell_icon.pixels.is_some()
+            })
+        });
+        if !keep {
+            clear_shell_icon_pixels();
+        }
     }
 
     /// After the window is showing an unsupported/quick-info preview, ask for
@@ -2105,7 +2151,13 @@ mod win {
         maybe_abandon_timed_out_icon();
         let wanted = with_app(|app| {
             let wanted = app.shell_icon.wanted.clone()?;
-            if !should_retry_icon_request(wanted.gen, app.shell_icon.given_up) {
+            let pixels = app.shell_icon.pixels_for.as_ref();
+            if !should_fetch_shell_icon(
+                Some((wanted.gen, wanted.path.as_path(), wanted.size_px)),
+                pixels.map(|id| (id.gen, id.path.as_path(), id.size_px)),
+                app.shell_icon.inflight.map(|inf| (inf.gen, inf.size_px)),
+                app.shell_icon.given_up,
+            ) {
                 return None;
             }
             let inflight = app
@@ -2559,7 +2611,13 @@ mod win {
     /// could not be created. An existing window keeps its pixel size; only a
     /// new window takes the remembered (or default) outer size.
     fn fill_preview_window() -> bool {
-        clear_shell_icon_pixels();
+        let next_path = with_app(|app| match &app.state {
+            PreviewState::Showing { path, .. }
+            | PreviewState::Failed { path, .. }
+            | PreviewState::PendingShow { path, .. } => Some(path.clone()),
+            _ => None,
+        });
+        keep_or_clear_shell_icon(next_path.as_deref());
         let (presented, anchor, instance, existing) = with_app(|app| {
             (
                 presented_from(&app.state),
@@ -3816,7 +3874,8 @@ mod win {
         );
         // The image fills its own rect after the header. Skipping the body
         // here lets that path exclude the bitmap and avoid a white flash.
-        if snap.image.is_none() {
+        // The unsupported-file icon path paints the body off-screen first.
+        if snap.image.is_none() && !snap.reserve_shell_icon {
             fill_rect(dc, &body, rgb(255, 255, 255));
         }
         let text_right = (width - close_w).max(pad);
@@ -3887,21 +3946,99 @@ mod win {
         if let Some(image) = snap.image.as_deref() {
             paint_image(dc, image, &body, dpi, snap.image_view);
         } else if let Some(message) = snap.message.as_deref() {
-            let left = pad.min(width / 4);
-            let right = (width - pad).max(left);
-            let area = RECT {
-                left,
-                top: header_h,
-                right,
-                bottom: height,
-            };
-            paint_message(dc, message, area, snap.header_font);
             if snap.reserve_shell_icon {
-                paint_reserved_shell_icon(hwnd, dc, message, area, snap);
+                paint_unsupported_body(hwnd, dc, message, body, pad, width, snap);
             } else {
+                let area = message_body_area(body, pad, width);
+                paint_message(dc, message, area, snap.header_font);
                 with_app_mut(|app| app.shell_icon.last_icon_rect = None);
             }
         }
+    }
+
+    fn message_body_area(body: RECT, pad: i32, client_width: i32) -> RECT {
+        let left = pad.min(client_width / 4);
+        let right = (client_width - pad).max(left);
+        RECT {
+            left,
+            top: body.top,
+            right,
+            bottom: body.bottom,
+        }
+    }
+
+    /// White fill, message, and icon composed off-screen, then copied once.
+    fn paint_unsupported_body(
+        hwnd: HWND,
+        dc: HDC,
+        message: &str,
+        body: RECT,
+        pad: i32,
+        client_width: i32,
+        snap: &PaintSnap,
+    ) {
+        if paint_unsupported_body_buffered(hwnd, dc, message, body, pad, client_width, snap) {
+            return;
+        }
+        fill_rect(dc, &body, rgb(255, 255, 255));
+        let area = message_body_area(body, pad, client_width);
+        paint_message(dc, message, area, snap.header_font);
+        paint_reserved_shell_icon(hwnd, dc, message, area, snap, 0, 0);
+    }
+
+    fn paint_unsupported_body_buffered(
+        hwnd: HWND,
+        dc: HDC,
+        message: &str,
+        body: RECT,
+        pad: i32,
+        client_width: i32,
+        snap: &PaintSnap,
+    ) -> bool {
+        let width = body.right.saturating_sub(body.left);
+        let height = body.bottom.saturating_sub(body.top);
+        if width <= 0 || height <= 0 {
+            return false;
+        }
+        let mem = unsafe { CreateCompatibleDC(dc) };
+        if mem.is_invalid() {
+            return false;
+        }
+        let bmp = unsafe { CreateCompatibleBitmap(dc, width, height) };
+        if bmp.is_invalid() {
+            unsafe {
+                let _ = DeleteDC(mem);
+            }
+            return false;
+        }
+        let previous = unsafe { SelectObject(mem, bmp) };
+        let local_body = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
+        fill_rect(mem, &local_body, rgb(255, 255, 255));
+        let client_area = message_body_area(body, pad, client_width);
+        let area = RECT {
+            left: client_area.left.saturating_sub(body.left),
+            top: 0,
+            right: client_area.right.saturating_sub(body.left),
+            bottom: height,
+        };
+        paint_message(mem, message, area, snap.header_font);
+        paint_reserved_shell_icon(hwnd, mem, message, area, snap, body.left, body.top);
+        let copied = unsafe { BitBlt(dc, body.left, body.top, width, height, mem, 0, 0, SRCCOPY) };
+        if !previous.is_invalid() {
+            unsafe {
+                let _ = SelectObject(mem, previous);
+            }
+        }
+        unsafe {
+            let _ = DeleteObject(bmp);
+            let _ = DeleteDC(mem);
+        }
+        copied.is_ok()
     }
 
     /// Draw `image` in `body` at the current zoom. The background is filled
@@ -4037,7 +4174,19 @@ mod win {
 
     /// Text stays where `paint_message` put it. The icon uses leftover space
     /// above that block so a late bitmap cannot move the words.
-    fn paint_reserved_shell_icon(hwnd: HWND, dc: HDC, message: &str, area: RECT, snap: &PaintSnap) {
+    ///
+    /// `origin_x` / `origin_y` map DC-local layout into client coordinates for
+    /// invalidation. Direct paints pass 0, 0. A memory-DC body paint passes
+    /// the body's client origin.
+    fn paint_reserved_shell_icon(
+        hwnd: HWND,
+        dc: HDC,
+        message: &str,
+        area: RECT,
+        snap: &PaintSnap,
+        origin_x: i32,
+        origin_y: i32,
+    ) {
         let area_w = (area.right - area.left).max(0);
         let text_h = measure_message_height(dc, message, area_w, snap.header_font);
         let dpi = dpi_for_anchor(hwnd);
@@ -4054,7 +4203,13 @@ mod win {
             shell_icon_gap_px(dpi),
             shell_icon_min_px(dpi),
         );
-        with_app_mut(|app| app.shell_icon.last_icon_rect = layout.icon);
+        let client_icon = layout.icon.map(|rect| PxRect {
+            left: rect.left.saturating_add(origin_x),
+            top: rect.top.saturating_add(origin_y),
+            right: rect.right.saturating_add(origin_x),
+            bottom: rect.bottom.saturating_add(origin_y),
+        });
+        with_app_mut(|app| app.shell_icon.last_icon_rect = client_icon);
         if let (Some(dest), Some(pixels)) = (layout.icon, snap.shell_icon.as_deref()) {
             paint_shell_icon(dc, pixels, dest);
         }
