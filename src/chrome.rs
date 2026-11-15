@@ -273,8 +273,10 @@ pub fn min_physical_size(dpi: u32) -> PxSize {
 
 /// Last user-chosen outer size, in logical pixels, for this process.
 ///
-/// Nothing is stored until the user finishes a resize. Message and text
-/// previews share one size after that.
+/// Nothing is written to disk or the registry. Nothing is stored until the
+/// user finishes a resize. Text, image, Markdown, and message previews then
+/// share that one size. A message window uses its smaller default only while
+/// no size has been stored. Image and Markdown defaults match text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SizeMemory {
     chosen: Option<LogicalSize>,
@@ -894,6 +896,90 @@ mod tests {
         assert_eq!(scaled_header_font(120), 20);
         assert_eq!(scaled_detail_font(120), 16);
         assert_eq!(scaled_header_pad(96), LOGICAL_HEADER_PAD_X);
+    }
+
+    #[test]
+    fn remembered_size_is_shared_by_every_kind_and_scales_with_dpi() {
+        let kinds = [
+            WindowKind::Content,
+            WindowKind::Image,
+            WindowKind::Markdown,
+            WindowKind::Message,
+        ];
+        let fresh = SizeMemory::new();
+        for kind in kinds {
+            assert_eq!(
+                fresh.opening_logical(kind),
+                default_logical_size(kind),
+                "{kind:?}"
+            );
+        }
+        // Image and Markdown already used the text default. A message stays
+        // smaller only until a resize is stored.
+        assert_eq!(
+            fresh.opening_logical(WindowKind::Image),
+            fresh.opening_logical(WindowKind::Content)
+        );
+        assert_eq!(
+            fresh.opening_logical(WindowKind::Markdown),
+            fresh.opening_logical(WindowKind::Content)
+        );
+        assert_ne!(
+            fresh.opening_logical(WindowKind::Message),
+            fresh.opening_logical(WindowKind::Content)
+        );
+
+        let mut mem = SizeMemory::new();
+        let Some(stored) = mem.remember_physical(951, 800, 120) else {
+            panic!("positive size");
+        };
+        assert_eq!(stored, physical_to_logical(951, 800, 120));
+        // The stored size is logical, not the 120 DPI pixel size.
+        assert_ne!(stored.width, 951);
+        assert_eq!(
+            stored,
+            LogicalSize {
+                width: 761,
+                height: 640
+            }
+        );
+        for kind in kinds {
+            assert_eq!(mem.opening_logical(kind), stored, "{kind:?}");
+            for dpi in [0, 96, 120, 144, 192] {
+                assert_eq!(
+                    mem.opening_physical(kind, dpi),
+                    logical_to_physical(stored, dpi),
+                    "{kind:?} at {dpi}"
+                );
+            }
+        }
+        // Chosen on one kind, opened later on another, at another DPI.
+        assert_eq!(
+            mem.opening_physical(WindowKind::Image, 120),
+            PxSize {
+                width: 951,
+                height: 800
+            }
+        );
+        assert_eq!(
+            mem.opening_physical(WindowKind::Markdown, 96),
+            PxSize {
+                width: 761,
+                height: 640
+            }
+        );
+        assert_eq!(
+            mem.opening_physical(WindowKind::Message, 192),
+            logical_to_physical(stored, 192)
+        );
+        assert_eq!(
+            mem.opening_physical(WindowKind::Content, 0),
+            mem.opening_physical(WindowKind::Image, 96)
+        );
+        assert_ne!(
+            mem.opening_physical(WindowKind::Markdown, 192),
+            mem.opening_physical(WindowKind::Markdown, 120)
+        );
     }
 
     #[test]
