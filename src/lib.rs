@@ -47,11 +47,12 @@ pub use keys::{
     classify_shell_surface, classify_typeahead_vk, decide_hook_key, esc_action, hook_key_from_vk,
     is_desktop_foreground_class, is_desktop_host_class, nav_reload_due, nav_reload_remaining,
     should_intercept_esc, should_intercept_space, typeahead_for_decision, typeahead_window_ms,
-    wheel_scroll_dy, EscAction, EscQuery, FocusContext, HookContext, HookDecision, HookKey,
-    KeyPhase, Modifiers, NavKey, RepeatFilter, ScrollHold, ScrollOp, SessionPhase, ShellSurface,
-    TrackedKey, Typeahead, TypeaheadKey, ZoomHold, ZoomKey, ZoomOp, CLASS_CABINET, CLASS_DEF_VIEW,
-    CLASS_DESKTOP_LIST, CLASS_EDIT, CLASS_EXPLORER_LIST, CLASS_PREVIEW, CLASS_PROGMAN,
-    CLASS_TASKBAR, CLASS_WORKERW, DESKTOP_LIST_TITLE, NAV_RELOAD_DELAY_MS,
+    wheel_scroll_dy, DesktopSelection, EscAction, EscQuery, FocusContext, HookContext,
+    HookDecision, HookKey, KeyPhase, Modifiers, NavKey, RepeatFilter, ScrollHold, ScrollOp,
+    SessionPhase, ShellSurface, TrackedKey, Typeahead, TypeaheadKey, ZoomHold, ZoomKey, ZoomOp,
+    CLASS_CABINET, CLASS_DEF_VIEW, CLASS_DESKTOP_LIST, CLASS_EDIT, CLASS_EXPLORER_LIST,
+    CLASS_PREVIEW, CLASS_PROGMAN, CLASS_TASKBAR, CLASS_WORKERW, DESKTOP_LIST_TITLE,
+    DESKTOP_SELECTION_TIMEOUT_MS, NAV_RELOAD_DELAY_MS,
 };
 pub use markdown::{
     document_to_rtf, escape_rtf, heading_half_points, is_markdown_path, parse_markdown,

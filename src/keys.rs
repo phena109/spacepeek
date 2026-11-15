@@ -1,7 +1,8 @@
 //! Keyboard policy for the low-level hook.
 //!
-//! The hook thread only collects booleans and a tick. [`decide_hook_key`]
-//! turns that into an action. Timing helpers take the tick as an input so
+//! The hook thread collects booleans, a tick, and the desktop icon
+//! selection count when that list is focused. [`decide_hook_key`] turns
+//! that into an action. Timing helpers take the tick as an input so
 //! wraparound can be tested without a clock.
 
 /// Explorer's top-level window class (`CabinetWClass`).
@@ -37,7 +38,8 @@ pub enum ShellSurface {
 }
 
 impl ShellSurface {
-    /// True when Space, arrows, and type-ahead apply to this surface's item list.
+    /// True when the item list is focused. Arrows and type-ahead use that.
+    /// Space does too, unless the desktop selection count is known to be zero.
     pub const fn list_focused(self) -> bool {
         matches!(self, Self::Explorer | Self::Desktop)
     }
@@ -155,12 +157,36 @@ impl Default for Modifiers {
     }
 }
 
+/// How many icons the desktop `SysListView32` reports as selected.
+///
+/// Explorer never sets [`DesktopSelection::Known`]. Its list is not a
+/// cross-process list view, and the hook does not send it
+/// `LVM_GETSELECTEDCOUNT`. [`DesktopSelection::Unknown`] means the desktop
+/// query timed out or failed: Space is taken, which is the previous behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DesktopSelection {
+    /// `LVM_GETSELECTEDCOUNT` succeeded. Zero means no icon is selected.
+    Known(u32),
+    /// Not the desktop, or the call timed out or failed.
+    #[default]
+    Unknown,
+}
+
+/// Milliseconds `SendMessageTimeoutW` may block while reading that count.
+/// A timeout is [`DesktopSelection::Unknown`], and Space is taken.
+pub const DESKTOP_SELECTION_TIMEOUT_MS: u32 = 30;
+
 /// Everything the hook knows when a key goes down, without Win32 types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HookContext {
     pub phase: SessionPhase,
     /// Explorer's file list or the desktop icon list is focused.
     pub explorer_list_focused: bool,
+    /// Focused shell surface. [`HookContext::desktop_selection`] changes
+    /// Space only when this is [`ShellSurface::Desktop`].
+    pub surface: ShellSurface,
+    /// Desktop icon selection. Explorer leaves this [`DesktopSelection::Unknown`].
+    pub desktop_selection: DesktopSelection,
     pub preview_is_foreground: bool,
     pub origin_is_foreground: bool,
     pub modifiers: Modifiers,
@@ -334,6 +360,14 @@ fn decide_space(ctx: &HookContext) -> HookDecision {
     if ctx.typeahead_active && ctx.explorer_list_focused {
         return HookDecision::Pass;
     }
+    // A confirmed empty desktop selection must reach the icon list. One or
+    // more selected icons still take Space. Unknown (timeout or failure)
+    // keeps the previous take-Space behaviour. Explorer never matches here.
+    if ctx.surface == ShellSurface::Desktop
+        && matches!(ctx.desktop_selection, DesktopSelection::Known(0))
+    {
+        return HookDecision::Pass;
+    }
     if ctx.explorer_list_focused {
         HookDecision::Space
     } else {
@@ -425,6 +459,10 @@ fn hook_context_from_focus(ctx: &FocusContext) -> HookContext {
             SessionPhase::Hidden
         },
         explorer_list_focused,
+        surface,
+        // Class names do not know the icon count. The hook fills this in
+        // for [`ShellSurface::Desktop`] only. Tests set it directly.
+        desktop_selection: DesktopSelection::Unknown,
         preview_is_foreground,
         origin_is_foreground: explorer_list_focused,
         modifiers: if ctx.modifiers_down {
@@ -468,6 +506,9 @@ pub fn esc_action(query: EscQuery) -> EscAction {
     let ctx = HookContext {
         phase: query.phase,
         explorer_list_focused: query.origin_is_foreground,
+        // Esc does not read the desktop selection count.
+        surface: ShellSurface::Other,
+        desktop_selection: DesktopSelection::Unknown,
         preview_is_foreground: query.preview_is_foreground,
         origin_is_foreground: query.origin_is_foreground,
         modifiers: if query.modifiers_down {
@@ -1043,6 +1084,8 @@ mod tests {
         HookContext {
             phase,
             explorer_list_focused: true,
+            surface: ShellSurface::Explorer,
+            desktop_selection: DesktopSelection::Unknown,
             preview_is_foreground: false,
             origin_is_foreground: true,
             modifiers: Modifiers::NONE,
@@ -2049,14 +2092,29 @@ mod tests {
             ),
             ShellSurface::Other
         );
-        assert!(!should_intercept_space(&ctx_parent(
+        let rename = ctx_parent(
             CLASS_PROGMAN,
             CLASS_EDIT,
             CLASS_DESKTOP_LIST,
             "notes.txt",
             false,
-            false
-        )));
+            false,
+        );
+        assert!(!should_intercept_space(&rename));
+        let mut hook = hook_context_from_focus(&rename);
+        assert_eq!(hook.surface, ShellSurface::Other);
+        for selection in [
+            DesktopSelection::Known(0),
+            DesktopSelection::Known(2),
+            DesktopSelection::Unknown,
+        ] {
+            hook.desktop_selection = selection;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Pass,
+                "{selection:?}"
+            );
+        }
     }
 
     #[test]
@@ -2130,12 +2188,73 @@ mod tests {
     }
 
     #[test]
-    fn desktop_empty_selection_is_decided_after_the_hook() {
-        // Same as Explorer: the hook cannot query the shell selection, so it
-        // takes Space whenever the list is focused. The UI thread reads the
-        // path and, when it is empty, starts no preview. Re-injecting Space
-        // would re-enter the hook, so the key is not put back.
-        assert!(should_intercept_space(&desktop_list_ctx()));
+    fn desktop_space_follows_the_icon_selection_count() {
+        for host in [CLASS_PROGMAN, CLASS_WORKERW] {
+            let mut focus = desktop_list_ctx();
+            focus.foreground_class = host.to_string();
+            let mut hook = hook_context_from_focus(&focus);
+            assert_eq!(hook.surface, ShellSurface::Desktop, "{host}");
+
+            hook.desktop_selection = DesktopSelection::Known(0);
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Pass,
+                "{host} empty"
+            );
+            // The desktop still has focus while a preview is open. An empty
+            // selection must reach the desktop instead of closing the preview.
+            hook.phase = SessionPhase::Visible;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Pass,
+                "{host} empty while visible"
+            );
+
+            hook.desktop_selection = DesktopSelection::Known(2);
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Space,
+                "{host} selected"
+            );
+            hook.phase = SessionPhase::Hidden;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Space,
+                "{host} selected while hidden"
+            );
+
+            // Timeout or failure. Take Space, as before the count was readable.
+            hook.desktop_selection = DesktopSelection::Unknown;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Space,
+                "{host} unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn explorer_space_ignores_a_desktop_selection_count() {
+        let mut hook = list_ctx(SessionPhase::Hidden);
+        assert_eq!(hook.surface, ShellSurface::Explorer);
+        for selection in [
+            DesktopSelection::Unknown,
+            DesktopSelection::Known(0),
+            DesktopSelection::Known(2),
+        ] {
+            hook.desktop_selection = selection;
+            assert_eq!(
+                decide_hook_key(&hook, HookKey::Space),
+                HookDecision::Space,
+                "{selection:?}"
+            );
+        }
+        let mut visible = list_ctx(SessionPhase::Visible);
+        visible.desktop_selection = DesktopSelection::Known(0);
+        assert_eq!(
+            decide_hook_key(&visible, HookKey::Space),
+            HookDecision::Space
+        );
         assert!(should_intercept_space(&ctx(
             CLASS_CABINET,
             CLASS_EXPLORER_LIST,

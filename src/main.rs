@@ -57,15 +57,16 @@ mod win {
         should_request_shell_icon, should_retry_icon_request, should_show_first_run_balloon,
         small_icon_px, step, tick_elapsed_ms, typeahead_for_decision, typeahead_window_ms,
         unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken, ChromeLayout,
-        Command, DecodedImage, DoubleClickAction, Effect, Event, Generation, HitZone, HookContext,
-        HookDecision, HookKey, IconSpawn, ImageCommand, ImageFrame, ImageView, KeyPhase, Modifiers,
-        NavKey, Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, QuickInfo,
-        RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels,
-        ShellSurface, ShowGate, ShowOutcome, SizeMemory, TrackedKey, Typeahead, TypeaheadKey,
-        WindowKind, ZoomHold, ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE,
-        CLASS_CABINET, CLASS_PROGMAN, CLASS_WORKERW, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY,
-        FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS,
-        SHELL_ICON_WORKER_CAP, VERSION,
+        Command, DecodedImage, DesktopSelection, DoubleClickAction, Effect, Event, Generation,
+        HitZone, HookContext, HookDecision, HookKey, IconSpawn, ImageCommand, ImageFrame,
+        ImageView, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits,
+        PreviewState, PxRect, QuickInfo, RepeatFilter, ScrollHold, ScrollOp, SelectionTarget,
+        SessionPhase, ShellIconPixels, ShellSurface, ShowGate, ShowOutcome, SizeMemory, TrackedKey,
+        Typeahead, TypeaheadKey, WindowKind, ZoomHold, ZoomKey, ZoomOp, BALLOON_BODY,
+        BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET, CLASS_PROGMAN, CLASS_WORKERW,
+        DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME,
+        ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP,
+        VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -115,6 +116,7 @@ mod win {
     };
     use windows::Win32::UI::Controls::{
         IImageList, LoadIconWithScaleDown, ILD_IMAGE, ILD_PRESERVEALPHA, ILD_TRANSPARENT,
+        LVM_GETSELECTEDCOUNT,
     };
     use windows::Win32::UI::HiDpi::{
         GetDpiForMonitor, GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi,
@@ -147,29 +149,29 @@ mod win {
         GetSystemMetrics, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HideCaret,
         IsWindow, IsWindowVisible, KillTimer, LoadCursorW, LoadImageW, MessageBoxW, MoveWindow,
         PeekMessageW, PostMessageW, PostQuitMessage, PostThreadMessageW, RegisterClassExW,
-        RegisterWindowMessageW, SendMessageW, SetClassLongPtrW, SetForegroundWindow, SetTimer,
-        SetWindowLongPtrW, SetWindowPos, SetWindowTextW, SetWindowsHookExW, ShowWindow,
-        TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, CS_DBLCLKS,
-        CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY,
-        EVENT_OBJECT_SELECTION, EVENT_OBJECT_SELECTIONWITHIN, EVENT_SYSTEM_FOREGROUND, GA_ROOT,
-        GCLP_HICON, GCLP_HICONSM, GUITHREADINFO, GWLP_WNDPROC, HHOOK, HICON, HMENU, HTBOTTOM,
-        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-        HTTOPRIGHT, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2, IDC_ARROW, IMAGE_FLAGS,
-        IMAGE_ICON, KBDLLHOOKSTRUCT, LLKHF_UP, MA_NOACTIVATE, MB_ICONERROR, MB_ICONINFORMATION,
-        MB_OK, MESSAGEBOX_STYLE, MF_STRING, MINMAXINFO, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE,
-        SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN,
-        SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-        TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE,
-        WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CHAR, WM_CLOSE,
-        WM_CONTEXTMENU, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE,
-        WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-        WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-        WM_MOUSEWHEEL, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL, WM_PAINT,
-        WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT,
-        WM_SETICON, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WM_VSCROLL,
-        WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD, WS_CLIPCHILDREN, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP, WS_THICKFRAME, WS_VISIBLE,
-        WS_VSCROLL,
+        RegisterWindowMessageW, SendMessageTimeoutW, SendMessageW, SetClassLongPtrW,
+        SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+        SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
+        WindowFromPoint, CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, ES_AUTOVSCROLL,
+        ES_MULTILINE, ES_READONLY, EVENT_OBJECT_SELECTION, EVENT_OBJECT_SELECTIONWITHIN,
+        EVENT_SYSTEM_FOREGROUND, GA_ROOT, GCLP_HICON, GCLP_HICONSM, GUITHREADINFO, GWLP_WNDPROC,
+        HHOOK, HICON, HMENU, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT,
+        HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICONINFO, ICON_BIG, ICON_SMALL, ICON_SMALL2,
+        IDC_ARROW, IMAGE_FLAGS, IMAGE_ICON, KBDLLHOOKSTRUCT, LLKHF_UP, MA_NOACTIVATE, MB_ICONERROR,
+        MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MF_STRING, MINMAXINFO, MSG, MSLLHOOKSTRUCT,
+        PM_NOREMOVE, SB_BOTTOM, SB_PAGEDOWN, SB_PAGEUP, SB_TOP, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+        SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+        SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+        WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT,
+        WINEVENT_SKIPOWNPROCESS, WM_APP, WM_CHAR, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY,
+        WM_DPICHANGED, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KEYUP,
+        WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN,
+        WM_MBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
+        WM_NCLBUTTONDBLCLK, WM_NCMOUSEMOVE, WM_NULL, WM_PAINT, WM_QUIT, WM_RBUTTONDBLCLK,
+        WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_SYSKEYDOWN,
+        WM_SYSKEYUP, WM_TIMER, WM_USER, WM_VSCROLL, WNDCLASSEXW, WNDCLASS_STYLES, WS_CHILD,
+        WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_HSCROLL, WS_POPUP,
+        WS_THICKFRAME, WS_VISIBLE, WS_VSCROLL,
     };
 
     const PREVIEW_CLASS: &str = "SpacepeekPreview";
@@ -795,7 +797,10 @@ mod win {
         phase: KeyPhase,
         tick: u32,
     ) -> LRESULT {
-        let ctx = hook_context(tick);
+        // The desktop selection count matters for Space. Esc does not read it,
+        // and a key-up follows the latch from the first down.
+        let read_desktop_selection = phase == KeyPhase::Down && matches!(key, HookKey::Space);
+        let ctx = hook_context_for(tick, read_desktop_selection);
         let decision = decide_hook_key(&ctx, key);
         if phase == KeyPhase::Down {
             note_toggle_typeahead(&ctx, key, &decision, tick);
@@ -931,8 +936,22 @@ mod win {
     }
 
     fn hook_context(tick: u32) -> HookContext {
+        hook_context_for(tick, false)
+    }
+
+    fn hook_context_for(tick: u32, read_desktop_selection: bool) -> HookContext {
         let modifiers = read_modifiers();
-        let explorer_list_focused = explorer_list_focused();
+        let foreground = unsafe { GetForegroundWindow() };
+        let surface = shell_surface_of(foreground);
+        let explorer_list_focused = surface.list_focused();
+        // Desktop Space only. Explorer is classified and then skipped, so it
+        // is not sent `LVM_GETSELECTEDCOUNT`. A timeout or a failed call is
+        // `Unknown`, and Space is taken as before.
+        let desktop_selection = if read_desktop_selection && surface == ShellSurface::Desktop {
+            desktop_list_selection(focus_hwnd(foreground))
+        } else {
+            DesktopSelection::Unknown
+        };
         let typeahead_active = explorer_list_focused
             && TYPEAHEAD.with(|slot| {
                 let mut typeahead = slot.borrow_mut();
@@ -942,11 +961,44 @@ mod win {
         HookContext {
             phase: current_phase(),
             explorer_list_focused,
+            surface,
+            desktop_selection,
             preview_is_foreground: preview_is_foreground(),
             origin_is_foreground: origin_is_foreground(),
             modifiers,
             typeahead_active,
             image_visible: IMAGE_VISIBLE.load(Ordering::Acquire),
+        }
+    }
+
+    /// `LVM_GETSELECTEDCOUNT` on the desktop `SysListView32`. The message
+    /// takes no pointers, so it works cross-process. Call this only after
+    /// the focus has been classified as [`ShellSurface::Desktop`].
+    ///
+    /// A zero return from `SendMessageTimeoutW` is a timeout or a failure.
+    /// The count slot is unchanged in that case, so it must not be read as
+    /// "nothing selected". That outcome is [`DesktopSelection::Unknown`],
+    /// and the hook still takes Space.
+    fn desktop_list_selection(focus: HWND) -> DesktopSelection {
+        if focus.0.is_null() {
+            return DesktopSelection::Unknown;
+        }
+        let mut result = 0usize;
+        let returned = unsafe {
+            SendMessageTimeoutW(
+                focus,
+                LVM_GETSELECTEDCOUNT,
+                WPARAM(0),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                DESKTOP_SELECTION_TIMEOUT_MS,
+                Some(&mut result),
+            )
+        };
+        if returned.0 == 0 {
+            DesktopSelection::Unknown
+        } else {
+            DesktopSelection::Known(u32::try_from(result).unwrap_or(u32::MAX))
         }
     }
 
@@ -1686,11 +1738,12 @@ mod win {
             app.desktop_host_hwnd = desktop_host;
         });
         let path = nonempty_path(unsafe { selected_path_for(surface, explorer) });
-        // The hook cannot query the selection. That COM call belongs on this
-        // STA thread; doing it inside the low-level hook would stall every
-        // keystroke. Space was already swallowed. With no filesystem path,
-        // opening a window is the failure — do nothing. Re-injecting the key
-        // would re-enter the hook.
+        // The path is read here. Explorer's list has no cross-process count,
+        // and this function is unchanged for that case. The desktop count was
+        // already read in the hook: zero icons never posts Space. A timeout
+        // there still posts, and so does a count of one or more. With no
+        // filesystem path, do nothing. Re-injecting the key would re-enter
+        // the hook.
         if let Some(path) = path {
             dispatch(Event::SpacePressed(path));
         }
