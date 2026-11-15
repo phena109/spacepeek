@@ -757,6 +757,27 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_same_path_reload_does_not_start_a_new_load() {
+        let cancel = CancelToken::new();
+        let failed = PreviewState::Failed {
+            gen: Generation::new(1),
+            path: path(),
+            error: PreviewError::binary(),
+        };
+        let (state, effects) = step(failed, Event::SelectionChanged(path()), &cancel);
+        assert_eq!(
+            state,
+            PreviewState::Failed {
+                gen: Generation::new(1),
+                path: path(),
+                error: PreviewError::binary(),
+            }
+        );
+        assert!(effects.is_empty());
+        assert!(!cancel.is_cancelled(&Generation::new(1)));
+    }
+
+    #[test]
     fn selection_change_during_load_cancels_the_previous_file() {
         let cancel = CancelToken::new();
         let (state, _) = step(PreviewState::Hidden, Event::SpacePressed(path()), &cancel);

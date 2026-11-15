@@ -5,6 +5,8 @@
 //! where that icon sits relative to the existing message text, and whether a
 //! posted result is still for the live preview.
 
+use std::path::Path;
+
 use crate::geometry::{effective_dpi, scale_for_dpi, PxRect};
 use crate::preview::{CancelToken, Generation, PreviewError};
 
@@ -259,6 +261,44 @@ pub fn should_retry_icon_request(wanted_gen: Generation, given_up: Option<Genera
     given_up != Some(wanted_gen)
 }
 
+/// True when cached pixels belong to the file that is about to be shown.
+///
+/// A same-path reload must not drop the bitmap. A different path must.
+pub fn should_keep_shell_icon_pixels(cached_path: Option<&Path>, next_path: &Path) -> bool {
+    cached_path.is_some_and(|cached| cached == next_path)
+}
+
+/// True when a worker should still be started for `wanted`.
+///
+/// False when there is no request, that generation already timed out, a
+/// lookup for the same path and size already completed, or a worker is
+/// already fetching this generation and size. Path and size match even
+/// when the generation changed, so a same-path reload keeps the icon.
+pub fn should_fetch_shell_icon(
+    wanted: Option<(Generation, &Path, i32)>,
+    pixels: Option<(Generation, &Path, i32)>,
+    inflight: Option<(Generation, i32)>,
+    given_up: Option<Generation>,
+) -> bool {
+    let Some((gen, path, size_px)) = wanted else {
+        return false;
+    };
+    if !should_retry_icon_request(gen, given_up) {
+        return false;
+    }
+    if pixels
+        .is_some_and(|(_, cached_path, cached_size)| cached_path == path && cached_size == size_px)
+    {
+        return false;
+    }
+    if inflight.is_some_and(|(inflight_gen, inflight_size)| {
+        inflight_gen == gen && inflight_size == size_px
+    }) {
+        return false;
+    }
+    true
+}
+
 /// Whether a new icon worker may start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IconSpawn {
@@ -420,6 +460,7 @@ mod tests {
     use super::*;
     use crate::geometry::PxRect;
     use crate::preview::{DeniedKind, PreviewError};
+    use std::path::Path;
 
     fn body(width: i32, height: i32) -> PxRect {
         PxRect {
@@ -791,5 +832,126 @@ mod tests {
         let other = Generation::new(gen.value + 1);
         assert!(shell_icon_size_still_wanted(gen, 96, Some((other, 144))));
         assert!(shell_icon_size_still_wanted(gen, 96, None));
+    }
+
+    #[test]
+    fn matching_cached_icon_is_not_fetched_again() {
+        let gen = Generation::new(1);
+        let path = Path::new("notes.pdf");
+        let wanted = Some((gen, path, 96));
+        let pixels = Some((gen, path, 96));
+        // Watch timer: wanted stays set, inflight is cleared after success.
+        assert!(!should_fetch_shell_icon(wanted, pixels, None, None));
+        assert!(!should_fetch_shell_icon(
+            wanted,
+            pixels,
+            Some((gen, 96)),
+            None
+        ));
+    }
+
+    #[test]
+    fn first_icon_request_fetches() {
+        let gen = Generation::new(1);
+        let path = Path::new("notes.pdf");
+        assert!(should_fetch_shell_icon(
+            Some((gen, path, 96)),
+            None,
+            None,
+            None
+        ));
+        assert!(!should_fetch_shell_icon(None, None, None, None));
+        assert!(!should_fetch_shell_icon(
+            None,
+            Some((gen, path, 96)),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn same_path_new_generation_keeps_cached_icon() {
+        let path = Path::new("notes.pdf");
+        assert!(!should_fetch_shell_icon(
+            Some((Generation::new(2), path, 96)),
+            Some((Generation::new(1), path, 96)),
+            None,
+            None
+        ));
+        assert!(should_keep_shell_icon_pixels(Some(path), path));
+        assert!(!should_keep_shell_icon_pixels(
+            Some(path),
+            Path::new("other.pdf")
+        ));
+        assert!(!should_keep_shell_icon_pixels(None, path));
+    }
+
+    #[test]
+    fn dpi_size_change_fetches_again() {
+        let gen = Generation::new(1);
+        let path = Path::new("notes.pdf");
+        assert!(should_fetch_shell_icon(
+            Some((gen, path, 144)),
+            Some((gen, path, 96)),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn different_path_fetches() {
+        assert!(should_fetch_shell_icon(
+            Some((Generation::new(2), Path::new("other.pdf"), 96)),
+            Some((Generation::new(1), Path::new("notes.pdf"), 96)),
+            None,
+            None
+        ));
+        assert!(!should_keep_shell_icon_pixels(
+            Some(Path::new("notes.pdf")),
+            Path::new("other.pdf")
+        ));
+    }
+
+    #[test]
+    fn inflight_or_given_up_does_not_fetch() {
+        let gen = Generation::new(1);
+        let path = Path::new("notes.pdf");
+        assert!(!should_fetch_shell_icon(
+            Some((gen, path, 96)),
+            None,
+            Some((gen, 96)),
+            None
+        ));
+        assert!(should_fetch_shell_icon(
+            Some((gen, path, 144)),
+            None,
+            Some((gen, 96)),
+            None
+        ));
+        assert!(!should_fetch_shell_icon(
+            Some((gen, path, 96)),
+            None,
+            None,
+            Some(gen)
+        ));
+        assert!(should_fetch_shell_icon(
+            Some((Generation::new(2), path, 96)),
+            None,
+            None,
+            Some(gen)
+        ));
+    }
+
+    #[test]
+    fn completed_failed_lookup_is_not_retried() {
+        let gen = Generation::new(1);
+        let path = Path::new("notes.pdf");
+        // Identity of a finished lookup, even when no bitmap was stored.
+        assert!(!should_fetch_shell_icon(
+            Some((gen, path, 96)),
+            Some((gen, path, 96)),
+            None,
+            None
+        ));
     }
 }
