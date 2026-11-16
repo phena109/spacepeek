@@ -2686,6 +2686,22 @@ mod tests {
             assert!(preview.markdown_rtf.is_none(), "{name}");
         }
 
+        let gz = {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            use std::io::Write;
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(blue_svg()).unwrap();
+            encoder.finish().unwrap()
+        };
+        let gzip_svg = write_file(&dir, "gzip.svg", &gz);
+        let preview = load(&gzip_svg, PreviewLimits::default()).unwrap();
+        assert_eq!(
+            preview.image.as_ref().unwrap().format,
+            crate::image_preview::ImageFormat::Svg
+        );
+        assert!(preview.content.is_empty());
+
         let png = rgba_png(1, 1, &[9, 8, 7, 255]);
         let disguised = write_file(&dir, "pic.svg", &png);
         let preview = load(&disguised, PreviewLimits::default()).unwrap();

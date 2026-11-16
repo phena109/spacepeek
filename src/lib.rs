@@ -85,6 +85,7 @@ pub use state::{
 pub use svg::{
     ensure_system_fonts, inflate_svgz, is_svg_path, render_svg, sniff_svg, svg_output_size,
     svg_target_from_client, svg_target_from_opening, xml_element_depth, SvgError, SvgLimits,
-    SvgOutputSize, SvgTarget, SVGZ_MAX_DECOMPRESSED_BYTES, SVG_LOADER_STACK, SVG_MAX_FILE_BYTES,
-    SVG_MAX_NESTING, SVG_MAX_NODES, SVG_MAX_PIXELS, SVG_PARSE_BUDGET, SVG_SNIFF_BYTES,
+    SvgOutputSize, SvgTarget, SVGZ_MAX_DECOMPRESSED_BYTES, SVG_LOADER_STACK,
+    SVG_MAX_EMBEDDED_PIXELS, SVG_MAX_EMBEDDED_PIXELS_TOTAL, SVG_MAX_FILE_BYTES, SVG_MAX_NESTING,
+    SVG_MAX_NODES, SVG_MAX_PIXELS, SVG_PARSE_BUDGET, SVG_SNIFF_BYTES,
 };

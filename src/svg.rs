@@ -9,9 +9,19 @@
 //! - `resources_dir` is `None`, so relative paths do not resolve against a
 //!   directory.
 //! - `image_href_resolver.resolve_string` always returns `None`: `file://`,
-//!   `http(s)://`, and relative paths next to the SVG are not loaded.
+//!   `http(s)://`, and relative paths are not loaded for `<image>` or
+//!   `<feImage>`. `<use href="other.svg#id">` only resolves an id in this
+//!   document.
 //! - `resolve_data` accepts only `data:` PNG/JPEG/GIF/WebP within
-//!   [`SVG_MAX_EMBEDDED_BYTES`]. Nested `data:` SVG is refused.
+//!   [`SVG_MAX_EMBEDDED_BYTES`]. The header is read without decoding pixels.
+//!   An image whose width×height exceeds [`SVG_MAX_EMBEDDED_PIXELS`], or that
+//!   would push the document past [`SVG_MAX_EMBEDDED_PIXELS_TOTAL`], is
+//!   dropped. A header that cannot be read is dropped. Nested `data:` SVG
+//!   is refused.
+//! - Gzip is inflated once, up to [`SVGZ_MAX_DECOMPRESSED_BYTES`]. A second
+//!   gzip layer is rejected. usvg is given the inflated text via
+//!   `Tree::from_str`, so `Tree::from_data`'s own gzip inflate (no size cap)
+//!   is never reached.
 //! - `@font-face` URLs are not fetched: fonts come only from the process-wide
 //!   system [`fontdb`](usvg::fontdb) cache, and only when the SVG contains text.
 //!
@@ -24,8 +34,9 @@
 //! by a linear pre-scan before roxmltree or usvg run, so a 100k-deep tree
 //! cannot overflow the loader stack.
 
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -48,6 +59,11 @@ pub const SVG_MAX_NODES: u32 = 200_000;
 pub const SVG_MAX_PIXELS: u64 = 32_000_000;
 /// Largest decoded `data:` image payload we will hand to resvg.
 pub const SVG_MAX_EMBEDDED_BYTES: u64 = SVG_MAX_FILE_BYTES;
+/// One embedded `data:` image may claim at most this many pixels (16 MP).
+pub const SVG_MAX_EMBEDDED_PIXELS: u64 = 16_000_000;
+/// All embedded `data:` images in one document may claim at most this many
+/// pixels (64 MP). Counted from headers while parsing, before resvg decodes.
+pub const SVG_MAX_EMBEDDED_PIXELS_TOTAL: u64 = 64_000_000;
 /// XML element nesting cap. Checked by a linear pre-scan, then again by
 /// `usvg::Options::max_depth`, so a deep tree never reaches recursive parse
 /// on the loader thread (Rust's default stack is 2 MiB).
@@ -493,8 +509,15 @@ struct SvgSource {
 }
 
 fn prepare_source(bytes: &[u8], gzip: bool, limits: &SvgLimits) -> Result<SvgSource, SvgError> {
+    // Inflate at most once. `Tree::from_data` would inflate gzip magic again
+    // with no size cap, including a `.svg` that is actually gzip and a
+    // `.svgz` whose payload is gzip a second time.
     let xml_bytes = if gzip || bytes.starts_with(&GZIP_MAGIC) {
-        inflate_svgz(bytes, limits.max_decompressed_bytes)?
+        let inflated = inflate_svgz(bytes, limits.max_decompressed_bytes)?;
+        if inflated.starts_with(&GZIP_MAGIC) {
+            return Err(SvgError::Malformed);
+        }
+        inflated
     } else {
         bytes.to_vec()
     };
@@ -573,10 +596,14 @@ fn svg_options(
     fonts: Option<Arc<usvg::fontdb::Database>>,
     max_depth: u32,
 ) -> Options<'static> {
+    // One counter per parse. resvg calls the resolver while building the tree.
+    let embedded_pixels = Arc::new(AtomicU64::new(0));
     let mut opt = Options {
         resources_dir: None,
         image_href_resolver: ImageHrefResolver {
-            resolve_data: Box::new(resolve_embedded_image),
+            resolve_data: Box::new(move |mime, data, _| {
+                resolve_embedded_image(mime, data, &embedded_pixels)
+            }),
             resolve_string: Box::new(|_, _| None),
         },
         max_depth,
@@ -589,19 +616,75 @@ fn svg_options(
     opt
 }
 
-/// Only `data:` raster images. Nested SVG and anything else is dropped.
-fn resolve_embedded_image(mime: &str, data: Arc<Vec<u8>>, _opt: &Options) -> Option<ImageKind> {
+/// Only `data:` raster images whose header fits the pixel caps.
+///
+/// Nested SVG and anything else is dropped. A header that cannot be read is
+/// dropped. Pixel dimensions come from the container header, not a decode:
+/// resvg's raster path allocates the pixmap from that header at draw time.
+fn resolve_embedded_image(
+    mime: &str,
+    data: Arc<Vec<u8>>,
+    embedded_pixels: &AtomicU64,
+) -> Option<ImageKind> {
     if data.len() as u64 > SVG_MAX_EMBEDDED_BYTES {
         return None;
     }
     let mime = mime.to_ascii_lowercase();
-    match mime.as_str() {
-        "image/png" => Some(ImageKind::PNG(data)),
-        "image/jpeg" | "image/jpg" => Some(ImageKind::JPEG(data)),
-        "image/gif" => Some(ImageKind::GIF(data)),
-        "image/webp" => Some(ImageKind::WEBP(data)),
+    let format = embedded_image_format(&mime)?;
+    let pixels = embedded_raster_pixels(format, data.as_slice())?;
+    if pixels > SVG_MAX_EMBEDDED_PIXELS || !reserve_embedded_pixels(embedded_pixels, pixels) {
+        return None;
+    }
+    Some(match format {
+        image::ImageFormat::Png => ImageKind::PNG(data),
+        image::ImageFormat::Jpeg => ImageKind::JPEG(data),
+        image::ImageFormat::Gif => ImageKind::GIF(data),
+        image::ImageFormat::WebP => ImageKind::WEBP(data),
+        _ => return None,
+    })
+}
+
+fn embedded_image_format(mime: &str) -> Option<image::ImageFormat> {
+    match mime {
+        "image/png" => Some(image::ImageFormat::Png),
+        "image/jpeg" | "image/jpg" => Some(image::ImageFormat::Jpeg),
+        "image/gif" => Some(image::ImageFormat::Gif),
+        "image/webp" => Some(image::ImageFormat::WebP),
         _ => None,
     }
+}
+
+/// Header width × height, or `None` when the header cannot be read.
+///
+/// [`image::ImageReader::into_dimensions`] stops once the container header is
+/// known. The side cap is the per-image pixel cap, so a `1×N` image still
+/// fits and a wider claim is refused before a scanline is sized.
+fn embedded_raster_pixels(format: image::ImageFormat, data: &[u8]) -> Option<u64> {
+    let mut reader = image::ImageReader::with_format(Cursor::new(data), format);
+    let mut limits = image::Limits::default();
+    let max_side = u32::try_from(SVG_MAX_EMBEDDED_PIXELS).unwrap_or(u32::MAX);
+    limits.max_image_width = Some(max_side);
+    limits.max_image_height = Some(max_side);
+    reader.limits(limits);
+    let (width, height) = reader.into_dimensions().ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    u64::from(width).checked_mul(u64::from(height))
+}
+
+/// Keep `pixels` when the document total would still be within the cap.
+fn reserve_embedded_pixels(budget: &AtomicU64, pixels: u64) -> bool {
+    budget
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            let next = current.checked_add(pixels)?;
+            if next > SVG_MAX_EMBEDDED_PIXELS_TOTAL {
+                None
+            } else {
+                Some(next)
+            }
+        })
+        .is_ok()
 }
 
 fn map_usvg_error(err: usvg::Error) -> SvgError {
@@ -646,6 +729,8 @@ pub fn parse_svg_tree(
         limits.max_nesting,
     );
     let start = Instant::now();
+    // `from_str` does not inflate gzip. Compressed input is rejected in
+    // `prepare_source` so `Tree::from_data` is never given those bytes.
     let tree = Tree::from_str(source, &opt).map_err(map_usvg_error)?;
     let parse_took = start.elapsed();
     let nodes = count_nodes(&tree);
@@ -825,6 +910,8 @@ mod tests {
         assert_eq!(limits.max_decompressed_bytes, 16 * 1024 * 1024);
         assert_eq!(limits.max_nodes, 200_000);
         assert_eq!(limits.max_pixels, 32_000_000);
+        assert_eq!(SVG_MAX_EMBEDDED_PIXELS, 16_000_000);
+        assert_eq!(SVG_MAX_EMBEDDED_PIXELS_TOTAL, 64_000_000);
         assert_eq!(limits.max_dimension, 30_000);
         assert_eq!(limits.max_display_dimension, 4096);
         assert_eq!(limits.max_nesting, 256);
@@ -1196,6 +1283,305 @@ mod tests {
         let px = pixel(&img, 4, 4);
         assert!(px[2] > 200, "red from data URI {px:?}");
         assert!(px[1] < 40 && px[0] < 40, "{px:?}");
+    }
+
+    /// 1×1 PNG with `IHDR` width and height replaced. The CRC is rewritten so
+    /// a header reader accepts the claim. The `IDAT` is still one pixel.
+    fn claimed_png(width: u32, height: u32) -> Vec<u8> {
+        let mut png = rgba_png(1, 1, &[255, 0, 0, 255]);
+        assert_eq!(&png[12..16], b"IHDR", "IHDR is the first chunk");
+        png[16..20].copy_from_slice(&width.to_be_bytes());
+        png[20..24].copy_from_slice(&height.to_be_bytes());
+        let crc = png_crc(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        png
+    }
+
+    fn png_crc(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn svg_with_pngs(pngs: &[Vec<u8>]) -> String {
+        let mut xml =
+            String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">"#);
+        for png in pngs {
+            xml.push_str(&format!(
+                r#"<image href="data:image/png;base64,{}" width="8" height="8"/>"#,
+                b64(png)
+            ));
+        }
+        xml.push_str("</svg>");
+        xml
+    }
+
+    fn count_embedded_images(tree: &Tree) -> u32 {
+        fn walk(group: &usvg::Group) -> u32 {
+            let mut n = 0u32;
+            for child in group.children() {
+                match child {
+                    usvg::Node::Image(_) => n = n.saturating_add(1),
+                    usvg::Node::Group(inner) => n = n.saturating_add(walk(inner)),
+                    _ => {}
+                }
+            }
+            n
+        }
+        walk(tree.root())
+    }
+
+    fn parse_only(xml: &str) -> Tree {
+        let source = prepare_source(xml.as_bytes(), false, &limits()).unwrap();
+        parse_svg_tree(&source.xml, source.wants_text, &limits())
+            .unwrap()
+            .0
+    }
+
+    #[test]
+    fn huge_embedded_png_header_is_refused_quickly() {
+        let png = claimed_png(60_000, 60_000);
+        let start = Instant::now();
+        let pixels = embedded_raster_pixels(image::ImageFormat::Png, &png).unwrap();
+        assert_eq!(pixels, u64::from(60_000) * u64::from(60_000));
+        assert!(
+            pixels > SVG_MAX_EMBEDDED_PIXELS,
+            "the claim has to exceed the per-image cap"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "header read took {:?}",
+            start.elapsed()
+        );
+
+        let xml = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">
+  <rect width="8" height="8" fill="blue"/>
+  <image href="data:image/png;base64,{}" width="8" height="8"/>
+</svg>"#,
+            b64(&png)
+        );
+        let start = Instant::now();
+        let img = render(&xml).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "refusing the image took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(count_embedded_images(&parse_only(&xml)), 0);
+        let px = pixel(&img, 4, 4);
+        assert!(px[0] > 200, "blue background remains {px:?}");
+        assert!(px[2] < 40, "huge png must not paint red {px:?}");
+    }
+
+    #[test]
+    fn embedded_png_over_the_per_image_cap_is_dropped() {
+        let exact = claimed_png(4_000, 4_000);
+        assert_eq!(
+            embedded_raster_pixels(image::ImageFormat::Png, &exact),
+            Some(SVG_MAX_EMBEDDED_PIXELS)
+        );
+        assert_eq!(
+            count_embedded_images(&parse_only(&svg_with_pngs(&[exact]))),
+            1
+        );
+
+        let over = claimed_png(4_000, 4_001);
+        let pixels = embedded_raster_pixels(image::ImageFormat::Png, &over).unwrap();
+        assert!(pixels > SVG_MAX_EMBEDDED_PIXELS);
+        assert_eq!(
+            count_embedded_images(&parse_only(&svg_with_pngs(&[over]))),
+            0
+        );
+    }
+
+    #[test]
+    fn embedded_images_stop_at_the_document_pixel_cap() {
+        // 8_000_000 × 8 = 64_000_000, which fills the document cap. The ninth
+        // image is a real 2×2 that would paint if the budget were ignored.
+        let medium = claimed_png(4_000, 2_000);
+        assert_eq!(
+            embedded_raster_pixels(image::ImageFormat::Png, &medium),
+            Some(8_000_000)
+        );
+        let small = rgba_png(
+            2,
+            2,
+            &[
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ],
+        );
+        let mut pngs = vec![medium; 8];
+        assert_eq!(count_embedded_images(&parse_only(&svg_with_pngs(&pngs))), 8);
+        pngs.push(small);
+        assert_eq!(count_embedded_images(&parse_only(&svg_with_pngs(&pngs))), 8);
+        // A later document does not inherit the previous total.
+        let one = claimed_png(4_000, 2_000);
+        assert_eq!(
+            count_embedded_images(&parse_only(&svg_with_pngs(&[one]))),
+            1
+        );
+    }
+
+    #[test]
+    fn undecodable_embedded_image_is_dropped() {
+        let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">
+  <rect width="8" height="8" fill="blue"/>
+  <image href="data:image/png;base64,AAAA" width="8" height="8"/>
+  <image href="data:image/png;base64," width="8" height="8"/>
+</svg>"#;
+        let img = render(xml).unwrap();
+        let px = pixel(&img, 4, 4);
+        assert!(px[0] > 200, "blue remains {px:?}");
+        assert_eq!(count_embedded_images(&parse_only(xml)), 0);
+    }
+
+    #[test]
+    fn gzip_svg_is_inflated_once_before_usvg() {
+        let gz = gzip(blue_rect().as_bytes());
+        for flag in [false, true] {
+            let source = prepare_source(&gz, flag, &limits()).unwrap();
+            assert_eq!(source.xml, blue_rect());
+            assert!(!source.xml.as_bytes().starts_with(&GZIP_MAGIC));
+            let (token, gen) = live();
+            let img = render_svg(&gz, flag, &limits(), &token, gen).unwrap();
+            let px = pixel(&img, 4, 4);
+            assert!(px[0] > 200, "flag {flag} blue {px:?}");
+        }
+    }
+
+    #[test]
+    fn gzip_bomb_hits_our_inflate_cap_not_usvg() {
+        let zeros = vec![0u8; (SVGZ_MAX_DECOMPRESSED_BYTES as usize) + 1024];
+        let gz = gzip(&zeros);
+        assert!(
+            gz.len() < 64 * 1024,
+            "compressed bomb should stay small, got {}",
+            gz.len()
+        );
+        for flag in [false, true] {
+            let (token, gen) = live();
+            let err = render_svg(&gz, flag, &limits(), &token, gen).unwrap_err();
+            assert_eq!(err, SvgError::InflateTooLarge, "flag {flag}");
+        }
+    }
+
+    #[test]
+    fn double_gzip_is_rejected_after_one_inflate() {
+        let outer = gzip(&gzip(blue_rect().as_bytes()));
+        for flag in [false, true] {
+            let err = prepare_source(&outer, flag, &limits()).unwrap_err();
+            assert_eq!(err, SvgError::Malformed, "flag {flag}");
+            let (token, gen) = live();
+            assert_eq!(
+                render_svg(&outer, flag, &limits(), &token, gen),
+                Err(SvgError::Malformed)
+            );
+        }
+
+        // The inner payload is past the inflate cap. A second inflate would
+        // either hit that cap or allocate it. One inflate yields a small gzip
+        // blob, which is rejected.
+        let zeros = vec![0u8; (SVGZ_MAX_DECOMPRESSED_BYTES as usize) + 1024];
+        let outer = gzip(&gzip(&zeros));
+        assert!(
+            outer.len() < 64 * 1024,
+            "double-gzip bomb should stay small, got {}",
+            outer.len()
+        );
+        let start = Instant::now();
+        let err = prepare_source(&outer, true, &limits()).unwrap_err();
+        assert_eq!(err, SvgError::Malformed);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "second layer must not be inflated, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn nested_svg_data_uri_is_not_drawn() {
+        let nested = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#;
+        let uri = format!("data:image/svg+xml;base64,{}", b64(nested));
+        let xml = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">
+  <rect width="8" height="8" fill="blue"/>
+  <image href="{uri}" width="8" height="8"/>
+</svg>"#
+        );
+        let img = render(&xml).unwrap();
+        assert_eq!(count_embedded_images(&parse_only(&xml)), 0);
+        let px = pixel(&img, 4, 4);
+        assert!(px[0] > 200, "blue remains {px:?}");
+        assert!(px[2] < 40, "nested svg must not paint red {px:?}");
+    }
+
+    fn assert_not_red(img: &DecodedImage) {
+        for y in 0..img.height {
+            for x in 0..img.width {
+                let px = pixel(img, x, y);
+                assert!(
+                    !(px[2] > 200 && px[1] < 40 && px[0] < 40),
+                    "red must not appear at {x},{y}: {px:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn external_use_and_feimage_are_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.svg");
+        std::fs::write(
+            &other,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect id="box" width="8" height="8" fill="red"/></svg>"#,
+        )
+        .unwrap();
+        let png = rgba_png(
+            2,
+            2,
+            &[
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ],
+        );
+        let png_path = dir.path().join("red.png");
+        std::fs::write(&png_path, &png).unwrap();
+        let file_url = format!("file://{}", other.display());
+        let png_url = format!("file://{}", png_path.display());
+        let xml = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8">
+  <rect width="8" height="8" fill="blue"/>
+  <use href="other.svg#box"/>
+  <use href="{file_url}#box"/>
+  <use xlink:href="other.svg#box"/>
+</svg>"#
+        );
+        let img = render(&xml).unwrap();
+        let px = pixel(&img, 4, 4);
+        assert!(px[0] > 200, "use must leave the blue rect {px:?}");
+        assert_not_red(&img);
+
+        let xml = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8">
+  <defs>
+    <filter id="f" x="0" y="0" width="8" height="8" filterUnits="userSpaceOnUse">
+      <feImage href="red.png" x="0" y="0" width="8" height="8"/>
+      <feImage href="{png_url}" x="0" y="0" width="8" height="8"/>
+      <feImage href="http://127.0.0.1:1/red.png" x="0" y="0" width="8" height="8"/>
+      <feImage xlink:href="red.png" x="0" y="0" width="8" height="8"/>
+    </filter>
+  </defs>
+  <rect width="8" height="8" fill="blue" filter="url(#f)"/>
+</svg>"#
+        );
+        let img = render(&xml).unwrap();
+        assert_not_red(&img);
     }
 
     #[test]
