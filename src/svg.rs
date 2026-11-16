@@ -503,6 +503,7 @@ fn clamp_side(v: f64) -> u32 {
 }
 
 /// Bytes ready for usvg: UTF-8 SVG, already inflated, already depth-checked.
+#[derive(Debug)]
 struct SvgSource {
     xml: String,
     wants_text: bool,
@@ -675,16 +676,19 @@ fn embedded_raster_pixels(format: image::ImageFormat, data: &[u8]) -> Option<u64
 
 /// Keep `pixels` when the document total would still be within the cap.
 fn reserve_embedded_pixels(budget: &AtomicU64, pixels: u64) -> bool {
-    budget
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            let next = current.checked_add(pixels)?;
-            if next > SVG_MAX_EMBEDDED_PIXELS_TOTAL {
-                None
-            } else {
-                Some(next)
-            }
-        })
-        .is_ok()
+    let mut current = budget.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = current.checked_add(pixels) else {
+            return false;
+        };
+        if next > SVG_MAX_EMBEDDED_PIXELS_TOTAL {
+            return false;
+        }
+        match budget.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 fn map_usvg_error(err: usvg::Error) -> SvgError {
@@ -1349,7 +1353,7 @@ mod tests {
         let png = claimed_png(60_000, 60_000);
         let start = Instant::now();
         let pixels = embedded_raster_pixels(image::ImageFormat::Png, &png).unwrap();
-        assert_eq!(pixels, u64::from(60_000) * u64::from(60_000));
+        assert_eq!(pixels, u64::from(60_000u32) * u64::from(60_000u32));
         assert!(
             pixels > SVG_MAX_EMBEDDED_PIXELS,
             "the claim has to exceed the per-image cap"
