@@ -8,6 +8,7 @@ use crate::image_preview::{
     decode_image, sniff_image, DecodedImage, ImageError, ImageFormat, ImageLimits,
 };
 use crate::markdown::{is_markdown_path, render_markdown, should_render_markdown};
+use crate::svg::{is_svg_path, render_svg, sniff_svg, SvgError, SvgLimits, SVG_SNIFF_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeniedKind {
@@ -122,6 +123,12 @@ pub enum PreviewError {
     },
     /// An image that could not be shown. The inner error is the sentence.
     Image(ImageError),
+    /// An SVG that could not be shown. Uses the unsupported-file view
+    /// (quick info and the shell icon) with a short reason.
+    Svg {
+        error: SvgError,
+        info: QuickInfo,
+    },
 }
 
 impl PartialEq for PreviewError {
@@ -137,6 +144,10 @@ impl PartialEq for PreviewError {
             (PreviewError::Directory { count: a }, PreviewError::Directory { count: b }) => a == b,
             (PreviewError::Shortcut { target: a }, PreviewError::Shortcut { target: b }) => a == b,
             (PreviewError::Image(a), PreviewError::Image(b)) => a == b,
+            (
+                PreviewError::Svg { error: a, info: ia },
+                PreviewError::Svg { error: b, info: ib },
+            ) => a == b && ia == ib,
             (PreviewError::Binary { info: a }, PreviewError::Binary { info: b }) => a == b,
             (PreviewError::Empty, PreviewError::Empty)
             | (PreviewError::Cancelled, PreviewError::Cancelled) => true,
@@ -165,6 +176,7 @@ impl std::fmt::Display for PreviewError {
             PreviewError::Io(e) => write!(f, "io error: {e}"),
             PreviewError::Shortcut { .. } => write!(f, "shortcut"),
             PreviewError::Image(err) => write!(f, "{err}"),
+            PreviewError::Svg { error, .. } => write!(f, "{error}"),
         }
     }
 }
@@ -194,6 +206,7 @@ impl PreviewError {
             }
             PreviewError::Io(err) => io_user_message(name, err),
             PreviewError::Image(err) => err.user_message(),
+            PreviewError::Svg { error, .. } => error.user_message(name),
         }
     }
 
@@ -211,6 +224,7 @@ impl PreviewError {
             PreviewError::Shortcut { .. } => "Shortcut".to_string(),
             PreviewError::Io(err) => io_header_status(err).to_string(),
             PreviewError::Image(err) => err.header_status(),
+            PreviewError::Svg { error, .. } => error.header_status(),
         }
     }
 
@@ -232,7 +246,9 @@ impl PreviewError {
     /// Type, size, and modified time for the two "can't preview this" outcomes.
     pub fn quick_info(&self) -> Option<&QuickInfo> {
         match self {
-            PreviewError::Binary { info } | PreviewError::Denied { info, .. } => Some(info),
+            PreviewError::Binary { info }
+            | PreviewError::Denied { info, .. }
+            | PreviewError::Svg { info, .. } => Some(info),
             _ => None,
         }
     }
@@ -246,7 +262,16 @@ impl PreviewError {
         match self {
             PreviewError::Binary { .. } => PreviewError::Binary { info },
             PreviewError::Denied { kind, .. } => PreviewError::Denied { kind, info },
+            PreviewError::Svg { error, .. } => PreviewError::Svg { error, info },
             other => other,
+        }
+    }
+
+    /// SVG cap or parse failure before quick info has been filled in.
+    pub fn svg(error: SvgError) -> Self {
+        Self::Svg {
+            error,
+            info: QuickInfo::default(),
         }
     }
 }
@@ -401,6 +426,7 @@ pub struct PreviewLimits {
     pub max_bytes: usize,
     pub max_lines: usize,
     pub image: ImageLimits,
+    pub svg: SvgLimits,
 }
 
 impl Default for PreviewLimits {
@@ -409,6 +435,7 @@ impl Default for PreviewLimits {
             max_bytes: DEFAULT_MAX_BYTES,
             max_lines: DEFAULT_MAX_LINES,
             image: ImageLimits::default(),
+            svg: SvgLimits::default(),
         }
     }
 }
@@ -419,6 +446,7 @@ impl PreviewLimits {
             max_bytes,
             max_lines,
             image: ImageLimits::default(),
+            svg: SvgLimits::default(),
         }
     }
 }
@@ -566,6 +594,11 @@ pub fn load_text_preview<P: AsRef<Path>>(
     file.seek(SeekFrom::Start(0))?;
     if let Some(format) = sniff_image(&prefix[..prefix_len]) {
         return load_image_preview(file, total_bytes, format, &limits.image, cancel, gen);
+    }
+    // SVG is chosen by extension (or a cheap prefix sniff for extensionless
+    // files). Named text and raster files never pay for usvg or fontdb.
+    if let Some(gzip) = svg_load_kind(path, &mut file, &prefix[..prefix_len])? {
+        return load_svg_preview(file, total_bytes, gzip, &limits.svg, cancel, gen);
     }
     let mut reader = BufReader::new(&mut file);
     let mut buffer: Vec<u8> = Vec::new();
@@ -741,6 +774,82 @@ fn read_whole_image(
         bytes.extend_from_slice(&chunk[..n]);
     }
     Ok(bytes)
+}
+
+/// `Some(gzip)` when this file should take the SVG path.
+///
+/// `.svg` / `.svgz` (any case) always do. Extensionless files pay a 512-byte
+/// prefix sniff only after the raster magic has already failed. A named
+/// `.txt` / `.md` is never sniffed as SVG.
+fn svg_load_kind(
+    path: &Path,
+    file: &mut File,
+    image_prefix: &[u8],
+) -> Result<Option<bool>, PreviewError> {
+    if is_svg_path(path) {
+        return Ok(Some(image_prefix.starts_with(&[0x1f, 0x8b])));
+    }
+    if path.extension().is_some() {
+        return Ok(None);
+    }
+    let mut sniff = [0u8; SVG_SNIFF_BYTES];
+    let n = read_prefix(file, &mut sniff)?;
+    file.seek(SeekFrom::Start(0))?;
+    if sniff_svg(&sniff[..n]) {
+        Ok(Some(sniff.starts_with(&[0x1f, 0x8b])))
+    } else {
+        Ok(None)
+    }
+}
+
+fn load_svg_preview(
+    mut file: File,
+    mut total_bytes: u64,
+    gzip: bool,
+    limits: &SvgLimits,
+    cancel: &CancelToken,
+    gen: Generation,
+) -> Result<Preview, PreviewError> {
+    if total_bytes > limits.max_file_bytes {
+        return Err(PreviewError::svg(SvgError::FileTooLarge {
+            bytes: total_bytes,
+        }));
+    }
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+    let bytes = read_whole_image(&mut file, limits.max_file_bytes, cancel, gen).map_err(
+        |err| match err {
+            PreviewError::Image(ImageError::FileTooLarge { bytes }) => {
+                PreviewError::svg(SvgError::FileTooLarge { bytes })
+            }
+            other => other,
+        },
+    )?;
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+    let read_len = bytes.len() as u64;
+    if read_len > total_bytes {
+        total_bytes = read_len;
+    }
+    let decoded = match render_svg(&bytes, gzip, limits, cancel, gen) {
+        Ok(image) => image,
+        Err(SvgError::Cancelled) => return Err(PreviewError::Cancelled),
+        Err(err) => return Err(PreviewError::svg(err)),
+    };
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+    Ok(Preview {
+        content: String::new(),
+        truncated: false,
+        line_count: 0,
+        truncation: None,
+        total_bytes,
+        image: Some(Arc::new(decoded)),
+        markdown_rtf: None,
+    })
 }
 
 fn is_shortcut(path: &Path) -> bool {
