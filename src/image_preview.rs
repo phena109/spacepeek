@@ -21,6 +21,8 @@ pub enum ImageFormat {
     Gif,
     Ico,
     WebP,
+    /// Rasterised SVG. Sniffed from the path, not magic bytes.
+    Svg,
 }
 
 const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -319,6 +321,9 @@ pub fn decode_image(
     format: ImageFormat,
     limits: &ImageLimits,
 ) -> Result<DecodedImage, ImageError> {
+    if format == ImageFormat::Svg {
+        return Err(ImageError::Unsupported);
+    }
     let chosen_ico;
     let bytes = if format == ImageFormat::Ico {
         chosen_ico = ico_single_image(bytes, limits)?;
@@ -400,6 +405,7 @@ fn image_format(format: ImageFormat) -> image::ImageFormat {
         ImageFormat::Gif => image::ImageFormat::Gif,
         ImageFormat::Ico => image::ImageFormat::Ico,
         ImageFormat::WebP => image::ImageFormat::WebP,
+        ImageFormat::Svg => unreachable!("SVG is rendered by svg::render_svg"),
     }
 }
 
@@ -454,6 +460,7 @@ fn container_dimensions(bytes: &[u8], format: ImageFormat) -> Option<(u32, u32)>
         // ICO sizes are chosen in [`ico_single_image`] before this runs. The
         // directory byte is not the PNG's real size, so it is not a fallback.
         ImageFormat::Ico => None,
+        ImageFormat::Svg => None,
     }
 }
 
@@ -770,6 +777,7 @@ pub fn format_image_details(total_bytes: u64, img: &DecodedImage) -> String {
         ImageFormat::Gif => "GIF",
         ImageFormat::Ico => "ICO",
         ImageFormat::WebP => "WebP",
+        ImageFormat::Svg => "SVG",
     };
     format!(
         "{} · {} × {} · {kind}",
@@ -1180,6 +1188,7 @@ mod tests {
             (ImageFormat::Gif, "GIF"),
             (ImageFormat::Ico, "ICO"),
             (ImageFormat::WebP, "WebP"),
+            (ImageFormat::Svg, "SVG"),
         ] {
             let image = DecodedImage {
                 format,

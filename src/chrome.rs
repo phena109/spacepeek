@@ -590,6 +590,27 @@ mod tests {
             panic!("expected image chrome");
         };
         assert!(Arc::ptr_eq(&shown, &image));
+
+        let svg = Arc::new(DecodedImage {
+            width: 400,
+            height: 300,
+            source_width: 800,
+            source_height: 600,
+            format: ImageFormat::Svg,
+            bgra: vec![0, 0, 0, 255],
+        });
+        let svg_preview = Preview {
+            content: String::new(),
+            truncated: false,
+            line_count: 0,
+            truncation: None,
+            total_bytes: 2_048,
+            image: Some(Arc::clone(&svg)),
+            markdown_rtf: None,
+        };
+        let svg_presented = chrome_for_text(Path::new("icon.SVG"), &svg_preview);
+        assert_eq!(svg_presented.kind(), WindowKind::Image);
+        assert_eq!(svg_presented.header().details, "2 KB · 800 × 600 · SVG");
         assert_eq!(
             default_logical_size(WindowKind::Image),
             LogicalSize {
@@ -715,6 +736,22 @@ mod tests {
             &PreviewError::Io(std::io::Error::from_raw_os_error(5)),
         );
         assert_eq!(denied.message(), Some("Access to secret.txt was denied"));
+
+        let svg = chrome_for_error(
+            Path::new("icon.svg"),
+            &PreviewError::svg(crate::svg::SvgError::Malformed).with_quick_info(QuickInfo {
+                type_name: Some("SVG File".to_string()),
+                size_bytes: Some(12),
+                modified: None,
+            }),
+        );
+        assert_eq!(svg.header().details, "Damaged");
+        assert_eq!(
+            svg.message(),
+            Some(
+                "icon.svg can't be previewed — this SVG looks damaged or isn't valid SVG\r\n\r\nType: SVG File\r\nSize: 12 B (12 bytes)"
+            )
+        );
     }
 
     #[test]

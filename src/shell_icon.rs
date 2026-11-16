@@ -136,7 +136,7 @@ pub fn shell_icon_min_px(dpi: u32) -> i32 {
 pub fn should_request_shell_icon(error: Option<&PreviewError>) -> bool {
     matches!(
         error,
-        Some(PreviewError::Binary { .. } | PreviewError::Denied { .. })
+        Some(PreviewError::Binary { .. } | PreviewError::Denied { .. } | PreviewError::Svg { .. })
     )
 }
 
@@ -522,6 +522,12 @@ mod tests {
             std::io::Error::from_raw_os_error(5)
         ))));
         assert!(!should_request_shell_icon(None));
+        assert!(should_request_shell_icon(Some(&PreviewError::svg(
+            crate::svg::SvgError::Malformed
+        ))));
+        assert!(!should_request_shell_icon(Some(&PreviewError::Image(
+            crate::image_preview::ImageError::Corrupt
+        ))));
     }
 
     #[test]
