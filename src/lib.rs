@@ -17,6 +17,7 @@ pub mod preview;
 pub mod selection;
 pub mod shell_icon;
 pub mod state;
+pub mod svg;
 
 pub use balloon::{
     copy_utf16_z, interpret_dword_flag, should_show_first_run_balloon, BALLOON_BODY,
@@ -80,4 +81,10 @@ pub use shell_icon::{
 };
 pub use state::{
     gate_show, session_phase, step, Effect, Event, PreviewState, ShowGate, ShowOutcome,
+};
+pub use svg::{
+    ensure_system_fonts, inflate_svgz, is_svg_path, render_svg, sniff_svg, svg_output_size,
+    svg_target_from_client, svg_target_from_opening, xml_element_depth, SvgError, SvgLimits,
+    SvgOutputSize, SvgTarget, SVGZ_MAX_DECOMPRESSED_BYTES, SVG_LOADER_STACK, SVG_MAX_FILE_BYTES,
+    SVG_MAX_NESTING, SVG_MAX_NODES, SVG_MAX_PIXELS, SVG_PARSE_BUDGET, SVG_SNIFF_BYTES,
 };

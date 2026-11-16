@@ -818,14 +818,15 @@ fn load_svg_preview(
     if cancel.is_cancelled(&gen) {
         return Err(PreviewError::Cancelled);
     }
-    let bytes = read_whole_image(&mut file, limits.max_file_bytes, cancel, gen).map_err(
-        |err| match err {
-            PreviewError::Image(ImageError::FileTooLarge { bytes }) => {
-                PreviewError::svg(SvgError::FileTooLarge { bytes })
-            }
-            other => other,
-        },
-    )?;
+    let bytes =
+        read_whole_image(&mut file, limits.max_file_bytes, cancel, gen).map_err(
+            |err| match err {
+                PreviewError::Image(ImageError::FileTooLarge { bytes }) => {
+                    PreviewError::svg(SvgError::FileTooLarge { bytes })
+                }
+                other => other,
+            },
+        )?;
     if cancel.is_cancelled(&gen) {
         return Err(PreviewError::Cancelled);
     }
@@ -1271,6 +1272,8 @@ mod tests {
         assert_eq!(limits.max_lines, 2_000);
         assert_eq!(MAX_LINE_UTF16, 1_000);
         assert!(MAX_LINE_UTF16 + LINE_ELLIPSIS.len_utf16() <= EDIT_LINE_UTF16_LIMIT);
+        assert_eq!(limits.svg.max_file_bytes, 8 * 1024 * 1024);
+        assert_eq!(limits.svg.max_nodes, 200_000);
     }
 
     #[test]
@@ -2651,5 +2654,127 @@ mod tests {
         assert!(rtf.contains("Title"));
         assert!(rtf.contains("\\b"));
         assert!(rtf.contains("bold"));
+    }
+
+    fn blue_svg() -> &'static [u8] {
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="blue"/></svg>"#
+    }
+
+    #[test]
+    fn svg_extension_previews_as_an_image_not_text() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["icon.svg", "icon.SVG", "icon.svgz"] {
+            let bytes: Vec<u8> = if name.ends_with('z') || name.ends_with('Z') {
+                use flate2::write::GzEncoder;
+                use flate2::Compression;
+                use std::io::Write;
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(blue_svg()).unwrap();
+                encoder.finish().unwrap()
+            } else {
+                blue_svg().to_vec()
+            };
+            let path = write_file(&dir, name, &bytes);
+            let preview = load(&path, PreviewLimits::default()).unwrap();
+            let image = preview.image.as_ref().expect(name);
+            assert_eq!(
+                image.format,
+                crate::image_preview::ImageFormat::Svg,
+                "{name}"
+            );
+            assert!(preview.content.is_empty(), "{name}");
+            assert!(preview.markdown_rtf.is_none(), "{name}");
+        }
+
+        let png = rgba_png(1, 1, &[9, 8, 7, 255]);
+        let disguised = write_file(&dir, "pic.svg", &png);
+        let preview = load(&disguised, PreviewLimits::default()).unwrap();
+        assert_eq!(
+            preview.image.as_ref().unwrap().format,
+            crate::image_preview::ImageFormat::Png
+        );
+    }
+
+    #[test]
+    fn svg_file_over_the_byte_budget_is_not_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, "big.svg", blue_svg());
+        let mut limits = PreviewLimits::default();
+        limits.svg.max_file_bytes = (blue_svg().len() as u64) - 1;
+        let err = load(&path, limits).unwrap_err();
+        assert!(matches!(
+            err,
+            PreviewError::Svg {
+                error: SvgError::FileTooLarge { .. },
+                ..
+            }
+        ));
+        assert_eq!(err.header_status(), "Too large");
+        assert!(err.wants_quick_info());
+        assert!(err.user_message("big.svg").contains("too large"));
+    }
+
+    #[test]
+    fn text_and_markdown_paths_ignore_svg_markup() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = b"<svg xmlns='http://www.w3.org/2000/svg'><rect/></svg>\n# Title\n";
+        let txt = write_file(&dir, "notes.txt", src);
+        let preview = load(&txt, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert!(preview.content.contains("<svg"));
+
+        let md = write_file(&dir, "notes.md", b"# Title\n\nhello\n");
+        let preview = load(&md, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert!(preview.markdown_rtf.is_some());
+    }
+
+    #[test]
+    fn extensionless_svg_sniff_does_not_steal_named_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, "logo", blue_svg());
+        let preview = load(&path, PreviewLimits::default()).unwrap();
+        assert_eq!(
+            preview.image.as_ref().unwrap().format,
+            crate::image_preview::ImageFormat::Svg
+        );
+
+        let named = write_file(&dir, "logo.txt", blue_svg());
+        let preview = load(&named, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert!(preview.content.contains("<svg"));
+    }
+
+    #[test]
+    fn cancelled_svg_load_matches_the_text_path() {
+        let token = CancelToken::new();
+        let stale = token.generate();
+        let _live = token.generate();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, "icon.svg", blue_svg());
+        assert_eq!(
+            load_text_preview(&path, PreviewLimits::default(), &token, stale),
+            Err(PreviewError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn svg_error_uses_the_unsupported_view() {
+        let err = PreviewError::svg(SvgError::Malformed);
+        assert!(err.wants_quick_info());
+        assert_eq!(err.header_status(), "Damaged");
+        assert_eq!(
+            err.user_message("icon.svg"),
+            "icon.svg can't be previewed — this SVG looks damaged or isn't valid SVG"
+        );
+        let with_info = err.with_quick_info(QuickInfo {
+            type_name: Some("SVG File".to_string()),
+            size_bytes: Some(12),
+            modified: None,
+        });
+        assert_eq!(
+            with_info.quick_info().unwrap().type_name.as_deref(),
+            Some("SVG File")
+        );
     }
 }

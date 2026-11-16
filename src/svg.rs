@@ -284,7 +284,7 @@ pub fn svg_contains_text(bytes: &[u8]) -> bool {
     while i < bytes.len() {
         if bytes[i] == b'<' {
             let rest = &bytes[i + 1..];
-            if tag_named(rest, b"text") || tag_named(rest, b"tspan") {
+            if starts_with_ignore_ascii(rest, b"text") || tag_named(rest, b"tspan") {
                 return true;
             }
         }
@@ -423,7 +423,10 @@ pub fn svg_output_size(
     intrinsic_h: f32,
     limits: &SvgLimits,
 ) -> Result<SvgOutputSize, SvgError> {
-    if !intrinsic_w.is_finite() || !intrinsic_h.is_finite() || intrinsic_w <= 0.0 || intrinsic_h <= 0.0
+    if !intrinsic_w.is_finite()
+        || !intrinsic_h.is_finite()
+        || intrinsic_w <= 0.0
+        || intrinsic_h <= 0.0
     {
         return Err(SvgError::InvalidSize);
     }
@@ -431,7 +434,7 @@ pub fn svg_output_size(
     let max_pixels = limits.max_pixels.max(1) as f64;
     let w = f64::from(intrinsic_w);
     let h = f64::from(intrinsic_h);
-    let mut scale = 1.0;
+    let mut scale = 1.0_f64;
     if w > max_dim {
         scale = scale.min(max_dim / w);
     }
@@ -565,7 +568,11 @@ fn with_render_slot<T>(
     }
 }
 
-fn svg_options(dpi: f32, fonts: Option<Arc<usvg::fontdb::Database>>, max_depth: u32) -> Options<'static> {
+fn svg_options(
+    dpi: f32,
+    fonts: Option<Arc<usvg::fontdb::Database>>,
+    max_depth: u32,
+) -> Options<'static> {
     let mut opt = Options {
         resources_dir: None,
         image_href_resolver: ImageHrefResolver {
@@ -583,11 +590,7 @@ fn svg_options(dpi: f32, fonts: Option<Arc<usvg::fontdb::Database>>, max_depth: 
 }
 
 /// Only `data:` raster images. Nested SVG and anything else is dropped.
-fn resolve_embedded_image(
-    mime: &str,
-    data: Arc<Vec<u8>>,
-    _opt: &Options,
-) -> Option<ImageKind> {
+fn resolve_embedded_image(mime: &str, data: Arc<Vec<u8>>, _opt: &Options) -> Option<ImageKind> {
     if data.len() as u64 > SVG_MAX_EMBEDDED_BYTES {
         return None;
     }
@@ -621,14 +624,17 @@ fn count_nodes(tree: &Tree) -> u32 {
                 usvg::Node::Group(g) => stack.push(g),
                 _ => n = n.saturating_add(1),
             }
-            child.subroots(|sub| stack.push(sub));
         }
     }
     n
 }
 
 /// Parse with usvg. Fonts are loaded only when `source.wants_text`.
-pub fn parse_svg_tree(source: &str, wants_text: bool, limits: &SvgLimits) -> Result<(Tree, Duration), SvgError> {
+pub fn parse_svg_tree(
+    source: &str,
+    wants_text: bool,
+    limits: &SvgLimits,
+) -> Result<(Tree, Duration), SvgError> {
     let fonts = if wants_text {
         Some(ensure_system_fonts())
     } else {
@@ -652,7 +658,8 @@ pub fn parse_svg_tree(source: &str, wants_text: bool, limits: &SvgLimits) -> Res
 fn rasterize_tree(tree: &Tree, limits: &SvgLimits) -> Result<DecodedImage, SvgError> {
     let size = tree.size();
     let out = svg_output_size(size.width(), size.height(), limits)?;
-    let mut pixmap = Pixmap::new(out.render_width, out.render_height).ok_or(SvgError::InvalidSize)?;
+    let mut pixmap =
+        Pixmap::new(out.render_width, out.render_height).ok_or(SvgError::InvalidSize)?;
     pixmap.fill(Color::WHITE);
     let sx = out.render_width as f32 / size.width();
     let sy = out.render_height as f32 / size.height();
@@ -808,7 +815,7 @@ mod tests {
     }
 
     fn blue_rect() -> &'static str {
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#0000ff"/></svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="blue"/></svg>"#
     }
 
     #[test]
@@ -985,7 +992,11 @@ mod tests {
     fn inflate_bomb_is_stopped_at_the_cap() {
         let zeros = vec![0u8; 8 * 1024];
         let gz = gzip(&zeros);
-        assert!(gz.len() < 1024, "gzip of zeros should be small, got {}", gz.len());
+        assert!(
+            gz.len() < 1024,
+            "gzip of zeros should be small, got {}",
+            gz.len()
+        );
         let err = inflate_svgz(&gz, 1024).unwrap_err();
         assert_eq!(err, SvgError::InflateTooLarge);
         let ok = inflate_svgz(&gz, 16 * 1024).unwrap();
@@ -994,9 +1005,8 @@ mod tests {
 
     #[test]
     fn node_count_cap_rejects_after_parse() {
-        let mut xml = String::from(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">"#,
-        );
+        let mut xml =
+            String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">"#);
         for _ in 0..12 {
             xml.push_str(r#"<rect width="1" height="1"/>"#);
         }
@@ -1024,7 +1034,7 @@ mod tests {
 
     #[test]
     fn huge_declared_size_does_not_allocate_a_giant_buffer() {
-        let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1e9" height="1e9"><rect width="1e9" height="1e9" fill="#ff0000"/></svg>"#;
+        let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1e9" height="1e9"><rect width="1e9" height="1e9" fill="red"/></svg>"#;
         let img = render(xml).unwrap();
         let pixels = u64::from(img.width) * u64::from(img.height);
         assert!(pixels <= SVG_MAX_PIXELS, "{pixels}");
@@ -1043,7 +1053,7 @@ mod tests {
     #[test]
     fn script_is_ignored() {
         let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">
-  <rect id="r" width="8" height="8" fill="#00ff00"/>
+  <rect id="r" width="8" height="8" fill="lime"/>
   <script type="application/ecmascript">document.getElementById('r').setAttribute('fill','#ff0000');</script>
 </svg>"#;
         let img = render(xml).unwrap();
@@ -1080,7 +1090,8 @@ mod tests {
 
     #[test]
     fn deep_nesting_is_rejected_on_a_loader_sized_stack() {
-        let mut xml = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">"#);
+        let mut xml =
+            String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">"#);
         for _ in 0..100_000 {
             xml.push_str("<g>");
         }
@@ -1100,17 +1111,20 @@ mod tests {
                 render_svg(job.as_bytes(), false, &limits(), &token, gen)
             })
             .unwrap();
-        let err = handle.join().expect("loader-sized thread must not overflow");
+        let err = handle
+            .join()
+            .expect("loader-sized thread must not overflow");
         assert_eq!(err, Err(SvgError::TooDeep));
     }
 
     #[test]
     fn modest_nesting_still_renders() {
-        let mut xml = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">"#);
+        let mut xml =
+            String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">"#);
         for _ in 0..20 {
             xml.push_str("<g>");
         }
-        xml.push_str(r#"<rect width="8" height="8" fill="#0000ff"/>"#);
+        xml.push_str(r#"<rect width="8" height="8" fill="blue"/>"#);
         for _ in 0..20 {
             xml.push_str("</g>");
         }
@@ -1123,14 +1137,20 @@ mod tests {
     #[test]
     fn external_file_and_http_images_are_not_loaded() {
         let dir = tempfile::tempdir().unwrap();
-        let png = rgba_png(2, 2, &[255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255]);
+        let png = rgba_png(
+            2,
+            2,
+            &[
+                255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255,
+            ],
+        );
         let img_path = dir.path().join("magenta.png");
         std::fs::write(&img_path, &png).unwrap();
         let relative = "magenta.png";
         let file_url = format!("file://{}", img_path.display());
         let xml = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8">
-  <rect width="8" height="8" fill="#0000ff"/>
+  <rect width="8" height="8" fill="blue"/>
   <image href="{relative}" width="8" height="8"/>
   <image href="{file_url}" width="8" height="8"/>
   <image href="http://127.0.0.1:1/magenta.png" width="8" height="8"/>
@@ -1159,7 +1179,13 @@ mod tests {
 
     #[test]
     fn data_uri_png_is_drawn() {
-        let png = rgba_png(2, 2, &[255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255]);
+        let png = rgba_png(
+            2,
+            2,
+            &[
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ],
+        );
         let uri = format!("data:image/png;base64,{}", b64(&png));
         let xml = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">
@@ -1223,10 +1249,12 @@ mod tests {
 
     #[test]
     fn svg_error_copy_matches_the_unsupported_view() {
-        let err = SvgError::FileTooLarge { bytes: 9 * 1024 * 1024 };
+        let err = SvgError::FileTooLarge {
+            bytes: 9 * 1024 * 1024,
+        };
         assert_eq!(
             err.user_message("icon.svg"),
-            "icon.svg can't be previewed — this SVG is too large (9.0 MB)"
+            "icon.svg can't be previewed — this SVG is too large (9 MB)"
         );
         assert_eq!(err.header_status(), "Too large");
         assert_eq!(SvgError::Malformed.header_status(), "Damaged");
@@ -1246,8 +1274,8 @@ mod tests {
 
     fn sample_icon_svg() -> String {
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <path fill="#3366cc" d="M4 4h16v16H4z"/>
-  <circle cx="12" cy="12" r="5" fill="#ffcc00"/>
+  <path fill="steelblue" d="M4 4h16v16H4z"/>
+  <circle cx="12" cy="12" r="5" fill="gold"/>
 </svg>"#
             .to_string()
     }
@@ -1257,8 +1285,8 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
   <defs>
     <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#224488"/>
-      <stop offset="1" stop-color="#88ccff"/>
+      <stop offset="0" stop-color="navy"/>
+      <stop offset="1" stop-color="skyblue"/>
     </linearGradient>
   </defs>
 "#,
@@ -1278,12 +1306,10 @@ mod tests {
         let mut xml = String::from(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600">"#,
         );
-        for i in 0..8_000 {
+        for i in 0..50_000 {
             let x = (i * 17) % 800;
             let y = (i * 13) % 600;
-            xml.push_str(&format!(
-                r#"<path d="M{x} {y}h2v2h-2z" fill="#333"/>"#
-            ));
+            xml.push_str(&format!(r#"<path d="M{x} {y}h2v2h-2z" fill="gray"/>"#));
         }
         xml.push_str("</svg>");
         xml
@@ -1340,7 +1366,7 @@ mod tests {
     #[ignore]
     fn svg_render_timing_heavy() {
         time_render(
-            "svg heavy (8k paths) at 800x600 target",
+            "svg heavy (50k paths) at 800x600 target",
             &sample_heavy_svg(),
             SvgTarget {
                 width: 800,

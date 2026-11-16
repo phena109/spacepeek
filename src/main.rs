@@ -56,18 +56,18 @@ mod win {
         shell_icon_pixel_size_ok, shell_icon_px, shell_icon_size_still_wanted, shell_image_list_id,
         should_fetch_shell_icon, should_keep_shell_icon_pixels, should_reload_after_pointer,
         should_reload_after_shell_event, should_request_shell_icon, should_show_first_run_balloon,
-        small_icon_px, step, tick_elapsed_ms, typeahead_for_decision, typeahead_window_ms,
-        unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken, ChromeLayout,
-        Command, DecodedImage, DesktopSelection, DoubleClickAction, Effect, Event, Generation,
-        HitZone, HookContext, HookDecision, HookKey, IconSpawn, ImageCommand, ImageFrame,
-        ImageView, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError, PreviewLimits,
-        PreviewState, PxRect, PxSize, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
+        small_icon_px, step, svg_target_from_opening, tick_elapsed_ms, typeahead_for_decision,
+        typeahead_window_ms, unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken,
+        ChromeLayout, Command, DecodedImage, DesktopSelection, DoubleClickAction, Effect, Event,
+        Generation, HitZone, HookContext, HookDecision, HookKey, IconSpawn, ImageCommand,
+        ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError,
+        PreviewLimits, PreviewState, PxRect, PxSize, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
         SelectionTarget, SessionPhase, ShellIconPixels, ShellSurface, ShowGate, ShowOutcome,
-        SizeGrip, SizeMemory, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold, ZoomKey,
-        ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET, CLASS_PROGMAN,
-        CLASS_WORKERW, DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY,
-        FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS,
-        SHELL_ICON_WORKER_CAP, VERSION,
+        SizeGrip, SizeMemory, SvgTarget, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold,
+        ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET,
+        CLASS_PROGMAN, CLASS_WORKERW, DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN,
+        FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS,
+        SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP, VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -2141,9 +2141,17 @@ mod win {
 
     fn start_load(gen: Generation, path: PathBuf) {
         let baseline = INPUT_GEN.load(Ordering::Acquire);
-        let (cancel, hwnd) = with_app_mut(|app| {
+        let (cancel, hwnd, limits) = with_app_mut(|app| {
             app.input_baseline = baseline;
-            (app.cancel.clone(), app.msg_hwnd)
+            let dpi = dpi_for_anchor(if !app.preview_hwnd.0.is_null() {
+                app.preview_hwnd
+            } else {
+                app.explorer_hwnd
+            });
+            let target = svg_target_for_load(app.preview_hwnd, app.sizes, dpi);
+            let mut limits = PreviewLimits::default();
+            limits.svg.target = target;
+            (app.cancel.clone(), app.msg_hwnd, limits)
         });
         if path.as_os_str().is_empty() {
             return;
@@ -2152,7 +2160,7 @@ mod win {
         let spawned = std::thread::Builder::new()
             .name("spacepeek-load".to_string())
             .spawn(move || {
-                let result = load_text_preview(&path, PreviewLimits::default(), &cancel, gen);
+                let result = load_text_preview(&path, limits, &cancel, gen);
                 if cancel.is_cancelled(&gen) {
                     return;
                 }
@@ -2175,6 +2183,19 @@ mod win {
                 ))),
             );
         }
+    }
+
+    /// Fit-resolution target for an SVG load: the current body if the window
+    /// is already up, otherwise the remembered outer size minus the header.
+    fn svg_target_for_load(preview_hwnd: HWND, sizes: SizeMemory, dpi: u32) -> SvgTarget {
+        if !preview_hwnd.0.is_null() {
+            if let Some(body) = preview_body_rect(preview_hwnd) {
+                let width = u32::try_from(body.width().max(1)).unwrap_or(1);
+                let height = u32::try_from(body.height().max(1)).unwrap_or(1);
+                return SvgTarget { width, height, dpi };
+            }
+        }
+        svg_target_from_opening(sizes.opening_logical(WindowKind::Image), dpi)
     }
 
     fn post_load(hwnd: HWND, gen: Generation, result: std::result::Result<Preview, PreviewError>) {
