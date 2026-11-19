@@ -1,0 +1,53 @@
+name: pdf-measure spike
+
+on:
+  push:
+    branches:
+      - spike/pdf-measure
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pdf-measure-${{ matrix.target }}
+          workspaces: spike/pdf_measure
+
+      - name: Build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked --manifest-path spike/pdf_measure/Cargo.toml --target "${TARGET}"
+
+      - name: Name artifact
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: cp "spike/pdf_measure/target/${TARGET}/release/pdf_measure.exe" "pdf_measure-${ARCH}.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdf-measure-${{ matrix.arch }}
+          path: pdf_measure-${{ matrix.arch }}.exe
+          retention-days: 7
+          if-no-files-found: error
