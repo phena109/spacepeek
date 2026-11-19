@@ -10,11 +10,12 @@ use crate::geometry::{
     effective_dpi, muldiv, scale_for_dpi, PxRect, PxSize, BASE_DPI, LOGICAL_PREVIEW_HEIGHT,
     LOGICAL_PREVIEW_WIDTH,
 };
-use crate::image_preview::{format_image_details, DecodedImage};
+use crate::image_preview::{format_image_details, DecodedImage, ImageFormat};
 use crate::markdown::is_markdown_path;
+use crate::pdf::format_pdf_header;
 use crate::preview::{
-    format_compact_size, format_grouped, message_with_quick_info, preview_text, Preview,
-    PreviewError,
+    format_compact_size, format_grouped, format_quick_info, message_with_quick_info, preview_text,
+    Preview, PreviewError,
 };
 
 /// Logical height of the header strip at 96 DPI.
@@ -150,10 +151,20 @@ pub fn path_label(path: &Path) -> String {
 
 pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
     if let Some(image) = preview.image.as_ref() {
+        let details = if image.format == ImageFormat::Pdf {
+            format_pdf_header(
+                preview.total_bytes,
+                image.source_width,
+                image.source_height,
+                preview.pdf_pages,
+            )
+        } else {
+            format_image_details(preview.total_bytes, image)
+        };
         return Presented::Image {
             header: HeaderText {
                 name: path_label(path),
-                details: format_image_details(preview.total_bytes, image),
+                details,
             },
             image: Arc::clone(image),
         };
@@ -187,10 +198,16 @@ pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
 
 pub fn chrome_for_error(path: &Path, error: &PreviewError) -> Presented {
     let name = path_label(path);
-    let mut message = error.user_message(&name);
-    if let Some(info) = error.quick_info() {
-        message = message_with_quick_info(&message, info);
-    }
+    let sentence = error.user_message(&name);
+    let message = if let Some(info) = error.quick_info() {
+        if sentence.is_empty() {
+            format_quick_info(info)
+        } else {
+            message_with_quick_info(&sentence, info)
+        }
+    } else {
+        sentence
+    };
     Presented::Message {
         header: HeaderText {
             name: name.clone(),
@@ -487,6 +504,7 @@ mod tests {
             total_bytes,
             image: None,
             markdown_rtf: None,
+            pdf_pages: 0,
         }
     }
 
@@ -580,6 +598,7 @@ mod tests {
             total_bytes: 1_258_291,
             image: Some(Arc::clone(&image)),
             markdown_rtf: None,
+            pdf_pages: 0,
         };
         let presented = chrome_for_text(Path::new("photo.jpg"), &preview);
         assert_eq!(presented.kind(), WindowKind::Image);
@@ -607,6 +626,7 @@ mod tests {
             total_bytes: 2_048,
             image: Some(Arc::clone(&svg)),
             markdown_rtf: None,
+            pdf_pages: 0,
         };
         let svg_presented = chrome_for_text(Path::new("icon.SVG"), &svg_preview);
         assert_eq!(svg_presented.kind(), WindowKind::Image);
@@ -640,6 +660,7 @@ mod tests {
             total_bytes: 4,
             image: None,
             markdown_rtf: Some(Arc::clone(&rtf)),
+            pdf_pages: 0,
         };
         let presented = chrome_for_text(Path::new("README.MD"), &md_preview);
         assert_eq!(presented.kind(), WindowKind::Markdown);
@@ -750,6 +771,72 @@ mod tests {
             svg.message(),
             Some(
                 "icon.svg can't be previewed — this SVG looks damaged or isn't valid SVG\r\n\r\nType: SVG File\r\nSize: 12 B (12 bytes)"
+            )
+        );
+    }
+
+    #[test]
+    fn pdf_page_header_counts_pages_and_the_placeholder_is_quick_info() {
+        use crate::image_preview::{DecodedImage, ImageFormat};
+        use crate::pdf::PdfError;
+        use crate::preview::QuickInfo;
+        use std::sync::Arc;
+
+        let image = Arc::new(DecodedImage {
+            width: 400,
+            height: 518,
+            source_width: 612,
+            source_height: 792,
+            format: ImageFormat::Pdf,
+            bgra: vec![255, 255, 255, 255],
+        });
+        let preview = Preview {
+            content: String::new(),
+            truncated: false,
+            line_count: 0,
+            truncation: None,
+            total_bytes: 12 * 1024,
+            image: Some(Arc::clone(&image)),
+            markdown_rtf: None,
+            pdf_pages: 12,
+        };
+        let presented = chrome_for_text(Path::new("book.pdf"), &preview);
+        assert_eq!(presented.kind(), WindowKind::Image);
+        assert_eq!(
+            presented.header().details,
+            "12 KB · 612 × 792 · 12 pages · PDF"
+        );
+        let one = Preview {
+            pdf_pages: 1,
+            ..preview
+        };
+        assert_eq!(
+            chrome_for_text(Path::new("one.pdf"), &one).header().details,
+            "12 KB · 612 × 792 · 1 page · PDF"
+        );
+
+        let rendering = PreviewError::pdf(PdfError::Rendering).with_quick_info(QuickInfo {
+            type_name: Some("PDF Document".to_string()),
+            size_bytes: Some(12 * 1024),
+            modified: None,
+        });
+        let message = chrome_for_error(Path::new("book.pdf"), &rendering);
+        assert_eq!(message.kind(), WindowKind::Message);
+        assert_eq!(message.header().details, "PDF");
+        assert_eq!(
+            message.message(),
+            Some("Type: PDF Document\r\nSize: 12 KB (12,288 bytes)")
+        );
+
+        let locked = PreviewError::pdf(PdfError::PasswordProtected).with_quick_info(QuickInfo {
+            type_name: Some("PDF Document".to_string()),
+            size_bytes: Some(20),
+            modified: None,
+        });
+        assert_eq!(
+            chrome_for_error(Path::new("secret.pdf"), &locked).message(),
+            Some(
+                "secret.pdf can't be previewed — this PDF is password protected\r\n\r\nType: PDF Document\r\nSize: 20 B (20 bytes)"
             )
         );
     }

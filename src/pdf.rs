@@ -82,7 +82,9 @@ impl Default for PdfTarget {
 pub enum PdfError {
     /// The icon is up and the page is still rendering. Not a failure.
     Rendering,
-    FileTooLarge { bytes: u64 },
+    FileTooLarge {
+        bytes: u64,
+    },
     PasswordProtected,
     Damaged,
     TimedOut,
@@ -195,9 +197,7 @@ pub fn is_pdf_path(path: &Path) -> bool {
 /// True when `header` begins with `%PDF`. A UTF-8 BOM is skipped. This is a
 /// prefix check, not a search through the file.
 pub fn sniff_pdf(header: &[u8]) -> bool {
-    let bytes = header
-        .strip_prefix(&[0xEF, 0xBB, 0xBF])
-        .unwrap_or(header);
+    let bytes = header.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(header);
     bytes.starts_with(b"%PDF")
 }
 
@@ -324,10 +324,7 @@ pub fn pdf_page_pixels(
     target: PdfTarget,
     limits: &PdfLimits,
 ) -> Result<PdfPagePx, PdfError> {
-    if !page_w_dip.is_finite()
-        || !page_h_dip.is_finite()
-        || page_w_dip <= 0.0
-        || page_h_dip <= 0.0
+    if !page_w_dip.is_finite() || !page_h_dip.is_finite() || page_w_dip <= 0.0 || page_h_dip <= 0.0
     {
         return Err(PdfError::InvalidSize);
     }
@@ -452,7 +449,8 @@ pub fn pack_bgra_rows(
     let row_bytes = u64::from(width).saturating_mul(4);
     let mut out = Vec::new();
     let reserve = usize::try_from(pixels.saturating_mul(4)).map_err(|_| PdfError::TooManyPixels)?;
-    out.try_reserve(reserve).map_err(|_| PdfError::TooManyPixels)?;
+    out.try_reserve(reserve)
+        .map_err(|_| PdfError::TooManyPixels)?;
     let start = i64::from(start);
     let stride = i64::from(stride);
     let row_bytes_i = i64::try_from(row_bytes).map_err(|_| PdfError::TooManyPixels)?;
@@ -646,7 +644,13 @@ mod tests {
         PdfTarget { width, height, dpi }
     }
 
-    fn snap(phase: PdfJobPhase, elapsed_ms: u64, cancel: bool, job: u64, current: u64) -> PdfJobSnap {
+    fn snap(
+        phase: PdfJobPhase,
+        elapsed_ms: u64,
+        cancel: bool,
+        job: u64,
+        current: u64,
+    ) -> PdfJobSnap {
         PdfJobSnap {
             phase,
             job_gen: Generation::new(job),
@@ -700,7 +704,10 @@ mod tests {
     fn file_gate_is_empty_too_large_or_render() {
         assert_eq!(gate_pdf_file(0, &limits()), PdfGate::Empty);
         assert_eq!(gate_pdf_file(1, &limits()), PdfGate::Render);
-        assert_eq!(gate_pdf_file(PDF_MAX_FILE_BYTES, &limits()), PdfGate::Render);
+        assert_eq!(
+            gate_pdf_file(PDF_MAX_FILE_BYTES, &limits()),
+            PdfGate::Render
+        );
         assert_eq!(
             gate_pdf_file(PDF_MAX_FILE_BYTES + 1, &limits()),
             PdfGate::TooLarge {
@@ -750,7 +757,9 @@ mod tests {
         );
         assert_eq!(damaged.header_status(), "Damaged");
 
-        let large = PdfError::FileTooLarge { bytes: 128 * 1024 * 1024 };
+        let large = PdfError::FileTooLarge {
+            bytes: 128 * 1024 * 1024,
+        };
         assert_eq!(
             large.user_message(name),
             "notes.pdf can't be previewed — this PDF is too large (128 MB)"
@@ -778,7 +787,9 @@ mod tests {
 
     #[test]
     fn encrypt_token_is_a_name_not_a_prefix() {
-        assert!(contains_pdf_encrypt(b"%PDF-1.6\ntrailer <</Encrypt 2 0 R>>"));
+        assert!(contains_pdf_encrypt(
+            b"%PDF-1.6\ntrailer <</Encrypt 2 0 R>>"
+        ));
         assert!(contains_pdf_encrypt(b"/Encrypt"));
         assert!(contains_pdf_encrypt(b"/Encrypt/Filter"));
         assert!(!contains_pdf_encrypt(b"%PDF-1.6\ntrailer <</Size 3>>"));
@@ -821,7 +832,10 @@ mod tests {
             classify_pdf_open_failure(Some(true), false),
             PdfError::PasswordProtected
         );
-        assert_eq!(classify_pdf_open_failure(Some(false), false), PdfError::Damaged);
+        assert_eq!(
+            classify_pdf_open_failure(Some(false), false),
+            PdfError::Damaged
+        );
         assert_eq!(classify_pdf_open_failure(None, false), PdfError::Damaged);
     }
 
@@ -917,10 +931,7 @@ mod tests {
         assert_eq!(&flipped[0..4], &[255, 0, 0, 255]);
         assert_eq!(&flipped[4..8], &[0, 255, 0, 255]);
 
-        assert_eq!(
-            pack_bgra_rows(&src, 0, 0, 1, 4),
-            Err(PdfError::InvalidSize)
-        );
+        assert_eq!(pack_bgra_rows(&src, 0, 0, 1, 4), Err(PdfError::InvalidSize));
         assert_eq!(pack_bgra_rows(&src, 0, 4, 1, 4), Err(PdfError::Damaged));
         assert_eq!(pack_bgra_rows(&src, -4, 1, 1, 4), Err(PdfError::Damaged));
     }
@@ -973,26 +984,41 @@ mod tests {
     #[test]
     fn icon_is_immediate_and_a_matching_page_replaces_it() {
         let (view, effects) = step_pdf_view(PdfView::Idle, PdfViewEvent::Begin(Generation::new(1)));
-        assert_eq!(view, PdfView::Icon { gen: Generation::new(1) });
+        assert_eq!(
+            view,
+            PdfView::Icon {
+                gen: Generation::new(1)
+            }
+        );
         assert_eq!(effects, vec![PdfViewEffect::ShowIcon]);
 
         let (view, effects) = step_pdf_view(view, PdfViewEvent::PageReady(Generation::new(1)));
-        assert_eq!(view, PdfView::Page { gen: Generation::new(1) });
+        assert_eq!(
+            view,
+            PdfView::Page {
+                gen: Generation::new(1)
+            }
+        );
         assert_eq!(effects, vec![PdfViewEffect::ShowPage]);
     }
 
     #[test]
     fn a_stale_page_does_not_replace_the_icon_or_a_newer_file() {
-        let icon = PdfView::Icon { gen: Generation::new(2) };
+        let icon = PdfView::Icon {
+            gen: Generation::new(2),
+        };
         let (view, effects) = step_pdf_view(icon, PdfViewEvent::PageReady(Generation::new(1)));
         assert_eq!(view, icon);
         assert!(effects.is_empty());
 
-        let (view, effects) = step_pdf_view(PdfView::Idle, PdfViewEvent::PageReady(Generation::new(1)));
+        let (view, effects) =
+            step_pdf_view(PdfView::Idle, PdfViewEvent::PageReady(Generation::new(1)));
         assert_eq!(view, PdfView::Idle);
         assert!(effects.is_empty());
 
-        let page = PdfView::Page { gen: Generation::new(2) };
+        let page = PdfView::Page {
+            gen: Generation::new(2),
+        };
         let (view, effects) = step_pdf_view(page, PdfViewEvent::PageReady(Generation::new(2)));
         assert_eq!(view, page);
         assert!(effects.is_empty());
@@ -1000,7 +1026,9 @@ mod tests {
 
     #[test]
     fn esc_cancels_and_a_late_bitmap_is_not_shown() {
-        let icon = PdfView::Icon { gen: Generation::new(4) };
+        let icon = PdfView::Icon {
+            gen: Generation::new(4),
+        };
         let (view, effects) = step_pdf_view(icon, PdfViewEvent::Cancel);
         assert_eq!(view, PdfView::Idle);
         assert_eq!(
@@ -1014,9 +1042,16 @@ mod tests {
 
     #[test]
     fn a_new_file_cancels_the_old_render_and_drops_its_bitmap() {
-        let page = PdfView::Page { gen: Generation::new(1) };
+        let page = PdfView::Page {
+            gen: Generation::new(1),
+        };
         let (view, effects) = step_pdf_view(page, PdfViewEvent::Begin(Generation::new(2)));
-        assert_eq!(view, PdfView::Icon { gen: Generation::new(2) });
+        assert_eq!(
+            view,
+            PdfView::Icon {
+                gen: Generation::new(2)
+            }
+        );
         assert_eq!(
             effects,
             vec![
@@ -1026,13 +1061,20 @@ mod tests {
             ]
         );
         let (view, effects) = step_pdf_view(view, PdfViewEvent::PageReady(Generation::new(1)));
-        assert_eq!(view, PdfView::Icon { gen: Generation::new(2) });
+        assert_eq!(
+            view,
+            PdfView::Icon {
+                gen: Generation::new(2)
+            }
+        );
         assert!(effects.is_empty());
     }
 
     #[test]
     fn leaving_a_pdf_drops_the_bitmap_and_ignores_a_late_page() {
-        let page = PdfView::Page { gen: Generation::new(7) };
+        let page = PdfView::Page {
+            gen: Generation::new(7),
+        };
         let (view, effects) = step_pdf_view(page, PdfViewEvent::Release);
         assert_eq!(view, PdfView::Idle);
         assert_eq!(effects, vec![PdfViewEffect::DropBitmap]);
@@ -1040,7 +1082,9 @@ mod tests {
         assert_eq!(view, PdfView::Idle);
         assert!(effects.is_empty());
 
-        let icon = PdfView::Icon { gen: Generation::new(7) };
+        let icon = PdfView::Icon {
+            gen: Generation::new(7),
+        };
         let (view, effects) = step_pdf_view(icon, PdfViewEvent::Release);
         assert_eq!(view, PdfView::Idle);
         assert_eq!(

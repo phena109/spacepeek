@@ -8,9 +8,7 @@ use crate::image_preview::{
     decode_image, sniff_image, DecodedImage, ImageError, ImageFormat, ImageLimits,
 };
 use crate::markdown::{is_markdown_path, render_markdown, should_render_markdown};
-use crate::pdf::{
-    extensionless_pdf, gate_pdf_file, is_pdf_path, PdfError, PdfGate, PdfLimits,
-};
+use crate::pdf::{extensionless_pdf, gate_pdf_file, is_pdf_path, PdfError, PdfGate, PdfLimits};
 use crate::svg::{is_svg_path, render_svg, sniff_svg, SvgError, SvgLimits, SVG_SNIFF_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1526,7 +1524,6 @@ mod tests {
             "notes.docx",
             "sheet.xlsx",
             "deck.pptx",
-            "book.pdf",
             "song.mp3",
             "clip.mp4",
             "data.zip",
@@ -1542,6 +1539,87 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn pdf_files_take_the_placeholder_path_and_other_formats_do_not() {
+        use crate::pdf::PdfError;
+
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["notes.pdf", "Notes.PDF", ".pdf"] {
+            let path = write_file(&dir, name, b"%PDF-1.4\n%%EOF\n");
+            let err = load(&path, PreviewLimits::default()).unwrap_err();
+            assert!(err.is_pdf_placeholder(), "{name}");
+            assert!(err.is_pdf(), "{name}");
+            assert_eq!(err.header_status(), "PDF");
+            assert_eq!(err.user_message(name), "");
+            assert!(err.wants_quick_info());
+            assert_eq!(denied_kind(&path), None, "{name}");
+        }
+
+        let empty = write_file(&dir, "empty.pdf", b"");
+        assert_eq!(
+            load(&empty, PreviewLimits::default()),
+            Err(PreviewError::Empty)
+        );
+
+        let big = write_file(&dir, "big.PDF", b"%PDF-1.1\n");
+        let mut limits = PreviewLimits::default();
+        limits.pdf.max_file_bytes = 3;
+        let err = load(&big, limits).unwrap_err();
+        assert!(matches!(
+            err,
+            PreviewError::Pdf {
+                error: PdfError::FileTooLarge { bytes: 9 },
+                ..
+            }
+        ));
+        assert_eq!(err.header_status(), "Too large");
+        assert!(err.user_message("big.PDF").contains("too large"));
+
+        let pdfx = write_file(&dir, "notes.pdfx", b"hello\n");
+        let preview = load(&pdfx, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert_eq!(preview.pdf_pages, 0);
+        assert!(preview.content.contains("hello"));
+
+        let txt = write_file(&dir, "notes.txt", b"%PDF-1.4 this stays text\n");
+        let preview = load(&txt, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert!(preview.content.contains("%PDF"));
+
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice(b"%PDF-1.4\n");
+        let sniff = write_file(&dir, "scan", &bom);
+        let err = load(&sniff, PreviewLimits::default()).unwrap_err();
+        assert!(err.is_pdf_placeholder());
+
+        let plain = write_file(&dir, "Makefile", b"all:\n\ttrue\n");
+        let preview = load(&plain, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert!(preview.content.contains("all:"));
+
+        let png = rgba_png(1, 1, &[1, 2, 3, 255]);
+        let photo = write_file(&dir, "photo.png", &png);
+        let preview = load(&photo, PreviewLimits::default()).unwrap();
+        assert_eq!(
+            preview.image.as_ref().unwrap().format,
+            crate::image_preview::ImageFormat::Png
+        );
+        assert_eq!(preview.pdf_pages, 0);
+
+        let disguised = write_file(&dir, "photo.pdf", &png);
+        let err = load(&disguised, PreviewLimits::default()).unwrap_err();
+        assert!(err.is_pdf_placeholder());
+
+        let token = CancelToken::new();
+        let stale = token.generate();
+        let _live = token.generate();
+        let current = write_file(&dir, "current.pdf", b"%PDF-1.4\n");
+        assert_eq!(
+            load_text_preview(&current, PreviewLimits::default(), &token, stale),
+            Err(PreviewError::Cancelled)
+        );
     }
 
     #[test]

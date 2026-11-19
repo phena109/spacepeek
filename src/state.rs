@@ -350,6 +350,7 @@ mod tests {
             total_bytes: 2,
             image: None,
             markdown_rtf: None,
+            pdf_pages: 0,
         }
     }
 
