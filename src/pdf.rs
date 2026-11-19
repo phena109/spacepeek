@@ -221,6 +221,32 @@ pub fn classify_pdf_open_failure(password_protected: Option<bool>, encrypt_dict:
     }
 }
 
+/// `REGDB_E_CLASSNOTREG`. The PDF activation factory is not registered.
+const HRESULT_CLASSNOTREG: i32 = 0x8004_0154_u32 as i32;
+/// `CLASS_E_CLASSNOTAVAILABLE`.
+const HRESULT_CLASSNOTAVAILABLE: i32 = 0x8004_0111_u32 as i32;
+/// `CO_E_NOTINITIALIZED`. WinRT was used before `RoInitialize`.
+const HRESULT_NOT_INITIALIZED: i32 = 0x8004_01F0_u32 as i32;
+
+/// `true` when `hresult` means Windows.Data.Pdf could not be activated.
+/// A damaged file uses some other code and stays a file error.
+pub fn is_pdf_engine_unavailable(hresult: i32) -> bool {
+    matches!(
+        hresult,
+        HRESULT_CLASSNOTREG | HRESULT_CLASSNOTAVAILABLE | HRESULT_NOT_INITIALIZED
+    )
+}
+
+/// Activation failures become [`PdfError::Unavailable`]. Anything else that
+/// reaches this helper is a bad file, not a missing engine.
+pub fn pdf_error_from_hresult(hresult: i32) -> PdfError {
+    if is_pdf_engine_unavailable(hresult) {
+        PdfError::Unavailable
+    } else {
+        PdfError::Damaged
+    }
+}
+
 /// `true` when `bytes` contains a PDF name token `/Encrypt` (not
 /// `/Encryption` or a longer name).
 pub fn contains_pdf_encrypt(bytes: &[u8]) -> bool {
@@ -837,6 +863,24 @@ mod tests {
             PdfError::Damaged
         );
         assert_eq!(classify_pdf_open_failure(None, false), PdfError::Damaged);
+    }
+
+    #[test]
+    fn activation_hresults_are_unavailable_and_other_codes_are_damaged() {
+        assert!(is_pdf_engine_unavailable(HRESULT_CLASSNOTREG));
+        assert!(is_pdf_engine_unavailable(HRESULT_CLASSNOTAVAILABLE));
+        assert!(is_pdf_engine_unavailable(HRESULT_NOT_INITIALIZED));
+        assert!(!is_pdf_engine_unavailable(0));
+        // E_FAIL. A failed load, not a missing PDF engine.
+        assert!(!is_pdf_engine_unavailable(0x8000_4005_u32 as i32));
+        assert_eq!(
+            pdf_error_from_hresult(HRESULT_NOT_INITIALIZED),
+            PdfError::Unavailable
+        );
+        assert_eq!(
+            pdf_error_from_hresult(0x8000_4005_u32 as i32),
+            PdfError::Damaged
+        );
     }
 
     #[test]
