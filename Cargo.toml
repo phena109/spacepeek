@@ -11,7 +11,8 @@ path = "src/lib.rs"
 
 [dependencies]
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "ico", "webp"] }
+# 0.25.10 needs rustc 1.88 (`as_chunks`). 0.25.9 is the newest 0.25 that builds on 1.85.
+image = { version = "=0.25.9", default-features = false, features = ["png", "jpeg", "bmp", "gif", "ico", "webp"] }
 pulldown-cmark = { version = "0.13.6", default-features = false }
 resvg = { version = "0.50", default-features = false, features = [
     "text",
