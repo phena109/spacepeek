@@ -26,9 +26,10 @@ use windows::Win32::System::WinRT::IMemoryBufferByteAccess;
 
 use crate::image_preview::{DecodedImage, ImageFormat};
 use crate::pdf::{
-    classify_pdf_open_failure, gate_pdf_file, pack_bgra_rows, pdf_error_from_hresult,
-    pdf_page_pixels, read_encrypt_probe, settle_pdf_job, PdfError, PdfGate, PdfJobPhase,
-    PdfJobSnap, PdfLimits, PdfPagePx, PdfSettle, PdfTarget,
+    classify_pdf_open_failure, gate_pdf_bitmap, gate_pdf_file, pack_bgra_rows,
+    pdf_error_from_hresult, pdf_page_pixels, pdf_sample_alpha, read_encrypt_probe, settle_pdf_job,
+    PdfError, PdfGate, PdfJobPhase, PdfJobSnap, PdfLimits, PdfPagePx, PdfSampleAlpha, PdfSettle,
+    PdfTarget,
 };
 use crate::preview::{CancelToken, Generation};
 
@@ -233,16 +234,49 @@ fn decode_page(
     let created =
         BitmapDecoder::CreateAsync(output).map_err(|err| pdf_error_from_hresult(err.code().0))?;
     let decoder = take_operation(&created, PdfJobPhase::Rendering, clock)?;
-    let converted = decoder
-        .GetSoftwareBitmapConvertedAsync(BitmapPixelFormat::Bgra8, BitmapAlphaMode::Ignore)
-        .map_err(|err| pdf_error_from_hresult(err.code().0))?;
-    let bitmap = take_operation(&converted, PdfJobPhase::Rendering, clock)?;
-    let image = copy_bitmap(&bitmap, px);
+    let width = decoder.PixelWidth().map_err(|_| PdfError::Damaged)?;
+    let height = decoder.PixelHeight().map_err(|_| PdfError::Damaged)?;
+    // The renderer was asked for `px`, but a decoder that ignored that size
+    // must not allocate a SoftwareBitmap past the cap.
+    gate_pdf_bitmap(width, height, clock.limits)?;
+    let bitmap = convert_page(&decoder, clock)?;
+    let image = copy_bitmap(&bitmap, px, clock.limits);
     let _ = bitmap.Close();
     image
 }
 
-fn copy_bitmap(bitmap: &SoftwareBitmap, px: &PdfPagePx) -> Result<DecodedImage, PdfError> {
+/// Straight alpha keeps real coverage so transparent regions composite on
+/// white. `BitmapAlphaMode::Ignore` stores alpha 0 and would paint a white
+/// page, so it is only the fallback when straight conversion fails. Cancel
+/// and timeout do not start that fallback.
+fn convert_page(
+    decoder: &BitmapDecoder,
+    clock: JobClock<'_>,
+) -> Result<SoftwareBitmap, PdfError> {
+    match try_convert(decoder, BitmapAlphaMode::Straight, clock) {
+        Ok(bitmap) => Ok(bitmap),
+        Err(err @ (PdfError::Cancelled | PdfError::TimedOut)) => Err(err),
+        Err(_) => try_convert(decoder, BitmapAlphaMode::Ignore, clock),
+    }
+}
+
+fn try_convert(
+    decoder: &BitmapDecoder,
+    alpha: BitmapAlphaMode,
+    clock: JobClock<'_>,
+) -> Result<SoftwareBitmap, PdfError> {
+    clock.gate(PdfJobPhase::Rendering)?;
+    let op = decoder
+        .GetSoftwareBitmapConvertedAsync(BitmapPixelFormat::Bgra8, alpha)
+        .map_err(|err| pdf_error_from_hresult(err.code().0))?;
+    take_operation(&op, PdfJobPhase::Rendering, clock)
+}
+
+fn copy_bitmap(
+    bitmap: &SoftwareBitmap,
+    px: &PdfPagePx,
+    limits: &PdfLimits,
+) -> Result<DecodedImage, PdfError> {
     let width_i = bitmap.PixelWidth().map_err(|_| PdfError::Damaged)?;
     let height_i = bitmap.PixelHeight().map_err(|_| PdfError::Damaged)?;
     if width_i <= 0 || height_i <= 0 {
@@ -250,10 +284,17 @@ fn copy_bitmap(bitmap: &SoftwareBitmap, px: &PdfPagePx) -> Result<DecodedImage, 
     }
     let width = u32::try_from(width_i).map_err(|_| PdfError::InvalidSize)?;
     let height = u32::try_from(height_i).map_err(|_| PdfError::InvalidSize)?;
+    gate_pdf_bitmap(width, height, limits)?;
+    let alpha = pdf_sample_alpha(
+        bitmap
+            .BitmapAlphaMode()
+            .map_err(|_| PdfError::Damaged)?
+            .0,
+    );
     let buffer = bitmap
         .LockBuffer(BitmapBufferAccessMode::Read)
         .map_err(|_| PdfError::Damaged)?;
-    let bgra = copy_plane(&buffer, width, height);
+    let bgra = copy_plane(&buffer, width, height, alpha);
     let _ = buffer.Close();
     Ok(DecodedImage {
         width,
@@ -265,7 +306,12 @@ fn copy_bitmap(bitmap: &SoftwareBitmap, px: &PdfPagePx) -> Result<DecodedImage, 
     })
 }
 
-fn copy_plane(buffer: &BitmapBuffer, width: u32, height: u32) -> Result<Vec<u8>, PdfError> {
+fn copy_plane(
+    buffer: &BitmapBuffer,
+    width: u32,
+    height: u32,
+    alpha: PdfSampleAlpha,
+) -> Result<Vec<u8>, PdfError> {
     let plane = buffer
         .GetPlaneDescription(0)
         .map_err(|_| PdfError::Damaged)?;
@@ -273,7 +319,7 @@ fn copy_plane(buffer: &BitmapBuffer, width: u32, height: u32) -> Result<Vec<u8>,
     let access = reference
         .cast::<IMemoryBufferByteAccess>()
         .map_err(|_| PdfError::Damaged)?;
-    let copied = read_plane(&access, plane.StartIndex, width, height, plane.Stride);
+    let copied = read_plane(&access, plane.StartIndex, width, height, plane.Stride, alpha);
     let _ = reference.Close();
     copied
 }
@@ -284,6 +330,7 @@ fn read_plane(
     width: u32,
     height: u32,
     stride: i32,
+    alpha: PdfSampleAlpha,
 ) -> Result<Vec<u8>, PdfError> {
     let mut ptr = std::ptr::null_mut();
     let mut cap = 0_u32;
@@ -297,7 +344,7 @@ fn read_plane(
     // caller closes that reference only after this function returns, and the
     // rows are copied into an owned buffer before that.
     let src = unsafe { std::slice::from_raw_parts(ptr, len) };
-    pack_bgra_rows(src, start, width, height, stride)
+    pack_bgra_rows(src, start, width, height, stride, alpha)
 }
 
 trait AsyncInfo {

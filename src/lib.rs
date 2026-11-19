@@ -66,12 +66,12 @@ pub use markdown::{
 };
 pub use pdf::{
     classify_pdf_open_failure, contains_pdf_encrypt, extensionless_pdf, format_pdf_header,
-    format_pdf_pages, gate_pdf_file, is_pdf_engine_unavailable, is_pdf_path, pack_bgra_rows,
-    pdf_error_from_hresult, pdf_job_decision, pdf_page_pixels, preview_from_page,
-    read_encrypt_probe, settle_pdf_job, sniff_pdf, step_pdf_view, PdfError, PdfGate,
-    PdfJobDecision, PdfJobPhase, PdfJobSnap, PdfLimits, PdfPagePx, PdfSettle, PdfTarget, PdfView,
-    PdfViewEffect, PdfViewEvent, PDF_ENCRYPT_SCAN_WINDOW, PDF_MAX_FILE_BYTES, PDF_MAX_PIXELS,
-    PDF_TIMEOUT,
+    format_pdf_pages, gate_pdf_bitmap, gate_pdf_file, is_pdf_engine_unavailable, is_pdf_path,
+    pack_bgra_rows, pdf_error_from_hresult, pdf_job_decision, pdf_page_pixels, pdf_sample_alpha,
+    preview_from_page, read_encrypt_probe, settle_pdf_job, sniff_pdf, step_pdf_view, PdfError,
+    PdfGate, PdfJobDecision, PdfJobPhase, PdfJobSnap, PdfLimits, PdfPagePx, PdfSampleAlpha,
+    PdfSettle, PdfTarget, PdfView, PdfViewEffect, PdfViewEvent, PDF_ENCRYPT_SCAN_WINDOW,
+    PDF_MAX_FILE_BYTES, PDF_MAX_PIXELS, PDF_TIMEOUT,
 };
 pub use preview::{
     fallback_type_name, format_byte_size, format_compact_size, format_quick_info, format_size_line,

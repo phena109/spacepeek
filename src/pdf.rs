@@ -453,7 +453,60 @@ fn clamp_render(
     Ok((rw, rh))
 }
 
-/// Copy BGRA rows into a tightly packed opaque buffer, composited on white.
+/// How decoded BGRA samples store alpha.
+///
+/// [`PdfSampleAlpha::Ignored`] matches `BitmapAlphaMode::Ignore`: the decoder
+/// keeps the color and writes 0 into the alpha channel. Compositing those
+/// samples on white turns the page white, so they are copied instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfSampleAlpha {
+    /// Color is stored independently of alpha.
+    Straight,
+    /// Color is already multiplied by alpha.
+    Premultiplied,
+    /// Alpha was discarded. The color channels are the opaque pixel.
+    Ignored,
+}
+
+/// Map a WinRT `BitmapAlphaMode` value (`Premultiplied` = 0, `Straight` = 1,
+/// `Ignore` = 2). Any other value is treated as ignored so a zero alpha
+/// channel cannot wipe the color.
+pub fn pdf_sample_alpha(bitmap_alpha_mode: i32) -> PdfSampleAlpha {
+    match bitmap_alpha_mode {
+        0 => PdfSampleAlpha::Premultiplied,
+        1 => PdfSampleAlpha::Straight,
+        _ => PdfSampleAlpha::Ignored,
+    }
+}
+
+/// Reject a decoded bitmap before its pixels are allocated.
+///
+/// A zero side is [`PdfError::InvalidSize`]. A side above
+/// `limits.max_dimension`, or a product above the smaller of
+/// `limits.max_pixels` and [`PDF_MAX_PIXELS`], is [`PdfError::TooManyPixels`].
+/// A size equal to the cap is allowed. The render request is already clamped;
+/// this catches a decoder that ignored that size.
+pub fn gate_pdf_bitmap(width: u32, height: u32, limits: &PdfLimits) -> Result<(), PdfError> {
+    if width == 0 || height == 0 {
+        return Err(PdfError::InvalidSize);
+    }
+    let max_side = limits.max_dimension.max(1);
+    if width > max_side || height > max_side {
+        return Err(PdfError::TooManyPixels);
+    }
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    let cap = limits.max_pixels.min(PDF_MAX_PIXELS);
+    if pixels > cap {
+        return Err(PdfError::TooManyPixels);
+    }
+    Ok(())
+}
+
+/// Copy BGRA rows into a tightly packed opaque buffer.
+///
+/// Straight and premultiplied samples are composited on white. Ignored
+/// samples copy RGB and store alpha 255, because `BitmapAlphaMode::Ignore`
+/// writes 0 into the alpha channel while leaving the color intact.
 ///
 /// `start` is the first byte of row 0. `stride` may be negative (bottom-up).
 /// Out-of-range rows are [`PdfError::Damaged`]. The product is capped at
@@ -464,6 +517,7 @@ pub fn pack_bgra_rows(
     width: u32,
     height: u32,
     stride: i32,
+    alpha: PdfSampleAlpha,
 ) -> Result<Vec<u8>, PdfError> {
     if width == 0 || height == 0 || stride == 0 {
         return Err(PdfError::InvalidSize);
@@ -493,9 +547,22 @@ pub fn pack_bgra_rows(
             return Err(PdfError::Damaged);
         }
         for px in src[row..end].chunks_exact(4) {
-            out.push(over_white(px[0], px[3]));
-            out.push(over_white(px[1], px[3]));
-            out.push(over_white(px[2], px[3]));
+            let (b, g, r) = match alpha {
+                PdfSampleAlpha::Straight => (
+                    over_white(px[0], px[3]),
+                    over_white(px[1], px[3]),
+                    over_white(px[2], px[3]),
+                ),
+                PdfSampleAlpha::Premultiplied => (
+                    over_white_premultiplied(px[0], px[3]),
+                    over_white_premultiplied(px[1], px[3]),
+                    over_white_premultiplied(px[2], px[3]),
+                ),
+                PdfSampleAlpha::Ignored => (px[0], px[1], px[2]),
+            };
+            out.push(b);
+            out.push(g);
+            out.push(r);
             out.push(255);
         }
     }
@@ -508,6 +575,11 @@ fn over_white(channel: u8, alpha: u8) -> u8 {
     let inv = 255 - alpha;
     let mixed = (channel * alpha + 255 * inv + 127) / 255;
     u8::try_from(mixed).unwrap_or(255)
+}
+
+/// `stored + 255 * (1 - alpha/255)`, which is `stored + (255 - alpha)`.
+fn over_white_premultiplied(channel: u8, alpha: u8) -> u8 {
+    channel.saturating_add(255 - alpha)
 }
 
 /// Preview value for a rendered page. `source_*` on `image` is the DIP size.
@@ -961,23 +1033,115 @@ mod tests {
             0, 0, 0, 128, // BGRA black, half alpha
             1, 2, 3, 4, // padding
         ];
-        let packed = pack_bgra_rows(&src, 0, 2, 1, 12).unwrap();
+        let packed = pack_bgra_rows(&src, 0, 2, 1, 12, PdfSampleAlpha::Straight).unwrap();
         assert_eq!(packed.len(), 8);
         assert_eq!(&packed[0..4], &[0, 0, 255, 255]);
-        assert_eq!(packed[7], 255);
-        assert!(packed[4] > 0 && packed[6] > 0);
+        // Half-transparent black on white is gray, not black and not white.
+        assert_eq!(&packed[4..8], &[127, 127, 127, 255]);
 
         let bottom_up = [
             0, 255, 0, 255, // row 1 green
             255, 0, 0, 255, // row 0 blue, stored second
         ];
-        let flipped = pack_bgra_rows(&bottom_up, 4, 1, 2, -4).unwrap();
+        let flipped = pack_bgra_rows(&bottom_up, 4, 1, 2, -4, PdfSampleAlpha::Straight).unwrap();
         assert_eq!(&flipped[0..4], &[255, 0, 0, 255]);
         assert_eq!(&flipped[4..8], &[0, 255, 0, 255]);
 
-        assert_eq!(pack_bgra_rows(&src, 0, 0, 1, 4), Err(PdfError::InvalidSize));
-        assert_eq!(pack_bgra_rows(&src, 0, 4, 1, 4), Err(PdfError::Damaged));
-        assert_eq!(pack_bgra_rows(&src, -4, 1, 1, 4), Err(PdfError::Damaged));
+        assert_eq!(
+            pack_bgra_rows(&src, 0, 0, 1, 4, PdfSampleAlpha::Straight),
+            Err(PdfError::InvalidSize)
+        );
+        assert_eq!(
+            pack_bgra_rows(&src, 0, 4, 1, 4, PdfSampleAlpha::Straight),
+            Err(PdfError::Damaged)
+        );
+        assert_eq!(
+            pack_bgra_rows(&src, -4, 1, 1, 4, PdfSampleAlpha::Straight),
+            Err(PdfError::Damaged)
+        );
+    }
+
+    #[test]
+    fn ignored_alpha_keeps_the_color_instead_of_painting_white() {
+        // BitmapAlphaMode::Ignore stores the color and sets alpha to 0.
+        let src = [0, 0, 255, 0];
+        let packed = pack_bgra_rows(&src, 0, 1, 1, 4, PdfSampleAlpha::Ignored).unwrap();
+        assert_eq!(packed, vec![0, 0, 255, 255]);
+        // A non-zero leftover alpha is still not a coverage value.
+        let leftover = [0, 0, 255, 128];
+        let packed = pack_bgra_rows(&leftover, 0, 1, 1, 4, PdfSampleAlpha::Ignored).unwrap();
+        assert_eq!(packed, vec![0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn premultiplied_samples_composite_on_white() {
+        let half_black = [0, 0, 0, 128];
+        let packed = pack_bgra_rows(&half_black, 0, 1, 1, 4, PdfSampleAlpha::Premultiplied).unwrap();
+        assert_eq!(packed, vec![127, 127, 127, 255]);
+
+        // 50% red, already multiplied: stored red 128, alpha 128, on white.
+        let half_red = [0, 0, 128, 128];
+        let packed = pack_bgra_rows(&half_red, 0, 1, 1, 4, PdfSampleAlpha::Premultiplied).unwrap();
+        assert_eq!(packed, vec![127, 127, 255, 255]);
+
+        let clear = [0, 0, 0, 0];
+        let packed = pack_bgra_rows(&clear, 0, 1, 1, 4, PdfSampleAlpha::Premultiplied).unwrap();
+        assert_eq!(packed, vec![255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn winrt_bitmap_alpha_mode_selects_the_pack() {
+        assert_eq!(pdf_sample_alpha(0), PdfSampleAlpha::Premultiplied);
+        assert_eq!(pdf_sample_alpha(1), PdfSampleAlpha::Straight);
+        assert_eq!(pdf_sample_alpha(2), PdfSampleAlpha::Ignored);
+        assert_eq!(pdf_sample_alpha(-1), PdfSampleAlpha::Ignored);
+        assert_eq!(pdf_sample_alpha(99), PdfSampleAlpha::Ignored);
+    }
+
+    #[test]
+    fn decoded_bitmap_is_rejected_before_pixels_are_allocated() {
+        let limits = PdfLimits::default();
+        assert_eq!(limits.max_dimension, 4096);
+        assert_eq!(gate_pdf_bitmap(1, 1, &limits), Ok(()));
+        assert_eq!(gate_pdf_bitmap(4096, 4096, &limits), Ok(()));
+        assert_eq!(gate_pdf_bitmap(0, 10, &limits), Err(PdfError::InvalidSize));
+        assert_eq!(gate_pdf_bitmap(10, 0, &limits), Err(PdfError::InvalidSize));
+        assert_eq!(
+            gate_pdf_bitmap(4097, 1, &limits),
+            Err(PdfError::TooManyPixels)
+        );
+        assert_eq!(
+            gate_pdf_bitmap(1, 4097, &limits),
+            Err(PdfError::TooManyPixels)
+        );
+
+        let tight = PdfLimits {
+            max_pixels: 100,
+            ..PdfLimits::default()
+        };
+        assert_eq!(gate_pdf_bitmap(10, 10, &tight), Ok(()));
+        assert_eq!(
+            gate_pdf_bitmap(11, 10, &tight),
+            Err(PdfError::TooManyPixels)
+        );
+
+        // A raised caller cap cannot exceed the absolute pixel ceiling.
+        let raised = PdfLimits {
+            max_pixels: PDF_MAX_PIXELS + 1,
+            max_dimension: 20_000,
+            ..PdfLimits::default()
+        };
+        assert_eq!(gate_pdf_bitmap(6_000, 6_000, &raised), Ok(()));
+        assert!(u64::from(6_000) * u64::from(6_000) <= PDF_MAX_PIXELS);
+        assert_eq!(
+            gate_pdf_bitmap(6_000, 6_000, &raised),
+            Ok(())
+        );
+        // 7000 * 5000 = 35_000_000, both sides under 20_000, over 32_000_000.
+        assert_eq!(
+            gate_pdf_bitmap(7_000, 5_000, &raised),
+            Err(PdfError::TooManyPixels)
+        );
     }
 
     #[test]
