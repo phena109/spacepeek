@@ -1,5 +1,6 @@
 use crate::keys::SessionPhase;
-use crate::preview::{CancelToken, Generation, Preview, PreviewError};
+use crate::pdf::PdfError;
+use crate::preview::{CancelToken, Generation, Preview, PreviewError, QuickInfo};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -45,6 +46,12 @@ pub enum Event {
     SpacePressed(PathBuf),
     EscPressed,
     LoadFinished(Generation, Result<Preview, PreviewError>),
+    /// The PDF worker finished a first page for this generation.
+    ///
+    /// Applied only while the shell-icon placeholder for that generation is
+    /// still the current preview. A stale, cancelled, or closed result is
+    /// dropped, including one that arrives after Esc.
+    PdfReady(Generation, Result<Preview, PreviewError>),
     FocusLost,
     /// The window was shown with no activation. Only [`PreviewState::PendingShow`].
     ShowCommitted,
@@ -169,6 +176,17 @@ pub fn step(
                 Effect::CancelLoad,
             ],
         ),
+        // The icon is already on screen and a render may still be in flight.
+        // Esc has to cancel that render, not only hide the window.
+        (PreviewState::Failed { error, .. }, Event::EscPressed) if error.is_pdf_placeholder() => (
+            PreviewState::Hidden,
+            vec![
+                Effect::HideWindow {
+                    restore_focus: true,
+                },
+                Effect::CancelLoad,
+            ],
+        ),
         (PreviewState::Showing { .. }, Event::EscPressed)
         | (PreviewState::Failed { .. }, Event::EscPressed) => (
             PreviewState::Hidden,
@@ -207,6 +225,15 @@ pub fn step(
                 Effect::CancelLoad,
             ],
         ),
+        (PreviewState::Failed { error, .. }, Event::FocusLost) if error.is_pdf_placeholder() => (
+            PreviewState::Hidden,
+            vec![
+                Effect::HideWindow {
+                    restore_focus: false,
+                },
+                Effect::CancelLoad,
+            ],
+        ),
         (PreviewState::Showing { .. } | PreviewState::Failed { .. }, Event::FocusLost) => (
             PreviewState::Hidden,
             vec![Effect::HideWindow {
@@ -220,6 +247,7 @@ pub fn step(
         (state, Event::ShowCommitted | Event::ShowAborted) => (state, vec![]),
         (state, Event::SelectionChanged(path)) => selection_changed(state, path, cancel),
         (state, Event::LoadFinished(gen, result)) => load_finished(state, gen, result, cancel),
+        (state, Event::PdfReady(gen, result)) => pdf_ready(state, gen, result, cancel),
     }
 }
 
@@ -327,6 +355,72 @@ fn load_finished(
         PreviewState::PendingShow { gen, path, outcome },
         vec![Effect::PresentPreview],
     )
+}
+
+/// Replace the shell-icon placeholder with the page, or with a failure that
+/// keeps the placeholder's quick info. Anything else is ignored so a late
+/// bitmap cannot paint over a newer file, a closed window, or a failure
+/// that already replaced the placeholder.
+fn pdf_ready(
+    state: PreviewState,
+    gen: Generation,
+    result: Result<Preview, PreviewError>,
+    cancel: &CancelToken,
+) -> (PreviewState, Vec<Effect>) {
+    if cancel.is_cancelled(&gen) || pdf_result_dropped(&result) {
+        return (state, vec![]);
+    }
+    match state {
+        PreviewState::Failed {
+            gen: cur,
+            path,
+            error,
+        } if cur == gen && error.is_pdf_placeholder() => match result {
+            Ok(preview) => (
+                PreviewState::Showing { gen, path, preview },
+                vec![Effect::UpdateContent],
+            ),
+            Err(incoming) => (
+                PreviewState::Failed {
+                    gen,
+                    path,
+                    error: incoming.with_quick_info(quick_info_or_default(&error)),
+                },
+                vec![Effect::UpdateContent],
+            ),
+        },
+        PreviewState::PendingShow {
+            gen: cur,
+            path,
+            outcome: ShowOutcome::Failed(error),
+        } if cur == gen && error.is_pdf_placeholder() => {
+            let info = quick_info_or_default(&error);
+            let outcome = match result {
+                Ok(preview) => ShowOutcome::Ready(preview),
+                Err(incoming) => ShowOutcome::Failed(incoming.with_quick_info(info)),
+            };
+            (
+                PreviewState::PendingShow { gen, path, outcome },
+                vec![],
+            )
+        }
+        other => (other, vec![]),
+    }
+}
+
+fn pdf_result_dropped(result: &Result<Preview, PreviewError>) -> bool {
+    matches!(
+        result,
+        Err(PreviewError::Cancelled)
+            | Err(PreviewError::Pdf {
+                error: PdfError::Cancelled,
+                ..
+            })
+    )
+}
+
+fn quick_info_or_default(error: &PreviewError) -> QuickInfo {
+    error.quick_info().cloned().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -899,5 +993,296 @@ mod tests {
         assert_eq!(SessionPhase::from_code(1), SessionPhase::Pending);
         assert_eq!(SessionPhase::from_code(2), SessionPhase::Visible);
         assert_eq!(SessionPhase::from_code(9), SessionPhase::Hidden);
+    }
+
+    fn pdf_path() -> PathBuf {
+        PathBuf::from("notes.pdf")
+    }
+
+    fn placeholder() -> PreviewError {
+        PreviewError::pdf(PdfError::Rendering).with_quick_info(QuickInfo {
+            type_name: Some("PDF Document".to_string()),
+            size_bytes: Some(100),
+            modified: Some("today".to_string()),
+        })
+    }
+
+    fn failed_pdf(gen: u64) -> PreviewState {
+        PreviewState::Failed {
+            gen: Generation::new(gen),
+            path: pdf_path(),
+            error: placeholder(),
+        }
+    }
+
+    fn page_preview() -> Preview {
+        Preview {
+            pdf_pages: 12,
+            ..sample_preview()
+        }
+    }
+
+    #[test]
+    fn pdf_placeholder_shows_immediately_like_any_other_load_error() {
+        let cancel = CancelToken::new();
+        let (loading_state, _) = step(
+            PreviewState::Hidden,
+            Event::SpacePressed(pdf_path()),
+            &cancel,
+        );
+        let (state, effects) = step(
+            loading_state,
+            Event::LoadFinished(Generation::new(0), Err(placeholder())),
+            &cancel,
+        );
+        assert!(matches!(
+            state,
+            PreviewState::PendingShow {
+                outcome: ShowOutcome::Failed(error),
+                ..
+            } if error.is_pdf_placeholder()
+        ));
+        assert_eq!(effects, vec![Effect::PresentPreview]);
+        assert_eq!(session_phase(&state), SessionPhase::Pending);
+
+        let (state, _) = step(state, Event::ShowCommitted, &cancel);
+        assert!(matches!(
+            state,
+            PreviewState::Failed { error, .. } if error.is_pdf_placeholder()
+        ));
+        assert_eq!(session_phase(&state), SessionPhase::Visible);
+    }
+
+    #[test]
+    fn a_matching_pdf_page_replaces_the_icon() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(
+            failed_pdf(1),
+            Event::PdfReady(Generation::new(1), Ok(page_preview())),
+            &cancel,
+        );
+        assert_eq!(effects, vec![Effect::UpdateContent]);
+        match state {
+            PreviewState::Showing { preview, path, .. } => {
+                assert_eq!(preview.pdf_pages, 12);
+                assert_eq!(path, pdf_path());
+            }
+            other => panic!("expected the page, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stale_pdf_page_does_not_replace_the_icon() {
+        let cancel = CancelToken::new();
+        let icon = failed_pdf(2);
+        let (state, effects) = step(
+            icon,
+            Event::PdfReady(Generation::new(1), Ok(page_preview())),
+            &cancel,
+        );
+        assert!(matches!(
+            state,
+            PreviewState::Failed { error, .. } if error.is_pdf_placeholder()
+        ));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn esc_cancels_the_pdf_render_and_drops_a_late_page() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(failed_pdf(4), Event::EscPressed, &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::HideWindow {
+                    restore_focus: true
+                },
+                Effect::CancelLoad,
+            ]
+        );
+        let _ = cancel.generate();
+        let (state, effects) = step(
+            state,
+            Event::PdfReady(Generation::new(4), Ok(page_preview())),
+            &cancel,
+        );
+        assert_eq!(state, PreviewState::Hidden);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn focus_lost_cancels_an_in_flight_pdf_render() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(failed_pdf(4), Event::FocusLost, &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::HideWindow {
+                    restore_focus: false
+                },
+                Effect::CancelLoad,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_file_drops_the_pdf_bitmap_and_a_late_page() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(
+            failed_pdf(1),
+            Event::PdfReady(Generation::new(1), Ok(page_preview())),
+            &cancel,
+        );
+        assert!(matches!(state, PreviewState::Showing { .. }));
+        let (state, effects) = step(state, Event::SelectionChanged(other_path()), &cancel);
+        assert!(matches!(
+            state,
+            PreviewState::Loading {
+                replacing: true,
+                ..
+            }
+        ));
+        assert!(effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::StartLoad { .. })));
+        let (state, effects) = step(
+            state,
+            Event::PdfReady(Generation::new(1), Ok(page_preview())),
+            &cancel,
+        );
+        assert!(matches!(state, PreviewState::Loading { .. }));
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn pdf_failure_keeps_the_placeholder_quick_info() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(
+            failed_pdf(1),
+            Event::PdfReady(
+                Generation::new(1),
+                Err(PreviewError::pdf(PdfError::PasswordProtected)),
+            ),
+            &cancel,
+        );
+        assert_eq!(effects, vec![Effect::UpdateContent]);
+        match state {
+            PreviewState::Failed { error, .. } => {
+                assert!(matches!(
+                    error,
+                    PreviewError::Pdf {
+                        error: PdfError::PasswordProtected,
+                        ..
+                    }
+                ));
+                let info = error.quick_info().unwrap();
+                assert_eq!(info.type_name.as_deref(), Some("PDF Document"));
+                assert_eq!(info.size_bytes, Some(100));
+            }
+            other => panic!("expected the failure view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cancelled_pdf_result_keeps_the_icon() {
+        let cancel = CancelToken::new();
+        for result in [
+            Err(PreviewError::Cancelled),
+            Err(PreviewError::pdf(PdfError::Cancelled)),
+        ] {
+            let (state, effects) = step(
+                failed_pdf(1),
+                Event::PdfReady(Generation::new(1), result),
+                &cancel,
+            );
+            assert!(matches!(
+                state,
+                PreviewState::Failed { error, .. } if error.is_pdf_placeholder()
+            ));
+            assert!(effects.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_pdf_page_that_arrives_before_show_replaces_the_pending_outcome() {
+        let cancel = CancelToken::new();
+        let pending = PreviewState::PendingShow {
+            gen: Generation::new(3),
+            path: pdf_path(),
+            outcome: ShowOutcome::Failed(placeholder()),
+        };
+        let (state, effects) = step(
+            pending,
+            Event::PdfReady(Generation::new(3), Ok(page_preview())),
+            &cancel,
+        );
+        assert!(effects.is_empty());
+        match state {
+            PreviewState::PendingShow {
+                outcome: ShowOutcome::Ready(preview),
+                ..
+            } => assert_eq!(preview.pdf_pages, 12),
+            other => panic!("expected a pending page, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_late_pdf_page_does_not_overwrite_a_failure() {
+        let cancel = CancelToken::new();
+        let (failed, _) = step(
+            failed_pdf(1),
+            Event::PdfReady(
+                Generation::new(1),
+                Err(PreviewError::pdf(PdfError::Damaged)),
+            ),
+            &cancel,
+        );
+        let (state, effects) = step(
+            failed,
+            Event::PdfReady(Generation::new(1), Ok(page_preview())),
+            &cancel,
+        );
+        assert!(effects.is_empty());
+        assert!(matches!(
+            state,
+            PreviewState::Failed {
+                error: PreviewError::Pdf {
+                    error: PdfError::Damaged,
+                    ..
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_pdf_esc_and_focus_loss_do_not_grow_a_cancel() {
+        let cancel = CancelToken::new();
+        let failed = PreviewState::Failed {
+            gen: Generation::new(1),
+            path: path(),
+            error: PreviewError::binary(),
+        };
+        let (_, effects) = step(failed, Event::EscPressed, &cancel);
+        assert_eq!(
+            effects,
+            vec![Effect::HideWindow {
+                restore_focus: true
+            }]
+        );
+        let failed = PreviewState::Failed {
+            gen: Generation::new(1),
+            path: path(),
+            error: PreviewError::binary(),
+        };
+        let (_, effects) = step(failed, Event::FocusLost, &cancel);
+        assert_eq!(
+            effects,
+            vec![Effect::HideWindow {
+                restore_focus: false
+            }]
+        );
     }
 }
