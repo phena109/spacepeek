@@ -458,6 +458,10 @@ pub const MAX_LINE_UTF16: usize = 1_000;
 /// U+2026 HORIZONTAL ELLIPSIS. One UTF-16 code unit, so it never splits a pair.
 const LINE_ELLIPSIS: char = '\u{2026}';
 /// Longest UTF-16 sequence the EDIT control keeps on one row, marker included.
+///
+/// The assertion below and the unit tests reference this. rustc 1.85 does not
+/// count a `const _: () = assert!(...)` reference as a use of the constant.
+#[cfg_attr(not(test), allow(dead_code))]
 const EDIT_LINE_UTF16_LIMIT: usize = 1_023;
 const _: () = assert!(MAX_LINE_UTF16 + LINE_ELLIPSIS.len_utf16() <= EDIT_LINE_UTF16_LIMIT);
 /// How many leading bytes the text sniff inspects.

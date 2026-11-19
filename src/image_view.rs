@@ -25,6 +25,8 @@
 //! the pan is zero and the image stays centred. Arrow keys are
 //! [`ImageCommand::Navigate`] and do not change this state.
 
+use std::cmp::Ordering;
+
 use crate::geometry::{effective_dpi, PxRect, BASE_DPI};
 use crate::image_preview::image_dest_rect;
 
@@ -141,16 +143,14 @@ pub enum ImageCommand {
 /// [`MAX_ZOOM_STEPS`]. A partial notch is `None`.
 pub fn wheel_zoom_command(delta: i32) -> Option<ImageCommand> {
     let steps = delta / 120;
-    if steps > 0 {
-        Some(ImageCommand::ZoomIn {
+    match steps.cmp(&0) {
+        Ordering::Greater => Some(ImageCommand::ZoomIn {
             steps: cap_steps(steps),
-        })
-    } else if steps < 0 {
-        Some(ImageCommand::ZoomOut {
+        }),
+        Ordering::Less => Some(ImageCommand::ZoomOut {
             steps: cap_steps_unsigned(steps.unsigned_abs()),
-        })
-    } else {
-        None
+        }),
+        Ordering::Equal => None,
     }
 }
 
