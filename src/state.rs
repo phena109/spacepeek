@@ -399,10 +399,7 @@ fn pdf_ready(
                 Ok(preview) => ShowOutcome::Ready(preview),
                 Err(incoming) => ShowOutcome::Failed(incoming.with_quick_info(info)),
             };
-            (
-                PreviewState::PendingShow { gen, path, outcome },
-                vec![],
-            )
+            (PreviewState::PendingShow { gen, path, outcome }, vec![])
         }
         other => (other, vec![]),
     }
@@ -1038,7 +1035,7 @@ mod tests {
         assert!(matches!(
             state,
             PreviewState::PendingShow {
-                outcome: ShowOutcome::Failed(error),
+                outcome: ShowOutcome::Failed(ref error),
                 ..
             } if error.is_pdf_placeholder()
         ));
@@ -1048,7 +1045,7 @@ mod tests {
         let (state, _) = step(state, Event::ShowCommitted, &cancel);
         assert!(matches!(
             state,
-            PreviewState::Failed { error, .. } if error.is_pdf_placeholder()
+            PreviewState::Failed { ref error, .. } if error.is_pdf_placeholder()
         ));
         assert_eq!(session_phase(&state), SessionPhase::Visible);
     }
@@ -1090,7 +1087,13 @@ mod tests {
     #[test]
     fn esc_cancels_the_pdf_render_and_drops_a_late_page() {
         let cancel = CancelToken::new();
-        let (state, effects) = step(failed_pdf(4), Event::EscPressed, &cancel);
+        let gen = cancel.generate();
+        let showing_icon = PreviewState::Failed {
+            gen,
+            path: pdf_path(),
+            error: placeholder(),
+        };
+        let (state, effects) = step(showing_icon, Event::EscPressed, &cancel);
         assert_eq!(state, PreviewState::Hidden);
         assert_eq!(
             effects,
@@ -1101,13 +1104,32 @@ mod tests {
                 Effect::CancelLoad,
             ]
         );
+        // `apply` bumps the token when it runs CancelLoad. A finishing
+        // render for the old generation must not reopen the window.
         let _ = cancel.generate();
+        let (state, effects) = step(state, Event::PdfReady(gen, Ok(page_preview())), &cancel);
+        assert_eq!(state, PreviewState::Hidden);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn a_bumped_token_drops_a_page_while_the_icon_is_still_up() {
+        let cancel = CancelToken::new();
+        let gen = cancel.generate();
+        let _newer = cancel.generate();
         let (state, effects) = step(
-            state,
-            Event::PdfReady(Generation::new(4), Ok(page_preview())),
+            PreviewState::Failed {
+                gen,
+                path: pdf_path(),
+                error: placeholder(),
+            },
+            Event::PdfReady(gen, Ok(page_preview())),
             &cancel,
         );
-        assert_eq!(state, PreviewState::Hidden);
+        assert!(matches!(
+            state,
+            PreviewState::Failed { error, .. } if error.is_pdf_placeholder()
+        ));
         assert!(effects.is_empty());
     }
 
@@ -1130,7 +1152,7 @@ mod tests {
     #[test]
     fn a_new_file_drops_the_pdf_bitmap_and_a_late_page() {
         let cancel = CancelToken::new();
-        let (state, effects) = step(
+        let (state, _) = step(
             failed_pdf(1),
             Event::PdfReady(Generation::new(1), Ok(page_preview())),
             &cancel,
