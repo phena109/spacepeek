@@ -8,6 +8,9 @@ use crate::image_preview::{
     decode_image, sniff_image, DecodedImage, ImageError, ImageFormat, ImageLimits,
 };
 use crate::markdown::{is_markdown_path, render_markdown, should_render_markdown};
+use crate::pdf::{
+    extensionless_pdf, gate_pdf_file, is_pdf_path, PdfError, PdfGate, PdfLimits,
+};
 use crate::svg::{is_svg_path, render_svg, sniff_svg, SvgError, SvgLimits, SVG_SNIFF_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +132,12 @@ pub enum PreviewError {
         error: SvgError,
         info: QuickInfo,
     },
+    /// A PDF. [`PdfError::Rendering`] is the icon placeholder while the
+    /// first page renders. Other variants keep that icon and say why.
+    Pdf {
+        error: PdfError,
+        info: QuickInfo,
+    },
 }
 
 impl PartialEq for PreviewError {
@@ -147,6 +156,10 @@ impl PartialEq for PreviewError {
             (
                 PreviewError::Svg { error: a, info: ia },
                 PreviewError::Svg { error: b, info: ib },
+            ) => a == b && ia == ib,
+            (
+                PreviewError::Pdf { error: a, info: ia },
+                PreviewError::Pdf { error: b, info: ib },
             ) => a == b && ia == ib,
             (PreviewError::Binary { info: a }, PreviewError::Binary { info: b }) => a == b,
             (PreviewError::Empty, PreviewError::Empty)
@@ -177,6 +190,7 @@ impl std::fmt::Display for PreviewError {
             PreviewError::Shortcut { .. } => write!(f, "shortcut"),
             PreviewError::Image(err) => write!(f, "{err}"),
             PreviewError::Svg { error, .. } => write!(f, "{error}"),
+            PreviewError::Pdf { error, .. } => write!(f, "{error}"),
         }
     }
 }
@@ -207,6 +221,7 @@ impl PreviewError {
             PreviewError::Io(err) => io_user_message(name, err),
             PreviewError::Image(err) => err.user_message(),
             PreviewError::Svg { error, .. } => error.user_message(name),
+            PreviewError::Pdf { error, .. } => error.user_message(name),
         }
     }
 
@@ -225,6 +240,7 @@ impl PreviewError {
             PreviewError::Io(err) => io_header_status(err).to_string(),
             PreviewError::Image(err) => err.header_status(),
             PreviewError::Svg { error, .. } => error.header_status(),
+            PreviewError::Pdf { error, .. } => error.header_status(),
         }
     }
 
@@ -248,7 +264,8 @@ impl PreviewError {
         match self {
             PreviewError::Binary { info }
             | PreviewError::Denied { info, .. }
-            | PreviewError::Svg { info, .. } => Some(info),
+            | PreviewError::Svg { info, .. }
+            | PreviewError::Pdf { info, .. } => Some(info),
             _ => None,
         }
     }
@@ -263,6 +280,7 @@ impl PreviewError {
             PreviewError::Binary { .. } => PreviewError::Binary { info },
             PreviewError::Denied { kind, .. } => PreviewError::Denied { kind, info },
             PreviewError::Svg { error, .. } => PreviewError::Svg { error, info },
+            PreviewError::Pdf { error, .. } => PreviewError::Pdf { error, info },
             other => other,
         }
     }
@@ -273,6 +291,30 @@ impl PreviewError {
             error,
             info: QuickInfo::default(),
         }
+    }
+
+    /// PDF outcome before quick info has been filled in.
+    pub fn pdf(error: PdfError) -> Self {
+        Self::Pdf {
+            error,
+            info: QuickInfo::default(),
+        }
+    }
+
+    /// The shell-icon placeholder shown while the first page renders.
+    pub fn is_pdf_placeholder(&self) -> bool {
+        matches!(
+            self,
+            PreviewError::Pdf {
+                error: PdfError::Rendering,
+                ..
+            }
+        )
+    }
+
+    /// Any PDF outcome, including the placeholder and the failures.
+    pub fn is_pdf(&self) -> bool {
+        matches!(self, PreviewError::Pdf { .. })
     }
 }
 
@@ -400,6 +442,8 @@ pub struct Preview {
     /// RTF for a Markdown preview, built on the loader thread. `None` for
     /// plain text, images, or a Markdown file that fell back to the EDIT path.
     pub markdown_rtf: Option<Arc<str>>,
+    /// Page count for a rendered PDF. Zero for every other preview.
+    pub pdf_pages: u32,
 }
 
 /// Default file-byte budget for the EDIT control.
@@ -427,6 +471,7 @@ pub struct PreviewLimits {
     pub max_lines: usize,
     pub image: ImageLimits,
     pub svg: SvgLimits,
+    pub pdf: PdfLimits,
 }
 
 impl Default for PreviewLimits {
@@ -436,6 +481,7 @@ impl Default for PreviewLimits {
             max_lines: DEFAULT_MAX_LINES,
             image: ImageLimits::default(),
             svg: SvgLimits::default(),
+            pdf: PdfLimits::default(),
         }
     }
 }
@@ -447,6 +493,7 @@ impl PreviewLimits {
             max_lines,
             image: ImageLimits::default(),
             svg: SvgLimits::default(),
+            pdf: PdfLimits::default(),
         }
     }
 }
@@ -479,7 +526,6 @@ const DENIED_EXTENSIONS: &[(&str, DeniedKind)] = &[
     ("doc", DeniedKind::Binary),
     ("xls", DeniedKind::Binary),
     ("ppt", DeniedKind::Binary),
-    ("pdf", DeniedKind::Binary),
     ("mp3", DeniedKind::Binary),
     ("mp4", DeniedKind::Binary),
     ("m4a", DeniedKind::Binary),
@@ -575,6 +621,12 @@ pub fn load_text_preview<P: AsRef<Path>>(
     if let Some(kind) = denied_kind(path) {
         return Err(PreviewError::denied(kind));
     }
+    // Named `.pdf` files never enter the text, raster, Markdown, or SVG
+    // paths. The placeholder returns before any WinRT work; the page is a
+    // later result from the PDF worker.
+    if is_pdf_path(path) {
+        return pdf_named_outcome(path, &limits.pdf, cancel, gen);
+    }
     if cancel.is_cancelled(&gen) {
         return Err(PreviewError::Cancelled);
     }
@@ -599,6 +651,12 @@ pub fn load_text_preview<P: AsRef<Path>>(
     // files). Named text and raster files never pay for usvg or fontdb.
     if let Some(gzip) = svg_load_kind(path, &mut file, &prefix[..prefix_len])? {
         return load_svg_preview(file, total_bytes, gzip, &limits.svg, cancel, gen);
+    }
+    // Extensionless only, and only the bytes already read for the image
+    // sniff. A `.txt` or `.png` that happens to start with `%PDF` stays on
+    // its own path.
+    if extensionless_pdf(path, &prefix[..prefix_len]) {
+        return Err(pdf_gate_error(total_bytes, &limits.pdf));
     }
     let mut reader = BufReader::new(&mut file);
     let mut buffer: Vec<u8> = Vec::new();
@@ -666,6 +724,7 @@ pub fn load_text_preview<P: AsRef<Path>>(
         total_bytes,
         image: None,
         markdown_rtf: None,
+        pdf_pages: 0,
     };
 
     // Extension check after the text sniff, so a `.md` PNG still uses the
@@ -743,6 +802,7 @@ fn load_image_preview(
         total_bytes,
         image: Some(Arc::new(decoded)),
         markdown_rtf: None,
+        pdf_pages: 0,
     })
 }
 
@@ -850,7 +910,29 @@ fn load_svg_preview(
         total_bytes,
         image: Some(Arc::new(decoded)),
         markdown_rtf: None,
+        pdf_pages: 0,
     })
+}
+
+fn pdf_named_outcome(
+    path: &Path,
+    limits: &PdfLimits,
+    cancel: &CancelToken,
+    gen: Generation,
+) -> Result<Preview, PreviewError> {
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+    let len = std::fs::metadata(path).map_err(PreviewError::Io)?.len();
+    Err(pdf_gate_error(len, limits))
+}
+
+fn pdf_gate_error(len: u64, limits: &PdfLimits) -> PreviewError {
+    match gate_pdf_file(len, limits) {
+        PdfGate::Empty => PreviewError::Empty,
+        PdfGate::TooLarge { bytes } => PreviewError::pdf(PdfError::FileTooLarge { bytes }),
+        PdfGate::Render => PreviewError::pdf(PdfError::Rendering),
+    }
 }
 
 fn is_shortcut(path: &Path) -> bool {
