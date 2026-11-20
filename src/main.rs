@@ -40,7 +40,7 @@ mod win {
     use std::sync::atomic::{
         AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering,
     };
-    use std::sync::{mpsc, OnceLock};
+    use std::sync::{mpsc, Arc, OnceLock};
 
     use spacepeek::pdf_win::render_pdf_page;
     use spacepeek::{
@@ -59,20 +59,24 @@ mod win {
         shell_icon_size_still_wanted, shell_image_list_id, should_fetch_shell_icon,
         should_keep_shell_icon_pixels, should_reload_after_pointer,
         should_reload_after_shell_event, should_request_shell_icon, should_show_first_run_balloon,
-        small_icon_px, step, svg_target_from_opening, tick_elapsed_ms, typeahead_for_decision,
+        small_icon_px, step, svg_sharp_max_pixels, svg_target_from_opening, tick_elapsed_ms,
+        typeahead_for_decision,
         typeahead_window_ms, unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken,
         ChromeLayout, Command, DecodedImage, DesktopSelection, DoubleClickAction, Effect, Event,
         Generation, HitZone, HookContext, HookDecision, HookKey, IconSpawn, ImageCommand,
-        ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, PdfError, PdfLimits, PdfTarget,
+        ImageFormat, ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, PdfError, PdfLimits,
+        PdfTarget,
         Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, PxSize, QuickInfo,
         RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels,
-        ShellSurface, ShowGate, ShowOutcome, SizeGrip, SizeMemory, SvgTarget, TrackedKey,
+        ShellSurface, ShowGate, ShowOutcome, SizeGrip, SizeMemory, SvgLimits, SvgTarget,
+        SvgZoomEffect, SvgZoomEvent, SvgZoomSession, SvgZoomSnap, TrackedKey,
         Typeahead, TypeaheadKey, WindowKind, ZoomHold, ZoomKey, ZoomOp, BALLOON_BODY,
         BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET, CLASS_PROGMAN, CLASS_WORKERW,
         DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME,
         ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP,
-        VERSION,
+        SVG_MAX_FILE_BYTES, VERSION,
     };
+    use spacepeek::render_svg_at_size;
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, COLORREF, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
@@ -201,6 +205,8 @@ mod win {
     const WM_SPACEPEEK_ICON: u32 = WM_APP + 11;
     /// First page of a PDF. `lparam` is `Box<PdfMsg>`. Posted by `spacepeek-pdf`.
     const WM_SPACEPEEK_PDF: u32 = WM_APP + 12;
+    /// Sharper SVG bitmap. `lparam` is `Box<SvgZoomMsg>`. Posted by `spacepeek-svgzoom`.
+    const WM_SPACEPEEK_SVG_ZOOM: u32 = WM_APP + 13;
     /// `WM_CAPTURECHANGED`. Kept local so the preview does not need extra features.
     const WM_CAPTURECHANGED: u32 = 0x0215;
     /// `NIN_KEYSELECT` is `WM_USER + 1`. The windows crate exports `NIN_SELECT` only.
@@ -232,6 +238,11 @@ mod win {
     const WM_MOUSELEAVE: u32 = 0x02A3;
     const NAV_TIMER_ID: usize = 1;
     const WATCH_TIMER_ID: usize = 2;
+    /// Debounce for a settled SVG zoom. One-shot: the handler kills it, then
+    /// arms it again only when the session still wants to wait.
+    const SVG_ZOOM_TIMER_ID: usize = 3;
+    /// Free a replaced SVG bitmap off the UI thread once it is at least this big.
+    const SVG_BITMAP_DROP_BYTES: usize = 1024 * 1024;
     /// Backup for a missed foreground event while a session is open.
     const WATCH_INTERVAL_MS: u32 = 250;
     const WHEEL_LINES_PER_NOTCH: i32 = 3;
@@ -262,6 +273,36 @@ mod win {
     struct PdfMsg {
         gen: Generation,
         result: std::result::Result<Preview, PreviewError>,
+    }
+
+    /// One sharp SVG raster. The worker keeps only the latest of these.
+    struct SvgZoomJob {
+        seq: u64,
+        file_gen: Generation,
+        path: PathBuf,
+        width: u32,
+        height: u32,
+        dpi: u32,
+        cancel: CancelToken,
+        /// Message window that receives [`WM_SPACEPEEK_SVG_ZOOM`].
+        hwnd: isize,
+    }
+
+    /// Posted result. `image` is `None` when the raster failed. A stale result
+    /// is not posted; the UI drops one that no longer matches the session.
+    struct SvgZoomMsg {
+        seq: u64,
+        file_gen: u64,
+        width: u32,
+        height: u32,
+        image: Option<DecodedImage>,
+    }
+
+    /// Bitmap held back while the user is panning or dragging the border.
+    struct HeldSharpSvg {
+        seq: u64,
+        file_gen: u64,
+        image: DecodedImage,
     }
 
     /// One PDF render. The worker keeps only the latest of these.
@@ -370,6 +411,10 @@ mod win {
         suppress_dblclk: bool,
         /// Shell icon for the current unsupported/quick-info preview, if any.
         shell_icon: ShellIconState,
+        /// Settled-zoom re-render for an SVG. No pixels; the worker owns those.
+        svg_zoom: SvgZoomSession,
+        /// A finished raster waiting until the pan or border drag ends.
+        svg_zoom_held: Option<HeldSharpSvg>,
     }
 
     /// Pointer position at mouse-down and the pan at that moment.
@@ -464,6 +509,10 @@ mod win {
     static ORIGIN_DESKTOP_HOST: AtomicIsize = AtomicIsize::new(0);
     /// Bumped when Space or Esc is posted to the UI thread.
     static INPUT_GEN: AtomicU64 = AtomicU64::new(0);
+    /// Sequence of the sharp SVG render the UI still wants. `0` means none.
+    /// The worker drops a finished bitmap when this is not its sequence.
+    /// resvg cannot stop mid-render, so the drop happens after that render.
+    static SVG_ZOOM_WANTED: AtomicU64 = AtomicU64::new(0);
     /// Previous edit-control window procedure. Zero when the edit is gone.
     static EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
     /// `Msftedit.dll` module. 0 = not loaded, −1 = load failed, else HMODULE bits.
@@ -559,6 +608,8 @@ mod win {
             pan_drag: PanDrag::idle(),
             suppress_dblclk: false,
             shell_icon: ShellIconState::default(),
+            svg_zoom: SvgZoomSession::default(),
+            svg_zoom_held: None,
         })));
         APP.store(app, Ordering::Release);
 
@@ -1603,6 +1654,10 @@ mod win {
                 on_pdf(lparam);
                 LRESULT(0)
             }
+            WM_SPACEPEEK_SVG_ZOOM => {
+                on_svg_zoom(lparam);
+                LRESULT(0)
+            }
             WM_SPACEPEEK_FOREGROUND => {
                 on_foreground_hwnd(HWND(wparam.0 as *mut _));
                 LRESULT(0)
@@ -1611,6 +1666,7 @@ mod win {
                 match wparam.0 {
                     NAV_TIMER_ID => on_nav_timer(),
                     WATCH_TIMER_ID => on_watch_timer(),
+                    SVG_ZOOM_TIMER_ID => on_svg_zoom_timer(),
                     _ => {}
                 }
                 LRESULT(0)
@@ -1648,6 +1704,9 @@ mod win {
             // so the monitor query waits until a border drag actually starts.
             WM_ENTERSIZEMOVE => {
                 note_size_anchor(hwnd);
+                // Header moves and border drags both land here. Hold a sharp
+                // bitmap until the loop ends so the drag does not swap pixels.
+                note_svg_size_drag_started();
                 LRESULT(0)
             }
             // Mirror the dragged edge around the captured centre and write the
@@ -1663,6 +1722,8 @@ mod win {
             WM_EXITSIZEMOVE => {
                 clear_size_drag();
                 remember_window_size(hwnd);
+                // After `size_drag` is cleared, so a swap is not blocked by it.
+                note_svg_size_drag_ended();
                 let explorer = with_app(|app| app.explorer_hwnd);
                 restore_explorer_focus(explorer);
                 LRESULT(0)
@@ -1717,6 +1778,9 @@ mod win {
                 if tracking {
                     let explorer = with_app(|app| app.explorer_hwnd);
                     restore_explorer_focus(explorer);
+                    // `end_image_pan` already cleared tracking, so a normal
+                    // button-up does not reach this. A stolen capture does.
+                    note_svg_pan_ended();
                 }
                 LRESULT(0)
             }
@@ -1762,6 +1826,7 @@ mod win {
             WM_SIZE => {
                 resize_edit(hwnd);
                 reconcile_shown_image(hwnd);
+                note_svg_view_changed();
                 invalidate_preview(hwnd);
                 LRESULT(0)
             }
