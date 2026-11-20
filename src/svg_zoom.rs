@@ -232,7 +232,7 @@ struct Inflight {
 }
 
 /// Latest-wins zoom session. Cheap to keep on the UI thread: no pixels.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SvgZoomSession {
     active: bool,
     file_gen: u64,
@@ -243,22 +243,6 @@ pub struct SvgZoomSession {
     deferred: Option<Inflight>,
     panning: bool,
     sizing: bool,
-}
-
-impl Default for SvgZoomSession {
-    fn default() -> Self {
-        Self {
-            active: false,
-            file_gen: 0,
-            pending_since: None,
-            pending_key: None,
-            seq: 0,
-            inflight: None,
-            deferred: None,
-            panning: false,
-            sizing: false,
-        }
-    }
 }
 
 impl SvgZoomSession {
