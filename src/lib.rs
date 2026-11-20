@@ -75,9 +75,10 @@ pub use pdf::{
 };
 pub use preview::{
     fallback_type_name, format_byte_size, format_compact_size, format_quick_info, format_size_line,
-    format_truncation_notice, load_text_preview, message_with_quick_info, preview_error_from_pdf,
-    preview_text, CancelToken, DeniedKind, Generation, Preview, PreviewError, PreviewLimits,
-    QuickInfo, Truncation, DEFAULT_MAX_BYTES, MAX_LINE_UTF16,
+    format_truncation_notice, is_html_path, load_text_preview, message_with_quick_info,
+    preview_error_from_pdf, preview_text, CancelToken, DeniedKind, Generation, Preview,
+    PreviewError, PreviewLimits, QuickInfo, Truncation, DEFAULT_MAX_BYTES, HTML_SOURCE_STATUS,
+    MAX_LINE_UTF16,
 };
 pub use selection::{
     choose_selected, is_selection_pointer_message, nonempty_path, should_reload_after_pointer,
