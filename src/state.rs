@@ -1251,6 +1251,43 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_pdf_keeps_the_in_use_sentence_and_drops_a_late_page() {
+        let cancel = CancelToken::new();
+        let (state, effects) = step(
+            failed_pdf(4),
+            Event::PdfReady(
+                Generation::new(4),
+                Err(crate::preview::preview_error_from_pdf(PdfError::Io(32))),
+            ),
+            &cancel,
+        );
+        assert_eq!(effects, vec![Effect::UpdateContent]);
+        match &state {
+            PreviewState::Failed { error, .. } => {
+                assert_eq!(
+                    error.user_message("notes.pdf"),
+                    "notes.pdf is open in another program and can't be read"
+                );
+                assert!(!error.is_pdf());
+                assert!(!error.is_pdf_placeholder());
+            }
+            other => panic!("expected the in-use failure, got {other:?}"),
+        }
+        let (state, effects) = step(
+            state,
+            Event::PdfReady(Generation::new(4), Ok(page_preview())),
+            &cancel,
+        );
+        assert!(effects.is_empty());
+        match state {
+            PreviewState::Failed { error, .. } => {
+                assert!(!error.is_pdf());
+            }
+            other => panic!("a late page painted over the in-use failure: {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_late_pdf_page_does_not_overwrite_a_failure() {
         let cancel = CancelToken::new();
         let (failed, _) = step(

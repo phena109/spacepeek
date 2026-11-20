@@ -335,6 +335,28 @@ impl SizeMemory {
     }
 }
 
+/// Whether a finished move or resize should become the shared chosen size.
+///
+/// `opened_as` is the kind used to create the window. A PDF message is
+/// created at the image size while its presented kind stays a message, so
+/// the comparison has to use that opening kind. An unchanged opening default
+/// is not a user choice. A size that is already stored is kept when the
+/// outer size did not change.
+pub fn should_remember_window_size(
+    chosen: Option<LogicalSize>,
+    measured: LogicalSize,
+    opened_as: WindowKind,
+) -> bool {
+    let measured = clamp_logical_size(measured);
+    if chosen == Some(measured) {
+        return false;
+    }
+    if chosen.is_none() && measured == default_logical_size(opened_as) {
+        return false;
+    }
+    true
+}
+
 impl Default for SizeMemory {
     fn default() -> Self {
         Self::new()
@@ -880,6 +902,70 @@ mod tests {
             ),
             HitZone::Client
         );
+    }
+
+    #[test]
+    fn moving_a_pdf_message_does_not_store_the_image_opening_size() {
+        let image = default_logical_size(WindowKind::Image);
+        let message = default_logical_size(WindowKind::Message);
+        assert_eq!(
+            image,
+            LogicalSize {
+                width: 760,
+                height: 520
+            }
+        );
+        assert_eq!(
+            message,
+            LogicalSize {
+                width: 480,
+                height: 320
+            }
+        );
+
+        // The PDF window was opened as an image. A header drag that leaves
+        // it at 760×520 is not a choice, so later message windows stay small.
+        assert!(!should_remember_window_size(None, image, WindowKind::Image));
+        // Comparing that same size against the message default is the bug:
+        // 760×520 would be stored and then used for empty and unsupported files.
+        assert!(should_remember_window_size(
+            None,
+            image,
+            WindowKind::Message
+        ));
+
+        assert!(!should_remember_window_size(
+            None,
+            message,
+            WindowKind::Message
+        ));
+        assert!(!should_remember_window_size(
+            None,
+            image,
+            WindowKind::Content
+        ));
+        // A PDF the user actually resized, including down to the message
+        // default, is a choice.
+        assert!(should_remember_window_size(
+            None,
+            message,
+            WindowKind::Image
+        ));
+        let custom = LogicalSize {
+            width: 800,
+            height: 600,
+        };
+        assert!(should_remember_window_size(None, custom, WindowKind::Image));
+        assert!(!should_remember_window_size(
+            Some(custom),
+            custom,
+            WindowKind::Image
+        ));
+        assert!(should_remember_window_size(
+            Some(image),
+            custom,
+            WindowKind::Content
+        ));
     }
 
     #[test]

@@ -94,6 +94,9 @@ pub enum PdfError {
     /// `RoInitialize` or WinRT activation failed. The icon stays.
     Unavailable,
     Cancelled,
+    /// Win32 open/stat failure. `2`/`3` missing, `5` denied, `32`/`33` in use.
+    /// Shown with the same sentence as any other file, not as a damaged PDF.
+    Io(i32),
 }
 
 impl std::fmt::Display for PdfError {
@@ -108,6 +111,7 @@ impl std::fmt::Display for PdfError {
             PdfError::InvalidSize => write!(f, "pdf page has an invalid size"),
             PdfError::Unavailable => write!(f, "pdf preview unavailable"),
             PdfError::Cancelled => write!(f, "cancelled"),
+            PdfError::Io(code) => write!(f, "pdf io error ({code})"),
         }
     }
 }
@@ -129,18 +133,22 @@ impl PdfError {
             PdfError::InvalidSize => "this PDF page has an invalid size".to_string(),
             PdfError::Unavailable => "PDF preview isn't available".to_string(),
             PdfError::Cancelled => "preview cancelled".to_string(),
+            PdfError::Io(_) => "this PDF can't be read".to_string(),
         }
     }
 
     pub fn user_message(&self, file_name: &str) -> String {
-        if matches!(self, PdfError::Rendering) {
-            return String::new();
-        }
         let name = if file_name.is_empty() {
             "This file"
         } else {
             file_name
         };
+        if let PdfError::Io(code) = self {
+            return pdf_io_user_message(name, *code);
+        }
+        if matches!(self, PdfError::Rendering) {
+            return String::new();
+        }
         format!("{name} can't be previewed — {}", self.reason())
     }
 
@@ -154,6 +162,7 @@ impl PdfError {
             PdfError::InvalidSize => "Invalid size".to_string(),
             PdfError::Unavailable => "Unavailable".to_string(),
             PdfError::Cancelled => "Cancelled".to_string(),
+            PdfError::Io(code) => pdf_io_header(*code).to_string(),
         }
     }
 
@@ -237,13 +246,75 @@ pub fn is_pdf_engine_unavailable(hresult: i32) -> bool {
     )
 }
 
-/// Activation failures become [`PdfError::Unavailable`]. Anything else that
+/// Activation failures become [`PdfError::Unavailable`]. Sharing, missing,
+/// and access-denied Win32 codes become [`PdfError::Io`]. Anything else that
 /// reaches this helper is a bad file, not a missing engine.
 pub fn pdf_error_from_hresult(hresult: i32) -> PdfError {
     if is_pdf_engine_unavailable(hresult) {
-        PdfError::Unavailable
+        return PdfError::Unavailable;
+    }
+    if let Some(code) = win32_code_from_hresult(hresult) {
+        if let Some(err) = pdf_error_from_win32(code) {
+            return err;
+        }
+    }
+    PdfError::Damaged
+}
+
+/// `HRESULT_FROM_WIN32`: facility 7, severity failure, code in the low word.
+fn win32_code_from_hresult(hresult: i32) -> Option<i32> {
+    let raw = hresult as u32;
+    if raw & 0xFFFF_0000 != 0x8007_0000 {
+        return None;
+    }
+    let code = (raw & 0xFFFF) as i32;
+    if code == 0 {
+        None
     } else {
-        PdfError::Damaged
+        Some(code)
+    }
+}
+
+/// Win32 codes the other preview paths already turn into a sentence.
+/// `2` and `3` are missing, `5` is access denied, `32` and `33` are in use.
+pub fn pdf_error_from_win32(code: i32) -> Option<PdfError> {
+    match code {
+        2 | 3 | 5 | 32 | 33 => Some(PdfError::Io(code)),
+        _ => None,
+    }
+}
+
+/// `metadata` / `File::open` failure on the worker. Raw Win32 codes win.
+/// `NotFound` and `PermissionDenied` without a code use 2 and 5.
+pub fn pdf_error_from_io(err: &std::io::Error) -> PdfError {
+    if let Some(code) = err.raw_os_error() {
+        if let Some(mapped) = pdf_error_from_win32(code) {
+            return mapped;
+        }
+        return PdfError::Damaged;
+    }
+    match err.kind() {
+        std::io::ErrorKind::NotFound => PdfError::Io(2),
+        std::io::ErrorKind::PermissionDenied => PdfError::Io(5),
+        _ => PdfError::Damaged,
+    }
+}
+
+fn pdf_io_user_message(name: &str, code: i32) -> String {
+    match code {
+        32 | 33 => format!("{name} is open in another program and can't be read"),
+        2 | 3 => format!("{name} no longer exists"),
+        5 => format!("Access to {name} was denied"),
+        _ => format!("{name} can't be read"),
+    }
+}
+
+fn pdf_io_header(code: i32) -> &'static str {
+    match code {
+        32 | 33 => "In use",
+        2 | 3 => "Missing",
+        5 => "Access denied",
+        _ => "Can't read",
     }
 }
 
@@ -956,6 +1027,60 @@ mod tests {
     }
 
     #[test]
+    fn sharing_missing_and_access_denied_are_not_a_damaged_pdf() {
+        let hr = |code: u32| (0x8007_0000 | code) as i32;
+        assert_eq!(pdf_error_from_hresult(hr(32)), PdfError::Io(32));
+        assert_eq!(pdf_error_from_hresult(hr(33)), PdfError::Io(33));
+        assert_eq!(pdf_error_from_hresult(hr(5)), PdfError::Io(5));
+        assert_eq!(pdf_error_from_hresult(hr(2)), PdfError::Io(2));
+        assert_eq!(pdf_error_from_hresult(hr(3)), PdfError::Io(3));
+        // Some other Win32 code is still a bad file, and so is facility 7
+        // with a zero code.
+        assert_eq!(pdf_error_from_hresult(hr(87)), PdfError::Damaged);
+        assert_eq!(
+            pdf_error_from_hresult(0x8007_0000_u32 as i32),
+            PdfError::Damaged
+        );
+
+        assert_eq!(
+            pdf_error_from_io(&std::io::Error::from_raw_os_error(32)),
+            PdfError::Io(32)
+        );
+        assert_eq!(
+            pdf_error_from_io(&std::io::Error::from_raw_os_error(33)),
+            PdfError::Io(33)
+        );
+        assert_eq!(
+            pdf_error_from_io(&std::io::Error::new(std::io::ErrorKind::NotFound, "gone")),
+            PdfError::Io(2)
+        );
+        assert_eq!(
+            pdf_error_from_io(&std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "no"
+            )),
+            PdfError::Io(5)
+        );
+        assert_eq!(
+            pdf_error_from_io(&std::io::Error::other("disk")),
+            PdfError::Damaged
+        );
+
+        assert_eq!(
+            PdfError::Io(32).user_message("notes.pdf"),
+            "notes.pdf is open in another program and can't be read"
+        );
+        assert_eq!(PdfError::Io(32).header_status(), "In use");
+        assert_eq!(PdfError::Io(2).header_status(), "Missing");
+        assert_eq!(PdfError::Io(5).header_status(), "Access denied");
+        assert_eq!(
+            PdfError::Io(5).user_message(""),
+            "Access to This file was denied"
+        );
+        assert!(!PdfError::Io(32).is_placeholder());
+    }
+
+    #[test]
     fn small_page_is_not_upscaled_and_dip_is_the_source_size() {
         let page = pdf_page_pixels(612.0, 792.0, target(2_000, 2_000, 96), &limits()).unwrap();
         assert_eq!(page.source_width, 612);
@@ -1076,7 +1201,8 @@ mod tests {
     #[test]
     fn premultiplied_samples_composite_on_white() {
         let half_black = [0, 0, 0, 128];
-        let packed = pack_bgra_rows(&half_black, 0, 1, 1, 4, PdfSampleAlpha::Premultiplied).unwrap();
+        let packed =
+            pack_bgra_rows(&half_black, 0, 1, 1, 4, PdfSampleAlpha::Premultiplied).unwrap();
         assert_eq!(packed, vec![127, 127, 127, 255]);
 
         // 50% red, already multiplied: stored red 128, alpha 128, on white.
@@ -1131,15 +1257,14 @@ mod tests {
             max_dimension: 20_000,
             ..PdfLimits::default()
         };
-        assert_eq!(gate_pdf_bitmap(6_000, 6_000, &raised), Ok(()));
-        assert!(u64::from(6_000) * u64::from(6_000) <= PDF_MAX_PIXELS);
-        assert_eq!(
-            gate_pdf_bitmap(6_000, 6_000, &raised),
-            Ok(())
-        );
+        assert_eq!(gate_pdf_bitmap(5_000, 5_000, &raised), Ok(()));
         // 7000 * 5000 = 35_000_000, both sides under 20_000, over 32_000_000.
         assert_eq!(
             gate_pdf_bitmap(7_000, 5_000, &raised),
+            Err(PdfError::TooManyPixels)
+        );
+        assert_eq!(
+            gate_pdf_bitmap(6_000, 6_000, &raised),
             Err(PdfError::TooManyPixels)
         );
     }

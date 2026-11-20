@@ -27,9 +27,9 @@ use windows::Win32::System::WinRT::IMemoryBufferByteAccess;
 use crate::image_preview::{DecodedImage, ImageFormat};
 use crate::pdf::{
     classify_pdf_open_failure, gate_pdf_bitmap, gate_pdf_file, pack_bgra_rows,
-    pdf_error_from_hresult, pdf_page_pixels, pdf_sample_alpha, read_encrypt_probe, settle_pdf_job,
-    PdfError, PdfGate, PdfJobPhase, PdfJobSnap, PdfLimits, PdfPagePx, PdfSampleAlpha, PdfSettle,
-    PdfTarget,
+    pdf_error_from_hresult, pdf_error_from_io, pdf_page_pixels, pdf_sample_alpha,
+    read_encrypt_probe, settle_pdf_job, PdfError, PdfGate, PdfJobPhase, PdfJobSnap, PdfLimits,
+    PdfPagePx, PdfSampleAlpha, PdfSettle, PdfTarget,
 };
 use crate::preview::{CancelToken, Generation};
 
@@ -107,7 +107,7 @@ impl JobClock<'_> {
 }
 
 fn file_len(path: &Path, limits: &PdfLimits) -> Result<u64, PdfError> {
-    let meta = std::fs::metadata(path).map_err(|_| PdfError::Damaged)?;
+    let meta = std::fs::metadata(path).map_err(|err| pdf_error_from_io(&err))?;
     if !meta.is_file() {
         return Err(PdfError::Damaged);
     }
@@ -143,6 +143,9 @@ fn render_stream(
 }
 
 fn classify_failed_load(path: &Path, err: PdfError) -> PdfError {
+    // Sharing, missing, and access-denied stay IO errors. The encrypt probe
+    // runs only for a real parse failure, so a locked file that happens to
+    // contain `/Encrypt` is not called password-protected.
     if err != PdfError::Damaged {
         return err;
     }
@@ -249,10 +252,7 @@ fn decode_page(
 /// white. `BitmapAlphaMode::Ignore` stores alpha 0 and would paint a white
 /// page, so it is only the fallback when straight conversion fails. Cancel
 /// and timeout do not start that fallback.
-fn convert_page(
-    decoder: &BitmapDecoder,
-    clock: JobClock<'_>,
-) -> Result<SoftwareBitmap, PdfError> {
+fn convert_page(decoder: &BitmapDecoder, clock: JobClock<'_>) -> Result<SoftwareBitmap, PdfError> {
     match try_convert(decoder, BitmapAlphaMode::Straight, clock) {
         Ok(bitmap) => Ok(bitmap),
         Err(err @ (PdfError::Cancelled | PdfError::TimedOut)) => Err(err),
@@ -285,12 +285,7 @@ fn copy_bitmap(
     let width = u32::try_from(width_i).map_err(|_| PdfError::InvalidSize)?;
     let height = u32::try_from(height_i).map_err(|_| PdfError::InvalidSize)?;
     gate_pdf_bitmap(width, height, limits)?;
-    let alpha = pdf_sample_alpha(
-        bitmap
-            .BitmapAlphaMode()
-            .map_err(|_| PdfError::Damaged)?
-            .0,
-    );
+    let alpha = pdf_sample_alpha(bitmap.BitmapAlphaMode().map_err(|_| PdfError::Damaged)?.0);
     let buffer = bitmap
         .LockBuffer(BitmapBufferAccessMode::Read)
         .map_err(|_| PdfError::Damaged)?;
@@ -319,7 +314,14 @@ fn copy_plane(
     let access = reference
         .cast::<IMemoryBufferByteAccess>()
         .map_err(|_| PdfError::Damaged)?;
-    let copied = read_plane(&access, plane.StartIndex, width, height, plane.Stride, alpha);
+    let copied = read_plane(
+        &access,
+        plane.StartIndex,
+        width,
+        height,
+        plane.Stride,
+        alpha,
+    );
     let _ = reference.Close();
     copied
 }

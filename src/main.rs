@@ -52,25 +52,26 @@ mod win {
         is_desktop_host_class, is_selection_pointer_message, large_icon_px,
         layout_shell_icon_message, load_text_preview, min_physical_size, nav_reload_remaining,
         nonempty_path, pack_screen_point, parse_command, place_preview, pointer_over_close,
-        preview_from_page, preview_text, reconcile_image_view, reset_for_new_image,
-        scaled_close_width, scaled_detail_font, scaled_font_height, scaled_header_font,
-        scaled_header_height, scaled_header_pad, session_phase, shell_icon_gap_px,
-        shell_icon_min_px, shell_icon_pixel_size_ok, shell_icon_px, shell_icon_size_still_wanted,
-        shell_image_list_id, should_fetch_shell_icon, should_keep_shell_icon_pixels,
-        should_reload_after_pointer, should_reload_after_shell_event, should_request_shell_icon,
-        should_show_first_run_balloon, small_icon_px, step, svg_target_from_opening,
-        tick_elapsed_ms, typeahead_for_decision, typeahead_window_ms, unpack_screen_point,
-        wheel_scroll_dy, wheel_zoom_command, CancelToken, ChromeLayout, Command, DecodedImage,
-        DesktopSelection, DoubleClickAction, Effect, Event, Generation, HitZone, HookContext,
-        HookDecision, HookKey, IconSpawn, ImageCommand, ImageFrame, ImageView, KeyPhase, Modifiers,
-        NavKey, PdfError, PdfLimits, PdfTarget, Presented, Preview, PreviewError, PreviewLimits,
-        PreviewState, PxRect, PxSize, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
-        SelectionTarget, SessionPhase, ShellIconPixels, ShellSurface, ShowGate, ShowOutcome,
-        SizeGrip, SizeMemory, SvgTarget, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold,
-        ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET,
-        CLASS_PROGMAN, CLASS_WORKERW, DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN,
-        FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS,
-        SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP, VERSION,
+        preview_error_from_pdf, preview_from_page, preview_text, reconcile_image_view,
+        reset_for_new_image, scaled_close_width, scaled_detail_font, scaled_font_height,
+        scaled_header_font, scaled_header_height, scaled_header_pad, session_phase,
+        shell_icon_gap_px, shell_icon_min_px, shell_icon_pixel_size_ok, shell_icon_px,
+        shell_icon_size_still_wanted, shell_image_list_id, should_fetch_shell_icon,
+        should_keep_shell_icon_pixels, should_reload_after_pointer,
+        should_reload_after_shell_event, should_request_shell_icon, should_show_first_run_balloon,
+        small_icon_px, step, svg_target_from_opening, tick_elapsed_ms, typeahead_for_decision,
+        typeahead_window_ms, unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken,
+        ChromeLayout, Command, DecodedImage, DesktopSelection, DoubleClickAction, Effect, Event,
+        Generation, HitZone, HookContext, HookDecision, HookKey, IconSpawn, ImageCommand,
+        ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, PdfError, PdfLimits, PdfTarget,
+        Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, PxSize, QuickInfo,
+        RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels,
+        ShellSurface, ShowGate, ShowOutcome, SizeGrip, SizeMemory, SvgTarget, TrackedKey,
+        Typeahead, TypeaheadKey, WindowKind, ZoomHold, ZoomKey, ZoomOp, BALLOON_BODY,
+        BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET, CLASS_PROGMAN, CLASS_WORKERW,
+        DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME,
+        ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP,
+        VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -2319,7 +2320,7 @@ mod win {
             let result = match rendered {
                 Ok(page) => Ok(preview_from_page(page.total_bytes, page.image, page.pages)),
                 Err(PdfError::Cancelled) => continue,
-                Err(err) => Err(PreviewError::pdf(err)),
+                Err(err) => Err(preview_error_from_pdf(err)),
             };
             post_pdf(HWND(job.hwnd as *mut _), job.gen, result);
         }
@@ -4409,20 +4410,23 @@ mod win {
         }
         let dpi = dpi_for_anchor(hwnd);
         with_app_mut(|app| {
-            let kind = app
+            let presented_kind = app
                 .presented
                 .as_ref()
                 .map(Presented::kind)
                 .unwrap_or(WindowKind::Content);
+            // A PDF message is created at the image size. Compare against
+            // that opening kind so a header drag does not store 760×520 as
+            // the shared size for later empty and unsupported windows.
+            let opened_as = opening_window_kind(&app.state, presented_kind);
             let clamped = spacepeek::chrome::clamp_logical_size(
                 spacepeek::chrome::physical_to_logical(width, height, dpi),
             );
-            if app.sizes.chosen() == Some(clamped) {
-                return;
-            }
-            if app.sizes.chosen().is_none()
-                && clamped == spacepeek::chrome::default_logical_size(kind)
-            {
+            if !spacepeek::chrome::should_remember_window_size(
+                app.sizes.chosen(),
+                clamped,
+                opened_as,
+            ) {
                 return;
             }
             let _ = app.sizes.remember(clamped);

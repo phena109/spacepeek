@@ -929,6 +929,16 @@ fn pdf_named_outcome(
     Err(pdf_gate_error(len, limits))
 }
 
+/// Worker failure as a preview error. IO codes use [`PreviewError::Io`] so
+/// the sentence, header, and icon match every other file. A damaged or
+/// password-protected PDF stays a PDF error and keeps the shell icon.
+pub fn preview_error_from_pdf(error: PdfError) -> PreviewError {
+    match error {
+        PdfError::Io(code) => PreviewError::Io(std::io::Error::from_raw_os_error(code)),
+        other => PreviewError::pdf(other),
+    }
+}
+
 fn pdf_gate_error(len: u64, limits: &PdfLimits) -> PreviewError {
     match gate_pdf_file(len, limits) {
         PdfGate::Empty => PreviewError::Empty,
@@ -1543,6 +1553,43 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn pdf_io_failures_use_the_same_sentences_as_other_files() {
+        use crate::pdf::PdfError;
+
+        for code in [32, 33, 5, 2, 3] {
+            let io = PreviewError::Io(std::io::Error::from_raw_os_error(code));
+            let as_pdf = PreviewError::pdf(PdfError::Io(code));
+            assert_eq!(
+                as_pdf.user_message("notes.pdf"),
+                io.user_message("notes.pdf"),
+                "{code}"
+            );
+            assert_eq!(as_pdf.header_status(), io.header_status(), "{code}");
+            let mapped = preview_error_from_pdf(PdfError::Io(code));
+            assert_eq!(
+                mapped.user_message("notes.pdf"),
+                io.user_message("notes.pdf")
+            );
+            assert!(matches!(mapped, PreviewError::Io(_)));
+            assert!(!mapped.is_pdf());
+        }
+        assert!(matches!(
+            preview_error_from_pdf(PdfError::Damaged),
+            PreviewError::Pdf {
+                error: PdfError::Damaged,
+                ..
+            }
+        ));
+        assert!(matches!(
+            preview_error_from_pdf(PdfError::PasswordProtected),
+            PreviewError::Pdf {
+                error: PdfError::PasswordProtected,
+                ..
+            }
+        ));
     }
 
     #[test]
