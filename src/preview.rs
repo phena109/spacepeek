@@ -438,7 +438,8 @@ pub struct Preview {
     /// Decoded image pixels. `None` for a text preview.
     pub image: Option<Arc<DecodedImage>>,
     /// RTF for a Markdown preview, built on the loader thread. `None` for
-    /// plain text, images, or a Markdown file that fell back to the EDIT path.
+    /// plain text (including `.html` / `.htm` source), images, or a Markdown
+    /// file that fell back to the EDIT path.
     pub markdown_rtf: Option<Arc<str>>,
     /// Page count for a rendered PDF. Zero for every other preview.
     pub pdf_pages: u32,
@@ -540,6 +541,25 @@ const DENIED_EXTENSIONS: &[(&str, DeniedKind)] = &[
     ("mov", DeniedKind::Binary),
     ("webm", DeniedKind::Binary),
 ];
+
+/// Trailing header status for `.html` and `.htm` shown as source text.
+///
+/// The body is the existing text preview. This word only labels the header.
+pub const HTML_SOURCE_STATUS: &str = "HTML source";
+
+/// True for `.html` and `.htm`, any case.
+///
+/// `.htmlx`, `.xhtml`, and any other extension are not HTML. A file whose
+/// whole name is `.html` or `.htm` counts; [`Path::extension`] does not see
+/// that leading dot.
+pub fn is_html_path(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+        return ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm");
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(".html") || name.eq_ignore_ascii_case(".htm"))
+}
 
 /// Deny-list hit for `path`, if any. Comparison is case-insensitive.
 /// Extensionless names and dotfiles (`.gitignore`) are not denied.
@@ -731,6 +751,8 @@ pub fn load_text_preview<P: AsRef<Path>>(
 
     // Extension check after the text sniff, so a `.md` PNG still uses the
     // image path and a `.txt` file never pays for Markdown parsing.
+    // `.html` and `.htm` stay on this text path: no Markdown parse, no HTML
+    // renderer, and no extra read. The header label is applied in chrome.
     if is_markdown_path(path) && should_render_markdown(text.len(), prepared.lines_in_source) {
         if cancel.is_cancelled(&gen) {
             return Err(PreviewError::Cancelled);
@@ -3003,5 +3025,322 @@ mod tests {
             with_info.quick_info().unwrap().type_name.as_deref(),
             Some("SVG File")
         );
+    }
+
+    #[test]
+    fn html_extension_detection_is_only_html_and_htm() {
+        assert!(is_html_path(Path::new("page.html")));
+        assert!(is_html_path(Path::new("page.HTML")));
+        assert!(is_html_path(Path::new("page.Html")));
+        assert!(is_html_path(Path::new("page.htm")));
+        assert!(is_html_path(Path::new("page.HTM")));
+        assert!(is_html_path(Path::new("page.Htm")));
+        assert!(is_html_path(&PathBuf::from("dir").join("file.html")));
+        assert!(is_html_path(&PathBuf::from("dir").join("file.HTM")));
+        assert!(is_html_path(Path::new(r"C:\docs\page.HTML")));
+        assert!(is_html_path(Path::new(r"C:\docs\page.htm")));
+        // A leading dot is the whole name. Path::extension does not see it.
+        assert!(is_html_path(Path::new(".html")));
+        assert!(is_html_path(Path::new(".HTML")));
+        assert!(is_html_path(Path::new(".htm")));
+        assert!(is_html_path(Path::new(".HTM")));
+        assert!(is_html_path(&PathBuf::from("dir").join(".html")));
+
+        assert!(!is_html_path(Path::new("page.htmlx")));
+        assert!(!is_html_path(Path::new("page.HTMLX")));
+        assert!(!is_html_path(Path::new("page.xhtml")));
+        assert!(!is_html_path(Path::new("page.XHTML")));
+        assert!(!is_html_path(Path::new(".htmlx")));
+        assert!(!is_html_path(Path::new(".xhtml")));
+        assert!(!is_html_path(Path::new("page.html.txt")));
+        assert!(!is_html_path(Path::new("page.html.bak")));
+        assert!(!is_html_path(Path::new("html")));
+        assert!(!is_html_path(Path::new("htm")));
+        assert!(!is_html_path(Path::new("notes.md")));
+        assert!(!is_html_path(Path::new("notes.markdown")));
+        assert!(!is_html_path(Path::new("notes.txt")));
+        assert!(!is_html_path(Path::new("icon.svg")));
+        assert!(!is_html_path(Path::new("icon.svgz")));
+        assert!(!is_html_path(Path::new("doc.pdf")));
+        assert!(!is_html_path(Path::new("photo.png")));
+        assert!(!is_html_path(Path::new(".gitignore")));
+        assert_eq!(denied_kind(Path::new("page.html")), None);
+        assert_eq!(denied_kind(Path::new("page.HTM")), None);
+        assert_eq!(HTML_SOURCE_STATUS, "HTML source");
+    }
+
+    fn sample_html() -> &'static [u8] {
+        b"<!DOCTYPE html>\n<html>\n<body><p>Hello <b>world</b></p></body>\n</html>\n"
+    }
+
+    #[test]
+    fn html_file_previews_as_source_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = sample_html();
+        for name in ["page.html", "page.HTML", "page.htm", "page.HTM"] {
+            let path = write_file(&dir, name, src);
+            let preview = load(&path, PreviewLimits::default()).unwrap();
+            assert!(preview.image.is_none(), "{name}");
+            assert!(preview.markdown_rtf.is_none(), "{name}");
+            assert_eq!(preview.pdf_pages, 0, "{name}");
+            assert!(!preview.truncated, "{name}");
+            assert!(preview.content.contains("<!DOCTYPE html>"), "{name}");
+            assert!(preview.content.contains("<html>"), "{name}");
+            assert!(preview.content.contains("<b>world</b>"), "{name}");
+            assert!(preview.content.contains("</html>"), "{name}");
+            assert!(!preview.content.contains(r"\b"), "{name}");
+
+            let same = write_file(&dir, "same.txt", src);
+            let text = load(&same, PreviewLimits::default()).unwrap();
+            assert_eq!(preview.content, text.content, "{name}");
+            assert_eq!(preview.line_count, text.line_count, "{name}");
+            assert_eq!(preview.total_bytes, text.total_bytes, "{name}");
+            assert_eq!(preview.truncation, text.truncation, "{name}");
+            assert_eq!(preview_text(&preview), preview_text(&text), "{name}");
+
+            let presented = crate::chrome::chrome_for_text(&path, &preview);
+            assert_eq!(
+                presented.kind(),
+                crate::chrome::WindowKind::Content,
+                "{name}"
+            );
+            assert!(
+                presented.header().details.ends_with(" · HTML source"),
+                "{name}: {}",
+                presented.header().details
+            );
+            match &presented {
+                crate::chrome::Presented::Text { body, .. } => {
+                    assert!(body.contains("<b>world</b>"), "{name}");
+                    assert_eq!(body, &preview_text(&preview), "{name}");
+                }
+                _ => panic!("expected the EDIT text chrome for {name}"),
+            }
+        }
+
+        let crlf = write_file(&dir, "win.html", b"<p>Hello</p>\r\n<p>Again</p>\r\n");
+        let preview = load(&crlf, PreviewLimits::default()).unwrap();
+        assert_eq!(preview.content, "<p>Hello</p>\r\n<p>Again</p>");
+        assert!(preview.markdown_rtf.is_none());
+        assert!(preview.content.contains("<p>"));
+    }
+
+    #[test]
+    fn html_over_the_text_caps_truncates_like_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut big = Vec::new();
+        big.extend_from_slice(b"<html><body>");
+        big.resize(big.len() + 80 * 1024, b'a');
+        big.extend_from_slice(b"</body></html>");
+        let html = write_file(&dir, "big.html", &big);
+        let txt = write_file(&dir, "big.txt", &big);
+        let html_preview = load(&html, PreviewLimits::default()).unwrap();
+        let text_preview = load(&txt, PreviewLimits::default()).unwrap();
+        assert!(html_preview.truncated);
+        assert!(html_preview.markdown_rtf.is_none());
+        assert!(html_preview.image.is_none());
+        assert_eq!(html_preview.content, text_preview.content);
+        assert_eq!(html_preview.truncation, text_preview.truncation);
+        assert_eq!(html_preview.line_count, text_preview.line_count);
+        assert_eq!(html_preview.total_bytes, text_preview.total_bytes);
+        assert_eq!(
+            html_preview.truncation.as_ref().unwrap().bytes_shown,
+            DEFAULT_MAX_BYTES as u64
+        );
+        assert!(html_preview.content.starts_with("<html><body>"));
+        assert!(!html_preview.content.contains("</body></html>"));
+        let notice = preview_text(&html_preview);
+        assert_eq!(notice, preview_text(&text_preview));
+        assert!(notice.starts_with("Showing the first 64 KB"));
+        let presented = crate::chrome::chrome_for_text(&html, &html_preview);
+        assert!(presented.header().details.contains("(truncated)"));
+        assert!(presented.header().details.ends_with(" · HTML source"));
+        assert_eq!(presented.kind(), crate::chrome::WindowKind::Content);
+
+        let mut lines = String::from("<ul>\n");
+        for i in 0..2_500 {
+            lines.push_str("<li>");
+            lines.push_str(&i.to_string());
+            lines.push_str("</li>\n");
+        }
+        lines.push_str("</ul>\n");
+        assert!(
+            lines.len() < DEFAULT_MAX_BYTES,
+            "line-cap fixture must stay inside the byte cap"
+        );
+        let html = write_file(&dir, "lines.html", lines.as_bytes());
+        let txt = write_file(&dir, "lines.txt", lines.as_bytes());
+        let html_preview = load(&html, PreviewLimits::default()).unwrap();
+        let text_preview = load(&txt, PreviewLimits::default()).unwrap();
+        assert!(html_preview.truncated);
+        assert_eq!(html_preview.line_count, DEFAULT_MAX_LINES);
+        assert_eq!(html_preview.line_count, text_preview.line_count);
+        assert_eq!(html_preview.content, text_preview.content);
+        assert_eq!(html_preview.truncation, text_preview.truncation);
+        assert!(html_preview.content.starts_with("<ul>\r\n<li>0</li>"));
+        assert!(html_preview.content.contains("<li>1998</li>"));
+        assert!(!html_preview.content.contains("<li>1999</li>"));
+        assert!(!html_preview.content.contains("</ul>"));
+        assert_eq!(preview_text(&html_preview), preview_text(&text_preview));
+        assert!(preview_text(&html_preview).starts_with("Showing the first 2,000 of "));
+        let presented = crate::chrome::chrome_for_text(&html, &html_preview);
+        assert_eq!(
+            presented.header().details,
+            format!(
+                "{} · HTML source",
+                crate::chrome::format_header_details(
+                    html_preview.total_bytes,
+                    html_preview.line_count as u64,
+                    true
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn html_binary_sniff_fails_like_other_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: &[(&str, &[u8])] = &[
+            ("page.html", b"<html>\x00binary"),
+            ("page.HTM", b"<html>\x00"),
+            ("page.htm", b"<p>\xFF</p>"),
+            ("PAGE.HTML", b"\x00<html>"),
+        ];
+        for (name, bytes) in cases {
+            let path = write_file(&dir, name, bytes);
+            let err = load(&path, PreviewLimits::default()).unwrap_err();
+            let txt = write_file(&dir, "same.txt", bytes);
+            let text_err = load(&txt, PreviewLimits::default()).unwrap_err();
+            assert_eq!(err, PreviewError::binary(), "{name}");
+            assert_eq!(err, text_err, "{name}");
+            assert!(err.wants_quick_info(), "{name}");
+            assert_eq!(err.header_status(), "Not text", "{name}");
+            assert_eq!(
+                err.user_message(name),
+                format!("{name} doesn't look like text"),
+                "{name}"
+            );
+            let presented = crate::chrome::chrome_for_error(&path, &err);
+            assert_eq!(presented.kind(), crate::chrome::WindowKind::Message);
+            assert_eq!(presented.header().details, "Not text");
+            let message = presented.message().unwrap();
+            assert_eq!(message, format!("{name} doesn't look like text"));
+        }
+
+        let html = write_file(&dir, "empty.html", b"");
+        let txt = write_file(&dir, "empty.txt", b"");
+        assert_eq!(
+            load(&html, PreviewLimits::default()).unwrap_err(),
+            PreviewError::Empty
+        );
+        assert_eq!(
+            load(&txt, PreviewLimits::default()).unwrap_err(),
+            PreviewError::Empty
+        );
+    }
+
+    #[test]
+    fn html_does_not_take_markdown_pdf_or_svg() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = b"# Title\n\n<html><script>alert(1)</script><b>bold</b></html>\n";
+        let html = write_file(&dir, "page.html", src);
+        let md = write_file(&dir, "page.md", src);
+        let html_preview = load(&html, PreviewLimits::default()).unwrap();
+        let md_preview = load(&md, PreviewLimits::default()).unwrap();
+        assert!(html_preview.markdown_rtf.is_none());
+        assert!(html_preview.image.is_none());
+        assert!(html_preview.content.contains("<script>alert(1)</script>"));
+        assert!(html_preview.content.contains("# Title"));
+        assert!(html_preview.content.contains("<b>bold</b>"));
+        assert!(md_preview.markdown_rtf.is_some());
+        assert!(md_preview.image.is_none());
+
+        let pdf_bytes = b"%PDF-1.4\n<html></html>\n";
+        let html = write_file(&dir, "page.htm", pdf_bytes);
+        let pdf = write_file(&dir, "page.pdf", pdf_bytes);
+        let html_preview = load(&html, PreviewLimits::default()).unwrap();
+        assert!(html_preview.image.is_none());
+        assert!(html_preview.markdown_rtf.is_none());
+        assert!(html_preview.content.contains("%PDF-1.4"));
+        assert!(html_preview.content.contains("<html></html>"));
+        let pdf_err = load(&pdf, PreviewLimits::default()).unwrap_err();
+        assert!(pdf_err.is_pdf());
+        assert!(pdf_err.is_pdf_placeholder());
+
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="blue"/></svg>"#;
+        let html = write_file(&dir, "icon.html", svg);
+        let icon = write_file(&dir, "icon.svg", svg);
+        let html_preview = load(&html, PreviewLimits::default()).unwrap();
+        assert!(html_preview.image.is_none());
+        assert!(html_preview.markdown_rtf.is_none());
+        assert!(html_preview.content.contains("<svg"));
+        assert!(html_preview.content.contains("fill=\"blue\""));
+        assert!(html_preview.content.contains("</svg>"));
+        let icon_preview = load(&icon, PreviewLimits::default()).unwrap();
+        assert_eq!(
+            icon_preview.image.as_ref().unwrap().format,
+            crate::image_preview::ImageFormat::Svg
+        );
+
+        let png = rgba_png(1, 1, &[9, 8, 7, 255]);
+        let as_html = write_file(&dir, "pic.html", &png);
+        let as_txt = write_file(&dir, "pic.txt", &png);
+        let html_img = load(&as_html, PreviewLimits::default()).unwrap();
+        let txt_img = load(&as_txt, PreviewLimits::default()).unwrap();
+        assert_eq!(
+            html_img.image.as_ref().unwrap().format,
+            crate::image_preview::ImageFormat::Png
+        );
+        assert_eq!(
+            txt_img.image.as_ref().unwrap().format,
+            crate::image_preview::ImageFormat::Png
+        );
+        assert!(html_img.content.is_empty());
+        assert!(html_img.markdown_rtf.is_none());
+        assert_eq!(html_img.pdf_pages, 0);
+
+        for name in ["page.htmlx", "page.xhtml", "page.HTMLX", "page.XHTML"] {
+            let path = write_file(&dir, name, sample_html());
+            let preview = load(&path, PreviewLimits::default()).unwrap();
+            assert!(preview.content.contains("<b>world</b>"), "{name}");
+            assert!(preview.markdown_rtf.is_none(), "{name}");
+            assert!(preview.image.is_none(), "{name}");
+            let presented = crate::chrome::chrome_for_text(&path, &preview);
+            assert_eq!(
+                presented.kind(),
+                crate::chrome::WindowKind::Content,
+                "{name}"
+            );
+            assert!(
+                !presented.header().details.contains("HTML"),
+                "{name}: {}",
+                presented.header().details
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_html_load_matches_text() {
+        let token = CancelToken::new();
+        let stale = token.generate();
+        let live = token.generate();
+        assert!(token.is_cancelled(&stale));
+        assert!(!token.is_cancelled(&live));
+
+        let dir = tempfile::tempdir().unwrap();
+        let html = write_file(&dir, "page.html", sample_html());
+        let txt = write_file(&dir, "page.txt", sample_html());
+        assert_eq!(
+            load_text_preview(&html, PreviewLimits::default(), &token, stale),
+            Err(PreviewError::Cancelled)
+        );
+        assert_eq!(
+            load_text_preview(&txt, PreviewLimits::default(), &token, stale),
+            Err(PreviewError::Cancelled)
+        );
+        let preview = load_text_preview(&html, PreviewLimits::default(), &token, live).unwrap();
+        assert!(preview.content.contains("<b>world</b>"));
+        assert!(preview.markdown_rtf.is_none());
+        assert_eq!(preview.line_count, 4);
     }
 }

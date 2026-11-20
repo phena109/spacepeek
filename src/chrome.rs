@@ -14,8 +14,8 @@ use crate::image_preview::{format_image_details, DecodedImage, ImageFormat};
 use crate::markdown::is_markdown_path;
 use crate::pdf::format_pdf_header;
 use crate::preview::{
-    format_compact_size, format_grouped, format_quick_info, message_with_quick_info, preview_text,
-    Preview, PreviewError,
+    format_compact_size, format_grouped, format_quick_info, is_html_path, message_with_quick_info,
+    preview_text, Preview, PreviewError, HTML_SOURCE_STATUS,
 };
 
 /// Logical height of the header strip at 96 DPI.
@@ -186,6 +186,10 @@ pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
             };
         }
         details.push_str(" · Markdown as text");
+    } else if is_html_path(path) {
+        // Same EDIT body as any other text file. The status is the only change.
+        details.push_str(" · ");
+        details.push_str(HTML_SOURCE_STATUS);
     }
     Presented::Text {
         header: HeaderText {
@@ -724,6 +728,75 @@ mod tests {
             fallback.header().details,
             "64 KB · 2,000 lines (truncated) · Markdown as text"
         );
+    }
+
+    #[test]
+    fn html_source_chrome_labels_the_text_header() {
+        let presented = chrome_for_text(Path::new("page.html"), &preview(128, 4, false));
+        assert_eq!(presented.kind(), WindowKind::Content);
+        assert_eq!(presented.message(), None);
+        let Presented::Text { header, body } = presented else {
+            panic!("expected text chrome");
+        };
+        assert_eq!(header.name, "page.html");
+        assert_eq!(header.details, "128 B · 4 lines · HTML source");
+        assert_eq!(HTML_SOURCE_STATUS, "HTML source");
+        assert_eq!(body, "body");
+
+        let upper = chrome_for_text(Path::new("PAGE.HTM"), &preview(12 * 1024, 40, false));
+        assert_eq!(upper.kind(), WindowKind::Content);
+        assert_eq!(upper.header().details, "12 KB · 40 lines · HTML source");
+
+        let truncated = chrome_for_text(Path::new("long.html"), &preview(64 * 1024, 2_000, true));
+        assert_eq!(truncated.kind(), WindowKind::Content);
+        assert_eq!(
+            truncated.header().details,
+            "64 KB · 2,000 lines (truncated) · HTML source"
+        );
+
+        for name in ["page.xhtml", "page.htmlx", "page.HTMLX", "notes.txt"] {
+            let plain = chrome_for_text(Path::new(name), &preview(12 * 1024, 40, false));
+            assert_eq!(plain.kind(), WindowKind::Content, "{name}");
+            assert_eq!(plain.header().details, "12 KB · 40 lines", "{name}");
+        }
+
+        let err = chrome_for_error(Path::new("page.html"), &PreviewError::binary());
+        assert_eq!(err.kind(), WindowKind::Message);
+        assert_eq!(err.header().details, "Not text");
+        assert_eq!(err.message(), Some("page.html doesn't look like text"));
+
+        let htm = chrome_for_error(Path::new("PAGE.HTM"), &PreviewError::binary());
+        assert_eq!(htm.header().details, "Not text");
+        assert_eq!(htm.message(), Some("PAGE.HTM doesn't look like text"));
+    }
+
+    #[test]
+    fn html_named_image_keeps_the_image_header() {
+        use crate::image_preview::{DecodedImage, ImageFormat};
+        use std::sync::Arc;
+
+        let image = Arc::new(DecodedImage {
+            width: 2,
+            height: 2,
+            source_width: 2,
+            source_height: 2,
+            format: ImageFormat::Png,
+            bgra: vec![0, 0, 0, 255],
+        });
+        let shown = Preview {
+            content: String::new(),
+            truncated: false,
+            line_count: 0,
+            truncation: None,
+            total_bytes: 128,
+            image: Some(image),
+            markdown_rtf: None,
+            pdf_pages: 0,
+        };
+        let presented = chrome_for_text(Path::new("pic.html"), &shown);
+        assert_eq!(presented.kind(), WindowKind::Image);
+        assert_eq!(presented.header().details, "128 B · 2 × 2 · PNG");
+        assert!(!presented.header().details.contains("HTML"));
     }
 
     #[test]
