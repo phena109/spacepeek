@@ -8,6 +8,7 @@ use crate::image_preview::{
     decode_image, sniff_image, DecodedImage, ImageError, ImageFormat, ImageLimits,
 };
 use crate::markdown::{is_markdown_path, render_markdown, should_render_markdown};
+use crate::pdf::{extensionless_pdf, gate_pdf_file, is_pdf_path, PdfError, PdfGate, PdfLimits};
 use crate::svg::{is_svg_path, render_svg, sniff_svg, SvgError, SvgLimits, SVG_SNIFF_BYTES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,12 @@ pub enum PreviewError {
         error: SvgError,
         info: QuickInfo,
     },
+    /// A PDF. [`PdfError::Rendering`] is the icon placeholder while the
+    /// first page renders. Other variants keep that icon and say why.
+    Pdf {
+        error: PdfError,
+        info: QuickInfo,
+    },
 }
 
 impl PartialEq for PreviewError {
@@ -147,6 +154,10 @@ impl PartialEq for PreviewError {
             (
                 PreviewError::Svg { error: a, info: ia },
                 PreviewError::Svg { error: b, info: ib },
+            ) => a == b && ia == ib,
+            (
+                PreviewError::Pdf { error: a, info: ia },
+                PreviewError::Pdf { error: b, info: ib },
             ) => a == b && ia == ib,
             (PreviewError::Binary { info: a }, PreviewError::Binary { info: b }) => a == b,
             (PreviewError::Empty, PreviewError::Empty)
@@ -177,6 +188,7 @@ impl std::fmt::Display for PreviewError {
             PreviewError::Shortcut { .. } => write!(f, "shortcut"),
             PreviewError::Image(err) => write!(f, "{err}"),
             PreviewError::Svg { error, .. } => write!(f, "{error}"),
+            PreviewError::Pdf { error, .. } => write!(f, "{error}"),
         }
     }
 }
@@ -207,6 +219,7 @@ impl PreviewError {
             PreviewError::Io(err) => io_user_message(name, err),
             PreviewError::Image(err) => err.user_message(),
             PreviewError::Svg { error, .. } => error.user_message(name),
+            PreviewError::Pdf { error, .. } => error.user_message(name),
         }
     }
 
@@ -225,6 +238,7 @@ impl PreviewError {
             PreviewError::Io(err) => io_header_status(err).to_string(),
             PreviewError::Image(err) => err.header_status(),
             PreviewError::Svg { error, .. } => error.header_status(),
+            PreviewError::Pdf { error, .. } => error.header_status(),
         }
     }
 
@@ -248,7 +262,8 @@ impl PreviewError {
         match self {
             PreviewError::Binary { info }
             | PreviewError::Denied { info, .. }
-            | PreviewError::Svg { info, .. } => Some(info),
+            | PreviewError::Svg { info, .. }
+            | PreviewError::Pdf { info, .. } => Some(info),
             _ => None,
         }
     }
@@ -263,6 +278,7 @@ impl PreviewError {
             PreviewError::Binary { .. } => PreviewError::Binary { info },
             PreviewError::Denied { kind, .. } => PreviewError::Denied { kind, info },
             PreviewError::Svg { error, .. } => PreviewError::Svg { error, info },
+            PreviewError::Pdf { error, .. } => PreviewError::Pdf { error, info },
             other => other,
         }
     }
@@ -273,6 +289,30 @@ impl PreviewError {
             error,
             info: QuickInfo::default(),
         }
+    }
+
+    /// PDF outcome before quick info has been filled in.
+    pub fn pdf(error: PdfError) -> Self {
+        Self::Pdf {
+            error,
+            info: QuickInfo::default(),
+        }
+    }
+
+    /// The shell-icon placeholder shown while the first page renders.
+    pub fn is_pdf_placeholder(&self) -> bool {
+        matches!(
+            self,
+            PreviewError::Pdf {
+                error: PdfError::Rendering,
+                ..
+            }
+        )
+    }
+
+    /// Any PDF outcome, including the placeholder and the failures.
+    pub fn is_pdf(&self) -> bool {
+        matches!(self, PreviewError::Pdf { .. })
     }
 }
 
@@ -400,6 +440,8 @@ pub struct Preview {
     /// RTF for a Markdown preview, built on the loader thread. `None` for
     /// plain text, images, or a Markdown file that fell back to the EDIT path.
     pub markdown_rtf: Option<Arc<str>>,
+    /// Page count for a rendered PDF. Zero for every other preview.
+    pub pdf_pages: u32,
 }
 
 /// Default file-byte budget for the EDIT control.
@@ -416,6 +458,10 @@ pub const MAX_LINE_UTF16: usize = 1_000;
 /// U+2026 HORIZONTAL ELLIPSIS. One UTF-16 code unit, so it never splits a pair.
 const LINE_ELLIPSIS: char = '\u{2026}';
 /// Longest UTF-16 sequence the EDIT control keeps on one row, marker included.
+///
+/// The assertion below and the unit tests reference this. rustc 1.85 does not
+/// count a `const _: () = assert!(...)` reference as a use of the constant.
+#[cfg_attr(not(test), allow(dead_code))]
 const EDIT_LINE_UTF16_LIMIT: usize = 1_023;
 const _: () = assert!(MAX_LINE_UTF16 + LINE_ELLIPSIS.len_utf16() <= EDIT_LINE_UTF16_LIMIT);
 /// How many leading bytes the text sniff inspects.
@@ -427,6 +473,7 @@ pub struct PreviewLimits {
     pub max_lines: usize,
     pub image: ImageLimits,
     pub svg: SvgLimits,
+    pub pdf: PdfLimits,
 }
 
 impl Default for PreviewLimits {
@@ -436,6 +483,7 @@ impl Default for PreviewLimits {
             max_lines: DEFAULT_MAX_LINES,
             image: ImageLimits::default(),
             svg: SvgLimits::default(),
+            pdf: PdfLimits::default(),
         }
     }
 }
@@ -447,6 +495,7 @@ impl PreviewLimits {
             max_lines,
             image: ImageLimits::default(),
             svg: SvgLimits::default(),
+            pdf: PdfLimits::default(),
         }
     }
 }
@@ -479,7 +528,6 @@ const DENIED_EXTENSIONS: &[(&str, DeniedKind)] = &[
     ("doc", DeniedKind::Binary),
     ("xls", DeniedKind::Binary),
     ("ppt", DeniedKind::Binary),
-    ("pdf", DeniedKind::Binary),
     ("mp3", DeniedKind::Binary),
     ("mp4", DeniedKind::Binary),
     ("m4a", DeniedKind::Binary),
@@ -575,6 +623,12 @@ pub fn load_text_preview<P: AsRef<Path>>(
     if let Some(kind) = denied_kind(path) {
         return Err(PreviewError::denied(kind));
     }
+    // Named `.pdf` files never enter the text, raster, Markdown, or SVG
+    // paths. The placeholder returns before any WinRT work; the page is a
+    // later result from the PDF worker.
+    if is_pdf_path(path) {
+        return pdf_named_outcome(path, &limits.pdf, cancel, gen);
+    }
     if cancel.is_cancelled(&gen) {
         return Err(PreviewError::Cancelled);
     }
@@ -599,6 +653,12 @@ pub fn load_text_preview<P: AsRef<Path>>(
     // files). Named text and raster files never pay for usvg or fontdb.
     if let Some(gzip) = svg_load_kind(path, &mut file, &prefix[..prefix_len])? {
         return load_svg_preview(file, total_bytes, gzip, &limits.svg, cancel, gen);
+    }
+    // Extensionless only, and only the bytes already read for the image
+    // sniff. A `.txt` or `.png` that happens to start with `%PDF` stays on
+    // its own path.
+    if extensionless_pdf(path, &prefix[..prefix_len]) {
+        return Err(pdf_gate_error(total_bytes, &limits.pdf));
     }
     let mut reader = BufReader::new(&mut file);
     let mut buffer: Vec<u8> = Vec::new();
@@ -666,6 +726,7 @@ pub fn load_text_preview<P: AsRef<Path>>(
         total_bytes,
         image: None,
         markdown_rtf: None,
+        pdf_pages: 0,
     };
 
     // Extension check after the text sniff, so a `.md` PNG still uses the
@@ -743,6 +804,7 @@ fn load_image_preview(
         total_bytes,
         image: Some(Arc::new(decoded)),
         markdown_rtf: None,
+        pdf_pages: 0,
     })
 }
 
@@ -850,7 +912,39 @@ fn load_svg_preview(
         total_bytes,
         image: Some(Arc::new(decoded)),
         markdown_rtf: None,
+        pdf_pages: 0,
     })
+}
+
+fn pdf_named_outcome(
+    path: &Path,
+    limits: &PdfLimits,
+    cancel: &CancelToken,
+    gen: Generation,
+) -> Result<Preview, PreviewError> {
+    if cancel.is_cancelled(&gen) {
+        return Err(PreviewError::Cancelled);
+    }
+    let len = std::fs::metadata(path).map_err(PreviewError::Io)?.len();
+    Err(pdf_gate_error(len, limits))
+}
+
+/// Worker failure as a preview error. IO codes use [`PreviewError::Io`] so
+/// the sentence, header, and icon match every other file. A damaged or
+/// password-protected PDF stays a PDF error and keeps the shell icon.
+pub fn preview_error_from_pdf(error: PdfError) -> PreviewError {
+    match error {
+        PdfError::Io(code) => PreviewError::Io(std::io::Error::from_raw_os_error(code)),
+        other => PreviewError::pdf(other),
+    }
+}
+
+fn pdf_gate_error(len: u64, limits: &PdfLimits) -> PreviewError {
+    match gate_pdf_file(len, limits) {
+        PdfGate::Empty => PreviewError::Empty,
+        PdfGate::TooLarge { bytes } => PreviewError::pdf(PdfError::FileTooLarge { bytes }),
+        PdfGate::Render => PreviewError::pdf(PdfError::Rendering),
+    }
 }
 
 fn is_shortcut(path: &Path) -> bool {
@@ -1444,7 +1538,6 @@ mod tests {
             "notes.docx",
             "sheet.xlsx",
             "deck.pptx",
-            "book.pdf",
             "song.mp3",
             "clip.mp4",
             "data.zip",
@@ -1460,6 +1553,124 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn pdf_io_failures_use_the_same_sentences_as_other_files() {
+        use crate::pdf::PdfError;
+
+        for code in [32, 33, 5, 2, 3] {
+            let io = PreviewError::Io(std::io::Error::from_raw_os_error(code));
+            let as_pdf = PreviewError::pdf(PdfError::Io(code));
+            assert_eq!(
+                as_pdf.user_message("notes.pdf"),
+                io.user_message("notes.pdf"),
+                "{code}"
+            );
+            assert_eq!(as_pdf.header_status(), io.header_status(), "{code}");
+            let mapped = preview_error_from_pdf(PdfError::Io(code));
+            assert_eq!(
+                mapped.user_message("notes.pdf"),
+                io.user_message("notes.pdf")
+            );
+            assert!(matches!(mapped, PreviewError::Io(_)));
+            assert!(!mapped.is_pdf());
+        }
+        assert!(matches!(
+            preview_error_from_pdf(PdfError::Damaged),
+            PreviewError::Pdf {
+                error: PdfError::Damaged,
+                ..
+            }
+        ));
+        assert!(matches!(
+            preview_error_from_pdf(PdfError::PasswordProtected),
+            PreviewError::Pdf {
+                error: PdfError::PasswordProtected,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pdf_files_take_the_placeholder_path_and_other_formats_do_not() {
+        use crate::pdf::PdfError;
+
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["notes.pdf", "Notes.PDF", ".pdf"] {
+            let path = write_file(&dir, name, b"%PDF-1.4\n%%EOF\n");
+            let err = load(&path, PreviewLimits::default()).unwrap_err();
+            assert!(err.is_pdf_placeholder(), "{name}");
+            assert!(err.is_pdf(), "{name}");
+            assert_eq!(err.header_status(), "PDF");
+            assert_eq!(err.user_message(name), "");
+            assert!(err.wants_quick_info());
+            assert_eq!(denied_kind(&path), None, "{name}");
+        }
+
+        let empty = write_file(&dir, "empty.pdf", b"");
+        assert_eq!(
+            load(&empty, PreviewLimits::default()),
+            Err(PreviewError::Empty)
+        );
+
+        let big = write_file(&dir, "big.PDF", b"%PDF-1.1\n");
+        let mut limits = PreviewLimits::default();
+        limits.pdf.max_file_bytes = 3;
+        let err = load(&big, limits).unwrap_err();
+        assert!(matches!(
+            err,
+            PreviewError::Pdf {
+                error: PdfError::FileTooLarge { bytes: 9 },
+                ..
+            }
+        ));
+        assert_eq!(err.header_status(), "Too large");
+        assert!(err.user_message("big.PDF").contains("too large"));
+
+        let pdfx = write_file(&dir, "notes.pdfx", b"hello\n");
+        let preview = load(&pdfx, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert_eq!(preview.pdf_pages, 0);
+        assert!(preview.content.contains("hello"));
+
+        let txt = write_file(&dir, "notes.txt", b"%PDF-1.4 this stays text\n");
+        let preview = load(&txt, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert!(preview.content.contains("%PDF"));
+
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice(b"%PDF-1.4\n");
+        let sniff = write_file(&dir, "scan", &bom);
+        let err = load(&sniff, PreviewLimits::default()).unwrap_err();
+        assert!(err.is_pdf_placeholder());
+
+        let plain = write_file(&dir, "Makefile", b"all:\n\ttrue\n");
+        let preview = load(&plain, PreviewLimits::default()).unwrap();
+        assert!(preview.image.is_none());
+        assert!(preview.content.contains("all:"));
+
+        let png = rgba_png(1, 1, &[1, 2, 3, 255]);
+        let photo = write_file(&dir, "photo.png", &png);
+        let preview = load(&photo, PreviewLimits::default()).unwrap();
+        assert_eq!(
+            preview.image.as_ref().unwrap().format,
+            crate::image_preview::ImageFormat::Png
+        );
+        assert_eq!(preview.pdf_pages, 0);
+
+        let disguised = write_file(&dir, "photo.pdf", &png);
+        let err = load(&disguised, PreviewLimits::default()).unwrap_err();
+        assert!(err.is_pdf_placeholder());
+
+        let token = CancelToken::new();
+        let stale = token.generate();
+        let _live = token.generate();
+        let current = write_file(&dir, "current.pdf", b"%PDF-1.4\n");
+        assert_eq!(
+            load_text_preview(&current, PreviewLimits::default(), &token, stale),
+            Err(PreviewError::Cancelled)
+        );
     }
 
     #[test]

@@ -40,7 +40,9 @@ mod win {
     use std::sync::atomic::{
         AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering,
     };
+    use std::sync::{mpsc, OnceLock};
 
+    use spacepeek::pdf_win::render_pdf_page;
     use spacepeek::{
         accept_shell_icon_result, apply_image_command, center_anchored_size, choose_selected,
         chrome_for_error, chrome_for_text, classify_shell_surface, classify_typeahead_vk,
@@ -50,24 +52,26 @@ mod win {
         is_desktop_host_class, is_selection_pointer_message, large_icon_px,
         layout_shell_icon_message, load_text_preview, min_physical_size, nav_reload_remaining,
         nonempty_path, pack_screen_point, parse_command, place_preview, pointer_over_close,
-        preview_text, reconcile_image_view, reset_for_new_image, scaled_close_width,
-        scaled_detail_font, scaled_font_height, scaled_header_font, scaled_header_height,
-        scaled_header_pad, session_phase, shell_icon_gap_px, shell_icon_min_px,
-        shell_icon_pixel_size_ok, shell_icon_px, shell_icon_size_still_wanted, shell_image_list_id,
-        should_fetch_shell_icon, should_keep_shell_icon_pixels, should_reload_after_pointer,
+        preview_error_from_pdf, preview_from_page, preview_text, reconcile_image_view,
+        reset_for_new_image, scaled_close_width, scaled_detail_font, scaled_font_height,
+        scaled_header_font, scaled_header_height, scaled_header_pad, session_phase,
+        shell_icon_gap_px, shell_icon_min_px, shell_icon_pixel_size_ok, shell_icon_px,
+        shell_icon_size_still_wanted, shell_image_list_id, should_fetch_shell_icon,
+        should_keep_shell_icon_pixels, should_reload_after_pointer,
         should_reload_after_shell_event, should_request_shell_icon, should_show_first_run_balloon,
         small_icon_px, step, svg_target_from_opening, tick_elapsed_ms, typeahead_for_decision,
         typeahead_window_ms, unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken,
         ChromeLayout, Command, DecodedImage, DesktopSelection, DoubleClickAction, Effect, Event,
         Generation, HitZone, HookContext, HookDecision, HookKey, IconSpawn, ImageCommand,
-        ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, Presented, Preview, PreviewError,
-        PreviewLimits, PreviewState, PxRect, PxSize, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
-        SelectionTarget, SessionPhase, ShellIconPixels, ShellSurface, ShowGate, ShowOutcome,
-        SizeGrip, SizeMemory, SvgTarget, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold,
-        ZoomKey, ZoomOp, BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET,
-        CLASS_PROGMAN, CLASS_WORKERW, DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN,
-        FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS,
-        SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP, VERSION,
+        ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, PdfError, PdfLimits, PdfTarget,
+        Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, PxSize, QuickInfo,
+        RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels,
+        ShellSurface, ShowGate, ShowOutcome, SizeGrip, SizeMemory, SvgTarget, TrackedKey,
+        Typeahead, TypeaheadKey, WindowKind, ZoomHold, ZoomKey, ZoomOp, BALLOON_BODY,
+        BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET, CLASS_PROGMAN, CLASS_WORKERW,
+        DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME,
+        ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP,
+        VERSION,
     };
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
@@ -109,6 +113,7 @@ mod win {
     use windows::Win32::System::SystemInformation::GetTickCount;
     use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
     use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
     use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
     use windows::Win32::UI::Controls::RichEdit::{
         EDITSTREAM, EM_AUTOURLDETECT, EM_EXLIMITTEXT, EM_HIDESELECTION, EM_SETBKGNDCOLOR,
@@ -194,6 +199,8 @@ mod win {
     const WM_SPACEPEEK_ZOOM: u32 = WM_APP + 10;
     /// Shell-icon pixels for an unsupported file. `lparam` is `Box<IconMsg>`.
     const WM_SPACEPEEK_ICON: u32 = WM_APP + 11;
+    /// First page of a PDF. `lparam` is `Box<PdfMsg>`. Posted by `spacepeek-pdf`.
+    const WM_SPACEPEEK_PDF: u32 = WM_APP + 12;
     /// `WM_CAPTURECHANGED`. Kept local so the preview does not need extra features.
     const WM_CAPTURECHANGED: u32 = 0x0215;
     /// `NIN_KEYSELECT` is `WM_USER + 1`. The windows crate exports `NIN_SELECT` only.
@@ -250,6 +257,22 @@ mod win {
         /// Side length this worker was asked to fetch, in physical pixels.
         size_px: i32,
         pixels: Option<ShellIconPixels>,
+    }
+
+    struct PdfMsg {
+        gen: Generation,
+        result: std::result::Result<Preview, PreviewError>,
+    }
+
+    /// One PDF render. The worker keeps only the latest of these.
+    struct PdfRequest {
+        gen: Generation,
+        path: PathBuf,
+        target: PdfTarget,
+        limits: PdfLimits,
+        cancel: CancelToken,
+        /// Message window that receives [`WM_SPACEPEEK_PDF`].
+        hwnd: isize,
     }
 
     /// Latest-request coalescing for the unsupported-file shell icon.
@@ -312,6 +335,11 @@ mod win {
         font_dpi: u32,
         /// Last user-chosen outer size, in logical pixels. Empty until a resize.
         sizes: SizeMemory,
+        /// This HWND was created at the image size for a PDF message. Content
+        /// updates keep those pixels, including an in-use, missing, or
+        /// access-denied error that is no longer a PDF outcome. A drag still
+        /// compares against the image default so 760×520 is not stored.
+        pdf_image_opening: bool,
         /// Outer rect at the start of a size or move loop. Work-area limits are
         /// filled on the first `WM_SIZING`, so a header drag does not query them.
         size_drag: Option<SizeDrag>,
@@ -518,6 +546,7 @@ mod win {
             detail_font: HFONT::default(),
             font_dpi: 0,
             sizes: SizeMemory::new(),
+            pdf_image_opening: false,
             size_drag: None,
             presented: None,
             space_busy: false,
@@ -1570,6 +1599,10 @@ mod win {
                 on_icon_loaded(lparam);
                 LRESULT(0)
             }
+            WM_SPACEPEEK_PDF => {
+                on_pdf(lparam);
+                LRESULT(0)
+            }
             WM_SPACEPEEK_FOREGROUND => {
                 on_foreground_hwnd(HWND(wparam.0 as *mut _));
                 LRESULT(0)
@@ -1766,6 +1799,7 @@ mod win {
                         app.preview_hwnd = HWND::default();
                         app.edit_hwnd = HWND::default();
                         app.presented = None;
+                        app.pdf_image_opening = false;
                         app.close_hovered = false;
                         app.shown_path.clear();
                         app.image_view = reset_for_new_image(app.image_view);
@@ -1838,6 +1872,14 @@ mod win {
     fn on_loaded(lparam: LPARAM) {
         let msg = unsafe { Box::from_raw(lparam.0 as *mut LoadMsg) };
         dispatch(Event::LoadFinished(msg.gen, msg.result));
+        // The icon is on screen before this. The page render starts only then,
+        // and only for a PDF that is still the current placeholder.
+        maybe_enqueue_pdf();
+    }
+
+    fn on_pdf(lparam: LPARAM) {
+        let msg = unsafe { Box::from_raw(lparam.0 as *mut PdfMsg) };
+        dispatch(Event::PdfReady(msg.gen, msg.result));
     }
 
     fn on_icon_loaded(lparam: LPARAM) {
@@ -2182,6 +2224,131 @@ mod win {
                     "could not start preview load",
                 ))),
             );
+        }
+    }
+
+    /// Body the first PDF page is fitted into. Captured once, when the job
+    /// starts: the live body if the window is up, otherwise the image opening
+    /// size. A later resize or zoom does not render again.
+    fn pdf_target_for_load(preview_hwnd: HWND, sizes: SizeMemory, dpi: u32) -> PdfTarget {
+        let target = svg_target_for_load(preview_hwnd, sizes, dpi);
+        PdfTarget {
+            width: target.width,
+            height: target.height,
+            dpi: target.dpi,
+        }
+    }
+
+    /// Start the PDF worker only after the placeholder window is up.
+    ///
+    /// The thread, `RoInitialize`, and `Windows.Data.Pdf` are created here, on
+    /// the first PDF, not at process start and not on the UI thread. A
+    /// non-PDF load returns before any of that.
+    fn maybe_enqueue_pdf() {
+        let Some(job) = with_app(pdf_request_if_placeholder) else {
+            return;
+        };
+        let gen = job.gen;
+        if !send_pdf_job(job) {
+            dispatch(Event::PdfReady(
+                gen,
+                Err(PreviewError::pdf(PdfError::Unavailable)),
+            ));
+        }
+    }
+
+    fn pdf_request_if_placeholder(app: &App) -> Option<PdfRequest> {
+        let PreviewState::Failed { gen, path, error } = &app.state else {
+            return None;
+        };
+        if !error.is_pdf_placeholder() || app.preview_hwnd.0.is_null() {
+            return None;
+        }
+        let dpi = dpi_for_anchor(app.preview_hwnd);
+        Some(PdfRequest {
+            gen: *gen,
+            path: path.clone(),
+            target: pdf_target_for_load(app.preview_hwnd, app.sizes, dpi),
+            limits: PreviewLimits::default().pdf,
+            cancel: app.cancel.clone(),
+            hwnd: app.msg_hwnd.0 as isize,
+        })
+    }
+
+    fn send_pdf_job(job: PdfRequest) -> bool {
+        static SLOT: OnceLock<PdfSlot> = OnceLock::new();
+        let slot = SLOT.get_or_init(spawn_pdf_worker);
+        match slot {
+            PdfSlot::Ready(tx) => tx.send(job).is_ok(),
+            PdfSlot::Failed => false,
+        }
+    }
+
+    fn spawn_pdf_worker() -> PdfSlot {
+        let (tx, rx) = mpsc::channel();
+        match std::thread::Builder::new()
+            .name("spacepeek-pdf".to_string())
+            .spawn(move || pdf_thread(rx))
+        {
+            Ok(_) => PdfSlot::Ready(tx),
+            Err(_) => PdfSlot::Failed,
+        }
+    }
+
+    enum PdfSlot {
+        Ready(mpsc::Sender<PdfRequest>),
+        Failed,
+    }
+
+    /// Own MTA for `Windows.Data.Pdf`. The UI thread stays an STA.
+    fn pdf_thread(rx: mpsc::Receiver<PdfRequest>) {
+        // SAFETY: this thread has not called `CoInitializeEx` or `RoInitialize`.
+        // `RO_INIT_MULTITHREADED` is the apartment the PDF engine was measured
+        // with. It is not the UI STA, and it is not process-wide.
+        let ready = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+        while let Ok(first) = rx.recv() {
+            let job = drain_pdf(first, &rx);
+            if job.cancel.is_cancelled(&job.gen) {
+                continue;
+            }
+            if !ready {
+                post_pdf(
+                    HWND(job.hwnd as *mut _),
+                    job.gen,
+                    Err(PreviewError::pdf(PdfError::Unavailable)),
+                );
+                continue;
+            }
+            let rendered =
+                render_pdf_page(&job.path, job.target, &job.limits, &job.cancel, job.gen);
+            if job.cancel.is_cancelled(&job.gen) {
+                continue;
+            }
+            let result = match rendered {
+                Ok(page) => Ok(preview_from_page(page.total_bytes, page.image, page.pages)),
+                Err(PdfError::Cancelled) => continue,
+                Err(err) => Err(preview_error_from_pdf(err)),
+            };
+            post_pdf(HWND(job.hwnd as *mut _), job.gen, result);
+        }
+    }
+
+    fn drain_pdf(mut job: PdfRequest, rx: &mpsc::Receiver<PdfRequest>) -> PdfRequest {
+        while let Ok(newer) = rx.try_recv() {
+            job = newer;
+        }
+        job
+    }
+
+    fn post_pdf(hwnd: HWND, gen: Generation, result: std::result::Result<Preview, PreviewError>) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        let raw = Box::into_raw(Box::new(PdfMsg { gen, result }));
+        let posted =
+            unsafe { PostMessageW(hwnd, WM_SPACEPEEK_PDF, WPARAM(0), LPARAM(raw as isize)) };
+        if posted.is_err() {
+            drop(unsafe { Box::from_raw(raw) });
         }
     }
 
@@ -2945,6 +3112,12 @@ mod win {
         let Some(presented) = presented else {
             return false;
         };
+        // The page replaces the shell icon in this window. Drop those pixels
+        // so a picture does not keep the icon bitmap. No icon was fetched for
+        // a raster or SVG file, so this is a no-op on those paths.
+        if matches!(presented, Presented::Image { .. }) {
+            clear_shell_icon_pixels();
+        }
         let dpi = if existing.0.is_null() {
             dpi_for_preview_anchor(anchor)
         } else {
@@ -2955,15 +3128,19 @@ mod win {
         let title = presented.header().name.clone();
 
         if existing.0.is_null() {
+            let pdf_image_opening = with_app(|app| pdf_message(&app.state));
             let Some(hwnd) = create_preview_window(anchor, instance, dpi, &presented) else {
                 return false;
             };
             // Publish before the edit is created so parent messages, including
-            // a size from the child, hit `preview_proc`.
+            // a size from the child, hit `preview_proc`. Latch the PDF image
+            // opening here: a later IO error reuses this HWND and must not
+            // look like a message-sized choice.
             with_app_mut(|app| {
                 app.preview_hwnd = hwnd;
                 app.edit_hwnd = HWND::default();
                 app.presented = Some(paint_presented(&presented));
+                app.pdf_image_opening = pdf_image_opening;
                 app.image_view = reset_for_new_image(app.image_view);
                 app.pan_drag = PanDrag::idle();
                 app.suppress_dblclk = false;
@@ -2979,6 +3156,7 @@ mod win {
                         app.preview_hwnd = HWND::default();
                         app.edit_hwnd = HWND::default();
                         app.presented = None;
+                        app.pdf_image_opening = false;
                         app.image_view = reset_for_new_image(app.image_view);
                         app.suppress_dblclk = false;
                         publish_preview_hwnd(HWND::default());
@@ -3092,13 +3270,37 @@ mod win {
         }
     }
 
+    /// True while the current outcome is a PDF message (placeholder or a
+    /// PDF failure). An IO open failure is not one: it uses the shared
+    /// in-use, missing, or access-denied sentence.
+    fn pdf_message(state: &PreviewState) -> bool {
+        match state {
+            PreviewState::Failed { error, .. } => error.is_pdf(),
+            PreviewState::PendingShow {
+                outcome: ShowOutcome::Failed(error),
+                ..
+            } => error.is_pdf(),
+            _ => false,
+        }
+    }
+
+    /// PDF placeholder and PDF failures open at the image size, so the page
+    /// can replace the icon without a size jump. A remembered size is already
+    /// shared. Other files keep the kind they present.
+    fn opening_window_kind(state: &PreviewState, presented: WindowKind) -> WindowKind {
+        spacepeek::chrome::remember_compare_kind(presented, pdf_message(state), false)
+    }
+
     fn create_preview_window(
         anchor: HWND,
         instance: HINSTANCE,
         dpi: u32,
         presented: &Presented,
     ) -> Option<HWND> {
-        let size = with_app(|app| app.sizes.opening_physical(presented.kind(), dpi));
+        let size = with_app(|app| {
+            let kind = opening_window_kind(&app.state, presented.kind());
+            app.sizes.opening_physical(kind, dpi)
+        });
         let (rect, work) = preview_anchor(anchor);
         let placed = place_preview(rect, work, size.width, size.height);
         let class_name = utf16(PREVIEW_CLASS);
@@ -3439,6 +3641,7 @@ mod win {
             app.preview_hwnd = HWND::default();
             app.edit_hwnd = HWND::default();
             app.presented = None;
+            app.pdf_image_opening = false;
             app.close_hovered = false;
             app.shown_path.clear();
             app.image_view = reset_for_new_image(app.image_view);
@@ -4222,20 +4425,29 @@ mod win {
         }
         let dpi = dpi_for_anchor(hwnd);
         with_app_mut(|app| {
-            let kind = app
+            let presented_kind = app
                 .presented
                 .as_ref()
                 .map(Presented::kind)
                 .unwrap_or(WindowKind::Content);
+            // `pdf_image_opening` is the kind this HWND was created with. An
+            // in-use, missing, or access-denied result replaces the PDF
+            // placeholder in place, so the live error is no longer a PDF
+            // message. Comparing against that presentation would store
+            // 760×520 for later empty and unsupported windows.
+            let opened_as = spacepeek::chrome::remember_compare_kind(
+                presented_kind,
+                pdf_message(&app.state),
+                app.pdf_image_opening,
+            );
             let clamped = spacepeek::chrome::clamp_logical_size(
                 spacepeek::chrome::physical_to_logical(width, height, dpi),
             );
-            if app.sizes.chosen() == Some(clamped) {
-                return;
-            }
-            if app.sizes.chosen().is_none()
-                && clamped == spacepeek::chrome::default_logical_size(kind)
-            {
+            if !spacepeek::chrome::should_remember_window_size(
+                app.sizes.chosen(),
+                clamped,
+                opened_as,
+            ) {
                 return;
             }
             let _ = app.sizes.remember(clamped);

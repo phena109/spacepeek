@@ -10,11 +10,12 @@ use crate::geometry::{
     effective_dpi, muldiv, scale_for_dpi, PxRect, PxSize, BASE_DPI, LOGICAL_PREVIEW_HEIGHT,
     LOGICAL_PREVIEW_WIDTH,
 };
-use crate::image_preview::{format_image_details, DecodedImage};
+use crate::image_preview::{format_image_details, DecodedImage, ImageFormat};
 use crate::markdown::is_markdown_path;
+use crate::pdf::format_pdf_header;
 use crate::preview::{
-    format_compact_size, format_grouped, message_with_quick_info, preview_text, Preview,
-    PreviewError,
+    format_compact_size, format_grouped, format_quick_info, message_with_quick_info, preview_text,
+    Preview, PreviewError,
 };
 
 /// Logical height of the header strip at 96 DPI.
@@ -150,10 +151,20 @@ pub fn path_label(path: &Path) -> String {
 
 pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
     if let Some(image) = preview.image.as_ref() {
+        let details = if image.format == ImageFormat::Pdf {
+            format_pdf_header(
+                preview.total_bytes,
+                image.source_width,
+                image.source_height,
+                preview.pdf_pages,
+            )
+        } else {
+            format_image_details(preview.total_bytes, image)
+        };
         return Presented::Image {
             header: HeaderText {
                 name: path_label(path),
-                details: format_image_details(preview.total_bytes, image),
+                details,
             },
             image: Arc::clone(image),
         };
@@ -187,10 +198,16 @@ pub fn chrome_for_text(path: &Path, preview: &Preview) -> Presented {
 
 pub fn chrome_for_error(path: &Path, error: &PreviewError) -> Presented {
     let name = path_label(path);
-    let mut message = error.user_message(&name);
-    if let Some(info) = error.quick_info() {
-        message = message_with_quick_info(&message, info);
-    }
+    let sentence = error.user_message(&name);
+    let message = if let Some(info) = error.quick_info() {
+        if sentence.is_empty() {
+            format_quick_info(info)
+        } else {
+            message_with_quick_info(&sentence, info)
+        }
+    } else {
+        sentence
+    };
     Presented::Message {
         header: HeaderText {
             name: name.clone(),
@@ -316,6 +333,49 @@ impl SizeMemory {
     pub fn opening_physical(self, kind: WindowKind, dpi: u32) -> PxSize {
         logical_to_physical(self.opening_logical(kind), dpi)
     }
+}
+
+/// Kind to pass to [`should_remember_window_size`] for the current HWND.
+///
+/// A PDF placeholder is presented as a message and created at the image
+/// size. `pdf_image_opening` is latched at that create and stays set when
+/// the same window later shows an in-use, missing, or access-denied IO
+/// error: that error is not a PDF outcome, and the window is not recreated.
+/// Recomputing from the IO presentation would treat 760×520 as a choice.
+/// A live PDF message (`pdf_message`) still opens as an image when this
+/// HWND was created for something else.
+pub fn remember_compare_kind(
+    presented: WindowKind,
+    pdf_message: bool,
+    pdf_image_opening: bool,
+) -> WindowKind {
+    if pdf_image_opening || pdf_message {
+        WindowKind::Image
+    } else {
+        presented
+    }
+}
+
+/// Whether a finished move or resize should become the shared chosen size.
+///
+/// `opened_as` is the kind used to create the window. A PDF message is
+/// created at the image size while its presented kind stays a message, so
+/// the comparison has to use that opening kind. An unchanged opening default
+/// is not a user choice. A size that is already stored is kept when the
+/// outer size did not change.
+pub fn should_remember_window_size(
+    chosen: Option<LogicalSize>,
+    measured: LogicalSize,
+    opened_as: WindowKind,
+) -> bool {
+    let measured = clamp_logical_size(measured);
+    if chosen == Some(measured) {
+        return false;
+    }
+    if chosen.is_none() && measured == default_logical_size(opened_as) {
+        return false;
+    }
+    true
 }
 
 impl Default for SizeMemory {
@@ -487,6 +547,7 @@ mod tests {
             total_bytes,
             image: None,
             markdown_rtf: None,
+            pdf_pages: 0,
         }
     }
 
@@ -580,6 +641,7 @@ mod tests {
             total_bytes: 1_258_291,
             image: Some(Arc::clone(&image)),
             markdown_rtf: None,
+            pdf_pages: 0,
         };
         let presented = chrome_for_text(Path::new("photo.jpg"), &preview);
         assert_eq!(presented.kind(), WindowKind::Image);
@@ -607,6 +669,7 @@ mod tests {
             total_bytes: 2_048,
             image: Some(Arc::clone(&svg)),
             markdown_rtf: None,
+            pdf_pages: 0,
         };
         let svg_presented = chrome_for_text(Path::new("icon.SVG"), &svg_preview);
         assert_eq!(svg_presented.kind(), WindowKind::Image);
@@ -640,6 +703,7 @@ mod tests {
             total_bytes: 4,
             image: None,
             markdown_rtf: Some(Arc::clone(&rtf)),
+            pdf_pages: 0,
         };
         let presented = chrome_for_text(Path::new("README.MD"), &md_preview);
         assert_eq!(presented.kind(), WindowKind::Markdown);
@@ -755,6 +819,72 @@ mod tests {
     }
 
     #[test]
+    fn pdf_page_header_counts_pages_and_the_placeholder_is_quick_info() {
+        use crate::image_preview::{DecodedImage, ImageFormat};
+        use crate::pdf::PdfError;
+        use crate::preview::QuickInfo;
+        use std::sync::Arc;
+
+        let image = Arc::new(DecodedImage {
+            width: 400,
+            height: 518,
+            source_width: 612,
+            source_height: 792,
+            format: ImageFormat::Pdf,
+            bgra: vec![255, 255, 255, 255],
+        });
+        let preview = Preview {
+            content: String::new(),
+            truncated: false,
+            line_count: 0,
+            truncation: None,
+            total_bytes: 12 * 1024,
+            image: Some(Arc::clone(&image)),
+            markdown_rtf: None,
+            pdf_pages: 12,
+        };
+        let presented = chrome_for_text(Path::new("book.pdf"), &preview);
+        assert_eq!(presented.kind(), WindowKind::Image);
+        assert_eq!(
+            presented.header().details,
+            "12 KB · 612 × 792 · 12 pages · PDF"
+        );
+        let one = Preview {
+            pdf_pages: 1,
+            ..preview
+        };
+        assert_eq!(
+            chrome_for_text(Path::new("one.pdf"), &one).header().details,
+            "12 KB · 612 × 792 · 1 page · PDF"
+        );
+
+        let rendering = PreviewError::pdf(PdfError::Rendering).with_quick_info(QuickInfo {
+            type_name: Some("PDF Document".to_string()),
+            size_bytes: Some(12 * 1024),
+            modified: None,
+        });
+        let message = chrome_for_error(Path::new("book.pdf"), &rendering);
+        assert_eq!(message.kind(), WindowKind::Message);
+        assert_eq!(message.header().details, "PDF");
+        assert_eq!(
+            message.message(),
+            Some("Type: PDF Document\r\nSize: 12 KB (12,288 bytes)")
+        );
+
+        let locked = PreviewError::pdf(PdfError::PasswordProtected).with_quick_info(QuickInfo {
+            type_name: Some("PDF Document".to_string()),
+            size_bytes: Some(20),
+            modified: None,
+        });
+        assert_eq!(
+            chrome_for_error(Path::new("secret.pdf"), &locked).message(),
+            Some(
+                "secret.pdf can't be previewed — this PDF is password protected\r\n\r\nType: PDF Document\r\nSize: 20 B (20 bytes)"
+            )
+        );
+    }
+
+    #[test]
     fn hit_test_regions() {
         let layout = sample_layout();
         // Client width is 784. Close starts at 784 - 44 = 740 in client coords,
@@ -793,6 +923,106 @@ mod tests {
             ),
             HitZone::Client
         );
+    }
+
+    #[test]
+    fn moving_a_pdf_message_does_not_store_the_image_opening_size() {
+        let image = default_logical_size(WindowKind::Image);
+        let message = default_logical_size(WindowKind::Message);
+        assert_eq!(
+            image,
+            LogicalSize {
+                width: 760,
+                height: 520
+            }
+        );
+        assert_eq!(
+            message,
+            LogicalSize {
+                width: 480,
+                height: 320
+            }
+        );
+
+        // The PDF window was opened as an image. A header drag that leaves
+        // it at 760×520 is not a choice, so later message windows stay small.
+        assert!(!should_remember_window_size(None, image, WindowKind::Image));
+        // Comparing that same size against the message default is the bug:
+        // 760×520 would be stored and then used for empty and unsupported files.
+        assert!(should_remember_window_size(
+            None,
+            image,
+            WindowKind::Message
+        ));
+
+        assert!(!should_remember_window_size(
+            None,
+            message,
+            WindowKind::Message
+        ));
+        assert!(!should_remember_window_size(
+            None,
+            image,
+            WindowKind::Content
+        ));
+        // A PDF the user actually resized, including down to the message
+        // default, is a choice.
+        assert!(should_remember_window_size(
+            None,
+            message,
+            WindowKind::Image
+        ));
+        let custom = LogicalSize {
+            width: 800,
+            height: 600,
+        };
+        assert!(should_remember_window_size(None, custom, WindowKind::Image));
+        assert!(!should_remember_window_size(
+            Some(custom),
+            custom,
+            WindowKind::Image
+        ));
+        assert!(should_remember_window_size(
+            Some(image),
+            custom,
+            WindowKind::Content
+        ));
+    }
+
+    #[test]
+    fn an_io_failure_keeps_the_pdf_opening_size_unremembered() {
+        let image = default_logical_size(WindowKind::Image);
+        let message = default_logical_size(WindowKind::Message);
+
+        // Placeholder: presented as a message, created at the image size.
+        let kind = remember_compare_kind(WindowKind::Message, true, true);
+        assert_eq!(kind, WindowKind::Image);
+        assert!(!should_remember_window_size(None, image, kind));
+
+        // The worker replaced the placeholder with a sharing, missing, or
+        // access-denied error. That error is not a PDF outcome, and this
+        // HWND was not recreated. The latch still compares against 760×520.
+        let kind = remember_compare_kind(WindowKind::Message, false, true);
+        assert_eq!(kind, WindowKind::Image);
+        assert!(!should_remember_window_size(None, image, kind));
+
+        // Dropping the latch is the bug: the IO message would store 760×520
+        // and later empty or unsupported windows would open at that size.
+        let kind = remember_compare_kind(WindowKind::Message, false, false);
+        assert_eq!(kind, WindowKind::Message);
+        assert!(should_remember_window_size(None, image, kind));
+
+        // A real message window is unchanged, and a message window reused
+        // for an image can still record the smaller size.
+        let kind = remember_compare_kind(WindowKind::Message, false, false);
+        assert!(!should_remember_window_size(None, message, kind));
+        let kind = remember_compare_kind(WindowKind::Image, false, false);
+        assert!(should_remember_window_size(None, message, kind));
+
+        // A resize of the PDF window, including down to the message default,
+        // is still a choice.
+        let kind = remember_compare_kind(WindowKind::Message, false, true);
+        assert!(should_remember_window_size(None, message, kind));
     }
 
     #[test]

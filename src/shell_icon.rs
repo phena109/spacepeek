@@ -136,7 +136,12 @@ pub fn shell_icon_min_px(dpi: u32) -> i32 {
 pub fn should_request_shell_icon(error: Option<&PreviewError>) -> bool {
     matches!(
         error,
-        Some(PreviewError::Binary { .. } | PreviewError::Denied { .. } | PreviewError::Svg { .. })
+        Some(
+            PreviewError::Binary { .. }
+                | PreviewError::Denied { .. }
+                | PreviewError::Svg { .. }
+                | PreviewError::Pdf { .. },
+        )
     )
 }
 
@@ -524,6 +529,12 @@ mod tests {
         assert!(!should_request_shell_icon(None));
         assert!(should_request_shell_icon(Some(&PreviewError::svg(
             crate::svg::SvgError::Malformed
+        ))));
+        assert!(should_request_shell_icon(Some(&PreviewError::pdf(
+            crate::pdf::PdfError::Rendering
+        ))));
+        assert!(should_request_shell_icon(Some(&PreviewError::pdf(
+            crate::pdf::PdfError::PasswordProtected
         ))));
         assert!(!should_request_shell_icon(Some(&PreviewError::Image(
             crate::image_preview::ImageError::Corrupt
