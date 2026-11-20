@@ -21,6 +21,7 @@ pub mod selection;
 pub mod shell_icon;
 pub mod state;
 pub mod svg;
+pub mod svg_zoom;
 
 pub use balloon::{
     copy_utf16_z, interpret_dword_flag, should_show_first_run_balloon, BALLOON_BODY,
@@ -96,9 +97,13 @@ pub use state::{
     gate_show, session_phase, step, Effect, Event, PreviewState, ShowGate, ShowOutcome,
 };
 pub use svg::{
-    ensure_system_fonts, inflate_svgz, is_svg_path, render_svg, sniff_svg, svg_output_size,
-    svg_target_from_client, svg_target_from_opening, xml_element_depth, SvgError, SvgLimits,
-    SvgOutputSize, SvgTarget, SVGZ_MAX_DECOMPRESSED_BYTES, SVG_LOADER_STACK,
+    ensure_system_fonts, inflate_svgz, is_svg_path, render_svg, render_svg_at_size, sniff_svg,
+    svg_output_size, svg_target_from_client, svg_target_from_opening, xml_element_depth, SvgError,
+    SvgLimits, SvgOutputSize, SvgTarget, SVGZ_MAX_DECOMPRESSED_BYTES, SVG_LOADER_STACK,
     SVG_MAX_EMBEDDED_PIXELS, SVG_MAX_EMBEDDED_PIXELS_TOTAL, SVG_MAX_FILE_BYTES, SVG_MAX_NESTING,
     SVG_MAX_NODES, SVG_MAX_PIXELS, SVG_PARSE_BUDGET, SVG_SNIFF_BYTES,
+};
+pub use svg_zoom::{
+    cap_svg_render_size, svg_display_pixels, svg_sharp_max_pixels, svg_zoom_plan, SvgZoomEffect,
+    SvgZoomEvent, SvgZoomPlan, SvgZoomSession, SvgZoomSnap, SVG_ZOOM_SETTLE_MS,
 };
