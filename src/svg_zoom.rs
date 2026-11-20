@@ -501,6 +501,48 @@ impl SvgZoomSession {
         }]
     }
 
+    /// The UI saw a pan or a border drag while applying a swap.
+    ///
+    /// [`SvgZoomEvent::Finished`] already cleared the in-flight slot. Put that
+    /// bitmap back and show it when the gesture ends. A newer sequence, or a
+    /// call when nothing is dragging, does not take the bitmap.
+    pub fn postpone_swap(
+        &mut self,
+        seq: u64,
+        file_gen: u64,
+        width: u32,
+        height: u32,
+        panning: bool,
+        sizing: bool,
+    ) -> bool {
+        if (!panning && !sizing)
+            || !self.active
+            || self.file_gen != file_gen
+            || self.seq != seq
+            || seq == 0
+            || width == 0
+            || height == 0
+            || self.inflight.is_some()
+        {
+            return false;
+        }
+        if panning {
+            self.panning = true;
+        }
+        if sizing {
+            self.sizing = true;
+        }
+        let held = Inflight {
+            seq,
+            file_gen,
+            width,
+            height,
+        };
+        self.inflight = Some(held);
+        self.deferred = Some(held);
+        true
+    }
+
     fn invalidate_inflight(&mut self) -> Vec<SvgZoomEffect> {
         // Take both. `||` would skip the deferred bitmap when a render is
         // still marked in flight, and a drag-end could swap that stale raster.
@@ -1094,5 +1136,104 @@ mod tests {
             snap: Some(picture),
         });
         assert_eq!(renders(&started).len(), 1);
+    }
+
+    #[test]
+    fn fit_and_actual_size_request_a_raster_after_they_settle() {
+        // The stored bitmap is the zoomed size. Fit wants the body again.
+        let sharp = frame(800, 600, 800, 600, 1_000, 750, 96);
+        let fitted = snap(sharp, ImageView::fit(), 2, SVG_MAX_PIXELS);
+        let mut session = SvgZoomSession::default();
+        session.handle(SvgZoomEvent::ViewChanged {
+            now: 0,
+            snap: fitted,
+        });
+        let started = session.handle(SvgZoomEvent::Tick {
+            now: SVG_ZOOM_SETTLE_MS as u32,
+            snap: Some(fitted),
+        });
+        assert_eq!(renders(&started), vec![(1, 800, 600)]);
+
+        let actual_frame = frame(200, 200, 400, 400, 200, 200, 192);
+        let actual =
+            apply_image_command(ImageView::fit(), actual_frame, ImageCommand::Actual, None);
+        let picture = snap(actual_frame, actual, 2, SVG_MAX_PIXELS);
+        let mut session = SvgZoomSession::default();
+        session.handle(SvgZoomEvent::ViewChanged {
+            now: 0,
+            snap: picture,
+        });
+        let started = session.handle(SvgZoomEvent::Tick {
+            now: SVG_ZOOM_SETTLE_MS as u32,
+            snap: Some(picture),
+        });
+        assert_eq!(renders(&started), vec![(1, 800, 800)]);
+    }
+
+    #[test]
+    fn a_settled_zoom_already_at_the_cap_does_not_render() {
+        let huge = frame(4_000, 4_000, 4_000, 4_000, 100, 100, 96);
+        let view = zoom_in(ImageView::fit(), huge, 64);
+        let SvgZoomPlan::Render { width, height } =
+            svg_zoom_plan(ImageFormat::Svg, huge, view, SVG_MAX_PIXELS)
+        else {
+            panic!("the first zoom past the cap still renders once");
+        };
+        let already = frame(4_000, 4_000, 4_000, 4_000, width, height, 96);
+        let picture = snap(already, view, 1, SVG_MAX_PIXELS);
+        let mut session = SvgZoomSession::default();
+        let effects = session.handle(SvgZoomEvent::ViewChanged {
+            now: 0,
+            snap: picture,
+        });
+        assert!(renders(&effects).is_empty());
+        assert!(effects.contains(&SvgZoomEffect::DisarmTimer));
+        let later = session.handle(SvgZoomEvent::Tick {
+            now: 10_000,
+            snap: Some(picture),
+        });
+        assert!(renders(&later).is_empty(), "{later:?}");
+    }
+
+    #[test]
+    fn postpone_swap_shows_the_bitmap_when_the_drag_ends() {
+        let base = frame(800, 600, 800, 600, 800, 600, 96);
+        let view = zoom_in(ImageView::fit(), base, 1);
+        let picture = snap(base, view, 9, SVG_MAX_PIXELS);
+        let mut session = SvgZoomSession::default();
+        session.handle(SvgZoomEvent::ViewChanged {
+            now: 0,
+            snap: picture,
+        });
+        let started = session.handle(SvgZoomEvent::Tick {
+            now: SVG_ZOOM_SETTLE_MS as u32,
+            snap: Some(picture),
+        });
+        let (seq, width, height) = renders(&started)[0];
+        let settled = session.handle(SvgZoomEvent::Finished {
+            seq,
+            file_gen: 9,
+            width,
+            height,
+            ok: true,
+        });
+        assert!(swapped(&settled));
+        assert!(
+            !session.postpone_swap(seq, 9, width, height, false, false),
+            "an idle window shows the bitmap immediately"
+        );
+        assert!(session.postpone_swap(seq, 9, width, height, true, false));
+        assert!(!session.postpone_swap(seq + 1, 9, width, height, true, false));
+        let during = session.handle(SvgZoomEvent::Tick {
+            now: 5_000,
+            snap: Some(picture),
+        });
+        assert!(!swapped(&during));
+        let ended = session.handle(SvgZoomEvent::PanEnded {
+            now: 5_000,
+            snap: Some(picture),
+        });
+        assert!(swapped(&ended));
+        assert!(!session.panning);
     }
 }

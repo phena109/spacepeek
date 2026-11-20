@@ -43,6 +43,7 @@ mod win {
     use std::sync::{mpsc, Arc, OnceLock};
 
     use spacepeek::pdf_win::render_pdf_page;
+    use spacepeek::render_svg_at_size;
     use spacepeek::{
         accept_shell_icon_result, apply_image_command, center_anchored_size, choose_selected,
         chrome_for_error, chrome_for_text, classify_shell_surface, classify_typeahead_vk,
@@ -60,23 +61,20 @@ mod win {
         should_keep_shell_icon_pixels, should_reload_after_pointer,
         should_reload_after_shell_event, should_request_shell_icon, should_show_first_run_balloon,
         small_icon_px, step, svg_sharp_max_pixels, svg_target_from_opening, tick_elapsed_ms,
-        typeahead_for_decision,
-        typeahead_window_ms, unpack_screen_point, wheel_scroll_dy, wheel_zoom_command, CancelToken,
-        ChromeLayout, Command, DecodedImage, DesktopSelection, DoubleClickAction, Effect, Event,
-        Generation, HitZone, HookContext, HookDecision, HookKey, IconSpawn, ImageCommand,
-        ImageFormat, ImageFrame, ImageView, KeyPhase, Modifiers, NavKey, PdfError, PdfLimits,
-        PdfTarget,
-        Presented, Preview, PreviewError, PreviewLimits, PreviewState, PxRect, PxSize, QuickInfo,
-        RepeatFilter, ScrollHold, ScrollOp, SelectionTarget, SessionPhase, ShellIconPixels,
-        ShellSurface, ShowGate, ShowOutcome, SizeGrip, SizeMemory, SvgLimits, SvgTarget,
-        SvgZoomEffect, SvgZoomEvent, SvgZoomSession, SvgZoomSnap, TrackedKey,
-        Typeahead, TypeaheadKey, WindowKind, ZoomHold, ZoomKey, ZoomOp, BALLOON_BODY,
-        BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET, CLASS_PROGMAN, CLASS_WORKERW,
-        DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY, FIRST_RUN_VALUE_NAME,
-        ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS, SHELL_ICON_WORKER_CAP,
-        SVG_MAX_FILE_BYTES, VERSION,
+        typeahead_for_decision, typeahead_window_ms, unpack_screen_point, wheel_scroll_dy,
+        wheel_zoom_command, CancelToken, ChromeLayout, Command, DecodedImage, DesktopSelection,
+        DoubleClickAction, Effect, Event, Generation, HitZone, HookContext, HookDecision, HookKey,
+        IconSpawn, ImageCommand, ImageFormat, ImageFrame, ImageView, KeyPhase, Modifiers, NavKey,
+        PdfError, PdfLimits, PdfTarget, Presented, Preview, PreviewError, PreviewLimits,
+        PreviewState, PxRect, PxSize, QuickInfo, RepeatFilter, ScrollHold, ScrollOp,
+        SelectionTarget, SessionPhase, ShellIconPixels, ShellSurface, ShowGate, ShowOutcome,
+        SizeGrip, SizeMemory, SvgLimits, SvgTarget, SvgZoomEffect, SvgZoomEvent, SvgZoomSession,
+        SvgZoomSnap, TrackedKey, Typeahead, TypeaheadKey, WindowKind, ZoomHold, ZoomKey, ZoomOp,
+        BALLOON_BODY, BALLOON_TIMEOUT_MS, BALLOON_TITLE, CLASS_CABINET, CLASS_PROGMAN,
+        CLASS_WORKERW, DESKTOP_SELECTION_TIMEOUT_MS, FIRST_RUN_SHOWN, FIRST_RUN_SUBKEY,
+        FIRST_RUN_VALUE_NAME, ICON_RESOURCE_ID, NAV_RELOAD_DELAY_MS, SHELL_ICON_TIMEOUT_MS,
+        SHELL_ICON_WORKER_CAP, SVG_MAX_FILE_BYTES, VERSION,
     };
-    use spacepeek::render_svg_at_size;
     use windows::core::{w, Interface, PCWSTR, VARIANT};
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, SetLastError, COLORREF, ERROR_ALREADY_EXISTS, ERROR_SUCCESS,
@@ -2450,12 +2448,7 @@ mod win {
         // must see this value, not the previous one.
         SVG_ZOOM_WANTED.store(seq, Ordering::Release);
         if !send_svg_zoom(job) {
-            let _ = SVG_ZOOM_WANTED.compare_exchange(
-                seq,
-                0,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
+            let _ = SVG_ZOOM_WANTED.compare_exchange(seq, 0, Ordering::AcqRel, Ordering::Acquire);
             finish_svg_zoom_on_ui(seq, file_gen, width, height, None);
         }
     }
@@ -2468,10 +2461,11 @@ mod win {
         if pixels > svg_sharp_max_pixels() {
             return None;
         }
+        // Pan and border-drag are not checked here. The session only asks
+        // while idle, and a bitmap that finishes during a later gesture is
+        // held until that gesture ends. Refusing the job would report a
+        // failed raster and the same target would not be requested again.
         with_app(|app| {
-            if app.pan_drag.tracking || app.size_drag.is_some() {
-                return None;
-            }
             let PreviewState::Showing { gen, path, .. } = &app.state else {
                 return None;
             };
@@ -2599,14 +2593,8 @@ mod win {
             height: job.height,
             image,
         }));
-        let posted = unsafe {
-            PostMessageW(
-                hwnd,
-                WM_SPACEPEEK_SVG_ZOOM,
-                WPARAM(0),
-                LPARAM(raw as isize),
-            )
-        };
+        let posted =
+            unsafe { PostMessageW(hwnd, WM_SPACEPEEK_SVG_ZOOM, WPARAM(0), LPARAM(raw as isize)) };
         if posted.is_err() {
             drop(unsafe { Box::from_raw(raw) });
         }
@@ -2674,7 +2662,7 @@ mod win {
                         None => take_held_svg(seq, file_gen, width, height),
                     };
                     if let Some(image) = image {
-                        install_sharp_svg(file_gen, width, height, image);
+                        present_or_postpone_sharp(seq, file_gen, width, height, image);
                     }
                 }
                 SvgZoomEffect::HoldBitmap {
@@ -2692,12 +2680,51 @@ mod win {
                         drop_svg_bitmap(image);
                     }
                 }
-                SvgZoomEffect::DiscardHeld => discard_held_svg(),
+                SvgZoomEffect::DiscardHeld => {
+                    // Superseded, cancelled, or the file changed. The worker
+                    // may still be inside resvg; this is what makes it drop
+                    // the bitmap instead of posting. A `StartRender` later in
+                    // this same batch publishes the new sequence after.
+                    SVG_ZOOM_WANTED.store(0, Ordering::Release);
+                    discard_held_svg();
+                }
             }
         }
         if let Some(image) = incoming {
             drop_svg_bitmap(image);
         }
+    }
+
+    /// Show `image`, or keep it until the pan or border drag ends.
+    ///
+    /// The session emits [`SvgZoomEffect::SwapBitmap`] only while it believes
+    /// the window is idle. A drag flag that landed first must not drop the
+    /// pixels: that is the bitmap we will show when the gesture ends.
+    fn present_or_postpone_sharp(
+        seq: u64,
+        file_gen: u64,
+        width: u32,
+        height: u32,
+        image: DecodedImage,
+    ) -> bool {
+        if image.width != width || image.height != height || !sharp_bgra_ok(&image) {
+            drop_svg_bitmap(image);
+            return false;
+        }
+        let (panning, sizing) = with_app(|app| (app.pan_drag.tracking, app.size_drag.is_some()));
+        if panning || sizing {
+            let accepted = with_app_mut(|app| {
+                app.svg_zoom
+                    .postpone_swap(seq, file_gen, width, height, panning, sizing)
+            });
+            if accepted {
+                hold_sharp_svg(seq, file_gen, width, height, image);
+                return true;
+            }
+            drop_svg_bitmap(image);
+            return false;
+        }
+        install_sharp_svg(file_gen, width, height, image)
     }
 
     fn hold_sharp_svg(seq: u64, file_gen: u64, width: u32, height: u32, image: DecodedImage) {
@@ -2706,8 +2733,11 @@ mod win {
             return;
         }
         let previous = with_app_mut(|app| {
-            app.svg_zoom_held
-                .replace(HeldSharpSvg { seq, file_gen, image })
+            app.svg_zoom_held.replace(HeldSharpSvg {
+                seq,
+                file_gen,
+                image,
+            })
         });
         if let Some(previous) = previous {
             drop_svg_bitmap(previous.image);
@@ -2745,9 +2775,6 @@ mod win {
             return false;
         }
         let swapped = with_app_mut(|app| {
-            if app.pan_drag.tracking {
-                return Err(image);
-            }
             let showing = match &app.state {
                 PreviewState::Showing { gen, .. } => gen.value,
                 _ => return Err(image),
@@ -2848,8 +2875,7 @@ mod win {
         match svg_zoom_snap() {
             Some(snap) => {
                 let effects = with_app_mut(|app| {
-                    app.svg_zoom
-                        .handle(SvgZoomEvent::ViewChanged { now, snap })
+                    app.svg_zoom.handle(SvgZoomEvent::ViewChanged { now, snap })
                 });
                 apply_svg_zoom_effects(effects, None);
             }
@@ -2883,8 +2909,7 @@ mod win {
     fn note_svg_pan_ended() {
         let now = unsafe { GetTickCount() };
         let snap = svg_zoom_snap();
-        let effects =
-            with_app_mut(|app| app.svg_zoom.handle(SvgZoomEvent::PanEnded { now, snap }));
+        let effects = with_app_mut(|app| app.svg_zoom.handle(SvgZoomEvent::PanEnded { now, snap }));
         apply_svg_zoom_effects(effects, None);
     }
 
@@ -4976,6 +5001,12 @@ mod win {
         };
         if with_app(|app| app.size_drag.is_none()) {
             note_size_anchor(hwnd);
+            // A sizing loop that missed `WM_ENTERSIZEMOVE` still has to hold a
+            // sharp SVG until `WM_EXITSIZEMOVE`. The session flag is what
+            // stops a settle timer from swapping mid-drag.
+            if with_app(|app| app.size_drag.is_some()) {
+                note_svg_size_drag_started();
+            }
         }
         let Some(anchor) = with_app(|app| app.size_drag.map(|drag| drag.anchor)) else {
             return false;
