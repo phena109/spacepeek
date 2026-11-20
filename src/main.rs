@@ -335,6 +335,11 @@ mod win {
         font_dpi: u32,
         /// Last user-chosen outer size, in logical pixels. Empty until a resize.
         sizes: SizeMemory,
+        /// This HWND was created at the image size for a PDF message. Content
+        /// updates keep those pixels, including an in-use, missing, or
+        /// access-denied error that is no longer a PDF outcome. A drag still
+        /// compares against the image default so 760×520 is not stored.
+        pdf_image_opening: bool,
         /// Outer rect at the start of a size or move loop. Work-area limits are
         /// filled on the first `WM_SIZING`, so a header drag does not query them.
         size_drag: Option<SizeDrag>,
@@ -541,6 +546,7 @@ mod win {
             detail_font: HFONT::default(),
             font_dpi: 0,
             sizes: SizeMemory::new(),
+            pdf_image_opening: false,
             size_drag: None,
             presented: None,
             space_busy: false,
@@ -1793,6 +1799,7 @@ mod win {
                         app.preview_hwnd = HWND::default();
                         app.edit_hwnd = HWND::default();
                         app.presented = None;
+                        app.pdf_image_opening = false;
                         app.close_hovered = false;
                         app.shown_path.clear();
                         app.image_view = reset_for_new_image(app.image_view);
@@ -3121,15 +3128,19 @@ mod win {
         let title = presented.header().name.clone();
 
         if existing.0.is_null() {
+            let pdf_image_opening = with_app(|app| pdf_message(&app.state));
             let Some(hwnd) = create_preview_window(anchor, instance, dpi, &presented) else {
                 return false;
             };
             // Publish before the edit is created so parent messages, including
-            // a size from the child, hit `preview_proc`.
+            // a size from the child, hit `preview_proc`. Latch the PDF image
+            // opening here: a later IO error reuses this HWND and must not
+            // look like a message-sized choice.
             with_app_mut(|app| {
                 app.preview_hwnd = hwnd;
                 app.edit_hwnd = HWND::default();
                 app.presented = Some(paint_presented(&presented));
+                app.pdf_image_opening = pdf_image_opening;
                 app.image_view = reset_for_new_image(app.image_view);
                 app.pan_drag = PanDrag::idle();
                 app.suppress_dblclk = false;
@@ -3145,6 +3156,7 @@ mod win {
                         app.preview_hwnd = HWND::default();
                         app.edit_hwnd = HWND::default();
                         app.presented = None;
+                        app.pdf_image_opening = false;
                         app.image_view = reset_for_new_image(app.image_view);
                         app.suppress_dblclk = false;
                         publish_preview_hwnd(HWND::default());
@@ -3258,23 +3270,25 @@ mod win {
         }
     }
 
-    /// PDF placeholder and PDF failures open at the image size, so the page
-    /// can replace the icon without a size jump. A remembered size is already
-    /// shared. Other files keep the kind they present.
-    fn opening_window_kind(state: &PreviewState, presented: WindowKind) -> WindowKind {
-        let pdf_message = match state {
+    /// True while the current outcome is a PDF message (placeholder or a
+    /// PDF failure). An IO open failure is not one: it uses the shared
+    /// in-use, missing, or access-denied sentence.
+    fn pdf_message(state: &PreviewState) -> bool {
+        match state {
             PreviewState::Failed { error, .. } => error.is_pdf(),
             PreviewState::PendingShow {
                 outcome: ShowOutcome::Failed(error),
                 ..
             } => error.is_pdf(),
             _ => false,
-        };
-        if pdf_message {
-            WindowKind::Image
-        } else {
-            presented
         }
+    }
+
+    /// PDF placeholder and PDF failures open at the image size, so the page
+    /// can replace the icon without a size jump. A remembered size is already
+    /// shared. Other files keep the kind they present.
+    fn opening_window_kind(state: &PreviewState, presented: WindowKind) -> WindowKind {
+        spacepeek::chrome::remember_compare_kind(presented, pdf_message(state), false)
     }
 
     fn create_preview_window(
@@ -3627,6 +3641,7 @@ mod win {
             app.preview_hwnd = HWND::default();
             app.edit_hwnd = HWND::default();
             app.presented = None;
+            app.pdf_image_opening = false;
             app.close_hovered = false;
             app.shown_path.clear();
             app.image_view = reset_for_new_image(app.image_view);
@@ -4415,10 +4430,16 @@ mod win {
                 .as_ref()
                 .map(Presented::kind)
                 .unwrap_or(WindowKind::Content);
-            // A PDF message is created at the image size. Compare against
-            // that opening kind so a header drag does not store 760×520 as
-            // the shared size for later empty and unsupported windows.
-            let opened_as = opening_window_kind(&app.state, presented_kind);
+            // `pdf_image_opening` is the kind this HWND was created with. An
+            // in-use, missing, or access-denied result replaces the PDF
+            // placeholder in place, so the live error is no longer a PDF
+            // message. Comparing against that presentation would store
+            // 760×520 for later empty and unsupported windows.
+            let opened_as = spacepeek::chrome::remember_compare_kind(
+                presented_kind,
+                pdf_message(&app.state),
+                app.pdf_image_opening,
+            );
             let clamped = spacepeek::chrome::clamp_logical_size(
                 spacepeek::chrome::physical_to_logical(width, height, dpi),
             );

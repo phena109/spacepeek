@@ -335,6 +335,27 @@ impl SizeMemory {
     }
 }
 
+/// Kind to pass to [`should_remember_window_size`] for the current HWND.
+///
+/// A PDF placeholder is presented as a message and created at the image
+/// size. `pdf_image_opening` is latched at that create and stays set when
+/// the same window later shows an in-use, missing, or access-denied IO
+/// error: that error is not a PDF outcome, and the window is not recreated.
+/// Recomputing from the IO presentation would treat 760×520 as a choice.
+/// A live PDF message (`pdf_message`) still opens as an image when this
+/// HWND was created for something else.
+pub fn remember_compare_kind(
+    presented: WindowKind,
+    pdf_message: bool,
+    pdf_image_opening: bool,
+) -> WindowKind {
+    if pdf_image_opening || pdf_message {
+        WindowKind::Image
+    } else {
+        presented
+    }
+}
+
 /// Whether a finished move or resize should become the shared chosen size.
 ///
 /// `opened_as` is the kind used to create the window. A PDF message is
@@ -966,6 +987,42 @@ mod tests {
             custom,
             WindowKind::Content
         ));
+    }
+
+    #[test]
+    fn an_io_failure_keeps_the_pdf_opening_size_unremembered() {
+        let image = default_logical_size(WindowKind::Image);
+        let message = default_logical_size(WindowKind::Message);
+
+        // Placeholder: presented as a message, created at the image size.
+        let kind = remember_compare_kind(WindowKind::Message, true, true);
+        assert_eq!(kind, WindowKind::Image);
+        assert!(!should_remember_window_size(None, image, kind));
+
+        // The worker replaced the placeholder with a sharing, missing, or
+        // access-denied error. That error is not a PDF outcome, and this
+        // HWND was not recreated. The latch still compares against 760×520.
+        let kind = remember_compare_kind(WindowKind::Message, false, true);
+        assert_eq!(kind, WindowKind::Image);
+        assert!(!should_remember_window_size(None, image, kind));
+
+        // Dropping the latch is the bug: the IO message would store 760×520
+        // and later empty or unsupported windows would open at that size.
+        let kind = remember_compare_kind(WindowKind::Message, false, false);
+        assert_eq!(kind, WindowKind::Message);
+        assert!(should_remember_window_size(None, image, kind));
+
+        // A real message window is unchanged, and a message window reused
+        // for an image can still record the smaller size.
+        let kind = remember_compare_kind(WindowKind::Message, false, false);
+        assert!(!should_remember_window_size(None, message, kind));
+        let kind = remember_compare_kind(WindowKind::Image, false, false);
+        assert!(should_remember_window_size(None, message, kind));
+
+        // A resize of the PDF window, including down to the message default,
+        // is still a choice.
+        let kind = remember_compare_kind(WindowKind::Message, false, true);
+        assert!(should_remember_window_size(None, message, kind));
     }
 
     #[test]
