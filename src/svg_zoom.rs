@@ -17,7 +17,9 @@
 //!
 //! Past [`SvgLimits::max_pixels`] (32 million) the target is scaled down and
 //! no larger buffer is requested. Further zoom keeps scaling that capped
-//! bitmap.
+//! bitmap. A bitmap that finishes during a pan or a border drag is held and
+//! shown when that gesture ends. Esc, a new file, or a new target drops both
+//! the in-flight request and any held bitmap.
 
 use crate::geometry::effective_dpi;
 use crate::image_preview::ImageFormat;
