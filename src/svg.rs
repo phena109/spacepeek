@@ -3,7 +3,9 @@
 //! Detection, caps, parse, and render live here so they run on the loader
 //! thread and are tested on Linux. The Windows preview shows the resulting
 //! [`DecodedImage`] in the existing image view: fit, zoom, pan, and
-//! double-click-to-open are unchanged.
+//! double-click-to-open use the same transforms as a PNG. A settled zoom can
+//! rasterise again at an explicit pixel size via [`render_svg_at_size`]; the
+//! decision lives in [`crate::svg_zoom`] and does not run on the UI thread.
 //!
 //! Security (enforced in [`svg_options`]):
 //! - `resources_dir` is `None`, so relative paths do not resolve against a
@@ -765,6 +767,40 @@ fn rasterize_tree(tree: &Tree, limits: &SvgLimits) -> Result<DecodedImage, SvgEr
     })
 }
 
+/// Rasterise `tree` into an explicit pixmap. The pixel cap is checked again
+/// so a caller cannot allocate past [`SvgLimits::max_pixels`].
+fn rasterize_tree_at(
+    tree: &Tree,
+    limits: &SvgLimits,
+    render_width: u32,
+    render_height: u32,
+) -> Result<DecodedImage, SvgError> {
+    if render_width == 0 || render_height == 0 {
+        return Err(SvgError::InvalidSize);
+    }
+    let pixels = u64::from(render_width).saturating_mul(u64::from(render_height));
+    if pixels > limits.max_pixels {
+        return Err(SvgError::InvalidSize);
+    }
+    let size = tree.size();
+    let out = svg_output_size(size.width(), size.height(), limits)?;
+    let mut pixmap = Pixmap::new(render_width, render_height).ok_or(SvgError::InvalidSize)?;
+    pixmap.fill(Color::WHITE);
+    let sx = render_width as f32 / size.width();
+    let sy = render_height as f32 / size.height();
+    let transform = Transform::from_scale(sx, sy);
+    resvg::render(tree, transform, &mut pixmap.as_mut());
+    let bgra = pixmap_to_bgra_on_white(&pixmap);
+    Ok(DecodedImage {
+        width: render_width,
+        height: render_height,
+        source_width: out.source_width,
+        source_height: out.source_height,
+        format: ImageFormat::Svg,
+        bgra,
+    })
+}
+
 /// Premultiplied RGBA (tiny-skia) onto white, written B, G, R, 255.
 fn pixmap_to_bgra_on_white(pixmap: &Pixmap) -> Vec<u8> {
     let src = pixmap.data();
@@ -790,15 +826,53 @@ fn pixmap_to_bgra_on_white(pixmap: &Pixmap) -> Vec<u8> {
     bgra
 }
 
-/// Parse and render `bytes`. `gzip` forces inflate even without a magic prefix.
+/// Parse and render `bytes` at the fit size in `limits.target`.
 ///
-/// Cancellation is checked before taking the render slot, after parse, and
-/// before rasterize. A stale result is discarded. One render that already
-/// started cannot be interrupted (resvg has no cancel hook).
+/// `gzip` forces inflate even without a magic prefix. Cancellation is checked
+/// before the render slot, after parse, and before and after rasterize. A
+/// stale result is discarded. One render that already started cannot be
+/// interrupted (resvg has no cancel hook).
 pub fn render_svg(
     bytes: &[u8],
     gzip: bool,
     limits: &SvgLimits,
+    cancel: &CancelToken,
+    gen: Generation,
+) -> Result<DecodedImage, SvgError> {
+    render_prepared(bytes, gzip, limits, None, cancel, gen)
+}
+
+/// Parse and render `bytes` at an explicit pixel size.
+///
+/// Used when a settled zoom wants a sharper bitmap than the fit raster.
+/// `width * height` above [`SvgLimits::max_pixels`] is refused before any
+/// pixmap is allocated. The intrinsic `source_width` / `source_height` stay
+/// the clamped SVG size, so the image view's zoom math does not jump. Fonts
+/// come from the same process-wide cache as [`render_svg`].
+pub fn render_svg_at_size(
+    bytes: &[u8],
+    gzip: bool,
+    limits: &SvgLimits,
+    width: u32,
+    height: u32,
+    cancel: &CancelToken,
+    gen: Generation,
+) -> Result<DecodedImage, SvgError> {
+    if width == 0 || height == 0 {
+        return Err(SvgError::InvalidSize);
+    }
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if pixels > limits.max_pixels {
+        return Err(SvgError::InvalidSize);
+    }
+    render_prepared(bytes, gzip, limits, Some((width, height)), cancel, gen)
+}
+
+fn render_prepared(
+    bytes: &[u8],
+    gzip: bool,
+    limits: &SvgLimits,
+    size: Option<(u32, u32)>,
     cancel: &CancelToken,
     gen: Generation,
 ) -> Result<DecodedImage, SvgError> {
@@ -817,7 +891,14 @@ pub fn render_svg(
         if parse_took > limits.parse_budget {
             return Err(SvgError::ParseTooSlow);
         }
-        rasterize_tree(&tree, limits)
+        let image = match size {
+            Some((width, height)) => rasterize_tree_at(&tree, limits, width, height)?,
+            None => rasterize_tree(&tree, limits)?,
+        };
+        if cancel.is_cancelled(&gen) {
+            return Err(SvgError::Cancelled);
+        }
+        Ok(image)
     })
 }
 
@@ -1722,6 +1803,98 @@ mod tests {
             xml.len()
         );
         assert!(!img.bgra.is_empty());
+    }
+
+    #[test]
+    fn render_at_size_scales_up_and_keeps_the_intrinsic_size() {
+        let (token, gen) = live();
+        let img = render_svg_at_size(
+            blue_rect().as_bytes(),
+            false,
+            &limits(),
+            32,
+            16,
+            &token,
+            gen,
+        )
+        .unwrap();
+        assert_eq!((img.width, img.height), (32, 16));
+        assert_eq!((img.source_width, img.source_height), (8, 8));
+        assert_eq!(img.bgra.len(), 32 * 16 * 4);
+        let px = pixel(&img, 8, 8);
+        assert!(px[0] > 200, "blue {}", px[0]);
+        assert_eq!(px[3], 255);
+    }
+
+    #[test]
+    fn render_at_size_refuses_a_pixmap_past_the_pixel_cap() {
+        let mut limits = limits();
+        limits.max_pixels = 100;
+        let (token, gen) = live();
+        let err = render_svg_at_size(blue_rect().as_bytes(), false, &limits, 50, 50, &token, gen)
+            .unwrap_err();
+        assert_eq!(err, SvgError::InvalidSize);
+        let (token, gen) = live();
+        let err = render_svg_at_size(
+            blue_rect().as_bytes(),
+            false,
+            &SvgLimits::default(),
+            0,
+            8,
+            &token,
+            gen,
+        )
+        .unwrap_err();
+        assert_eq!(err, SvgError::InvalidSize);
+        // Exactly at the cap is allowed. One pixel over is not.
+        let (token, gen) = live();
+        let img = render_svg_at_size(blue_rect().as_bytes(), false, &limits, 10, 10, &token, gen)
+            .unwrap();
+        assert_eq!((img.width, img.height), (10, 10));
+        assert_eq!(
+            u64::from(img.width) * u64::from(img.height),
+            limits.max_pixels
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn svg_rerender_timing_medium_at_2x() {
+        let xml = sample_illustration_svg();
+        let mut limits = limits();
+        limits.target = SvgTarget {
+            width: 400,
+            height: 300,
+            dpi: 96,
+        };
+        let (token, gen) = live();
+        let first = render_svg(xml.as_bytes(), false, &limits, &token, gen).unwrap();
+        let (token, gen) = live();
+        let start = Instant::now();
+        let second = render_svg_at_size(
+            xml.as_bytes(),
+            false,
+            &limits,
+            first.width.saturating_mul(2),
+            first.height.saturating_mul(2),
+            &token,
+            gen,
+        )
+        .unwrap();
+        println!(
+            "svg re-render at 2x: {:?} (Linux, {}x{} -> {}x{}, medium illustration, {} source bytes)",
+            start.elapsed(),
+            first.width,
+            first.height,
+            second.width,
+            second.height,
+            xml.len()
+        );
+        assert_eq!(
+            (second.width, second.height),
+            (first.width * 2, first.height * 2)
+        );
+        assert!(!second.bgra.is_empty());
     }
 
     #[test]
