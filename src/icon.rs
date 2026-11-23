@@ -172,6 +172,27 @@ mod tests {
     }
 
     #[test]
+    fn icon_svgs_parse_and_keep_the_light_edge() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let full = std::fs::read_to_string(root.join("assets").join("spacepeek.svg"))
+            .expect("read assets/spacepeek.svg");
+        let docs = std::fs::read_to_string(root.join("docs").join("spacepeek.svg"))
+            .expect("read docs/spacepeek.svg");
+        let simple = std::fs::read_to_string(root.join("assets").join("spacepeek-simple.svg"))
+            .expect("read assets/spacepeek-simple.svg");
+        assert_eq!(full, docs);
+        assert!(full.contains(
+            "id=\"light-edge\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"34.167\""
+        ));
+        assert!(simple.contains(
+            "id=\"light-edge\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"69.925\""
+        ));
+        let opt = resvg::usvg::Options::default();
+        resvg::usvg::Tree::from_str(&full, &opt).expect("full icon svg parses");
+        resvg::usvg::Tree::from_str(&simple, &opt).expect("small icon svg parses");
+    }
+
+    #[test]
     fn truncated_directory_is_rejected_and_zero_means_256() {
         assert!(parse_icon_directory(&[]).is_none());
         assert!(parse_icon_directory(&[0, 0, 1, 0, 1, 0]).is_none());
